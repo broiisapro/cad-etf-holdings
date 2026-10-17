@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -20,18 +19,11 @@ AS_OF = date(2026, 11, 2)
 _DDL = (DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES)
 
 
-def _quoted(ddl: str) -> str:
-    # `check` is a reserved word in DuckDB, so `DDL_QA_EVENTS` needs it quoted
-    # (a defect in etfh/schema.py reported for its owner to fix); quoting is
-    # harmless once that lands because the column name is unchanged.
-    return re.sub(r"\bcheck\b", '"check"', ddl)
-
-
 def _connect(tmp_path: Path, *, tables: bool = True) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(tmp_path / "etfh.duckdb"))
     if tables:
         for ddl in _DDL:
-            con.execute(_quoted(ddl))
+            con.execute(ddl)
     return con
 
 
