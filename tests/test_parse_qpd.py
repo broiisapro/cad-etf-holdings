@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 
 from etfh.parse.qpd_pdf import QpdPdfError, QpdPdfParser, parse_qpd_date
+from etfh.schema import ParsedHoldings
 from tests._qpd_helpers import raw_file_for_pdf, write_qpd_pdf, write_raw_text_pdf
 
 SYNF_PDF = Path("tests/fixtures/raw_synthetic/synthetic/SYNF/2026-09-30/20261028T220000Z.pdf")
@@ -23,7 +24,9 @@ def _note(parsed_notes: list[str], prefix: str) -> str:
 
 def _parse(path: Path, **kwargs: str) -> object:
     raw = raw_file_for_pdf(path, **kwargs)  # type: ignore[arg-type]
-    return QpdPdfParser().parse(raw)
+    parsed = QpdPdfParser().parse(raw)
+    ParsedHoldings.validate(parsed.frame)
+    return parsed
 
 
 def test_synf_total_equals_stated_total() -> None:
