@@ -60,7 +60,7 @@ strict = true
 files = ["etfh"]
 
 [[tool.mypy.overrides]]
-module = ["yaml", "camelot", "pdfplumber"]
+module = ["yaml", "camelot", "pdfplumber", "openpyxl", "reportlab.lib.pagesizes", "reportlab.pdfgen"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -1,0 +1,30 @@
+Synthetic Aurora Equity Fund
+Fund Holdings as of,"November 2, 2026"
+Number of Holdings,25
+
+Ticker,Name,ISIN,Asset Class,Sector,Country,Currency,Exchange,Weight (%),Shares,Market Value
+BIR,Birchwood Timber Corp.,CA600001AA97,Equity,Energy,CA,CAD,XTSE,6.75,4927,675000.00
+MPR,Maplecrest Properties,CA600012AA60,Equity,Financials,CA,CAD,XTSE,6.61,12018,661000.00
+NWM,Northwind Materials Inc.,CA600000AA15,Equity,Materials,CA,CAD,XTSE,6.54,32700,654000.00
+MAPL,Maple Ridge Resources Inc.,,Equity,Energy,CA,CAD,XTSE,6.26,5048,626000.00
+JUN,Juniper Health Corp.,CA600009AA24,Equity,Communication Services,CA,CAD,XTSE,6.12,21103,612000.00
+IRO,Ironbridge Steel Inc.,CA600008AA41,Equity,Real Estate,CA,CAD,XTSE,5.71,7931,571000.00
+EVR,Everfield Agriculture Corp.,CA600004AA37,Equity,Consumer Staples,CA,CAD,XTSE,5.51,3380,551000.00
+PNV,Pineview Software Corp.,CA600015AA91,Equity,Utilities,CA,CAD,XTSE,5.18,5511,518000.00
+RVT,Riverton Rail Corp.,CA600017AA57,Equity,Health Care,CA,CAD,XTSE,5.16,4300,516000.00
+LKS,Lakeshore Foods Corp.,CA600011AA87,Equity,Energy,CA,CAD,XTSE,5.11,12167,511000.00
+DUN,Dunmore Mining Inc.,CA600003AA53,Equity,Industrials,CA,CAD,XTSE,4.83,3220,483000.00
+GLO,Glenora Utilities Inc.,CA600006AA84,Equity,Information Technology,CA,CAD,XTSE,4.71,7983,471000.00
+KES,Kestrel Aerospace Inc.,CA600010AA05,Equity,Materials,CA,CAD,XTSE,4.41,5188,441000.00
+NRG,Northgate Telecom Corp.,CA600013AA44,Equity,Industrials,CA,CAD,XTSE,4.16,6118,416000.00
+CDL,Cedarline Energy Corp.,CA600002AA70,Equity,Financials,CA,CAD,XTSE,3.26,9879,326000.00
+FXN,Foxglove Networks Inc.,,Equity,Communication Services,US,USD,XNYS,3.21,2892,321000.00
+OAK,Oakhurst Insurance Group,CA600014AA27,Equity,Consumer Staples,CA,CAD,XTSE,3.03,3741,303000.00
+QRS,Quarrystone Cement Inc.,CA600016AA74,Equity,Information Technology,CA,CAD,XTSE,2.44,2280,244000.00
+ELM,Elmsworth Capital Corp.,,Equity,Real Estate,US,USD,XNYS,2.19,2235,219000.00
+HRB,Harbourside Logistics Corp.,CA600007AA67,Equity,Health Care,CA,CAD,XTSE,1.94,1102,194000.00
+UPL,Uplands Chemicals Inc.,CA600020AA94,Equity,Materials,CA,CAD,XTSE,1.52,956,152000.00
+THB,Thornbury Retail Group,CA600019AA14,Equity,Communication Services,CA,CAD,XTSE,1.49,1021,149000.00
+STB,Stonebrook Bank,CA600018AA31,Equity,Real Estate,CA,CAD,XTSE,1.33,1000,133000.00
+FHV,Fairhaven Financial Group,CA600005AA02,Equity,Utilities,CA,CAD,XTSE,1.03,2239,103000.00
+CASH,Cash and Cash Equivalents,,Cash,,,CAD,,1.50,0,150000.00

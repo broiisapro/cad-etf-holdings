@@ -1,0 +1,14 @@
+{
+  "as_of_hint": "2026-10-30",
+  "bytes": 2441,
+  "content_type": "text/csv",
+  "etag": null,
+  "fetched_at": "2026-10-30T22:00:00+00:00",
+  "fund_ticker": "SYNA",
+  "http_status": 200,
+  "issuer": "synthetic",
+  "last_modified": null,
+  "sha256": "bdb88b45146479e2d49980b8a82d2552eabae5e2dcf7b7a4a2abd7aa975462aa",
+  "source_id": "syn_csv",
+  "url": "synthetic://fixtures/SYNA.csv"
+}

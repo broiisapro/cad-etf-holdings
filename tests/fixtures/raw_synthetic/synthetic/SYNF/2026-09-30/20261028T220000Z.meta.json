@@ -1,0 +1,14 @@
+{
+  "as_of_hint": "2026-09-30",
+  "bytes": 2553,
+  "content_type": "application/pdf",
+  "etag": null,
+  "fetched_at": "2026-10-28T22:00:00+00:00",
+  "fund_ticker": "SYNF",
+  "http_status": 200,
+  "issuer": "synthetic",
+  "last_modified": null,
+  "sha256": "4fd98ec5c18db0168e100338d0c7ca5f861d9d483005814d9a3dd7915bbecb86",
+  "source_id": "syn_pdf",
+  "url": "synthetic://fixtures/SYNF.pdf"
+}
