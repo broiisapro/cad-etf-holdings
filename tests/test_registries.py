@@ -147,6 +147,16 @@ def test_find_parser_returns_none_when_nothing_matches(
     assert find_parser(_raw(tmp_path), source_factory("syn_csv")) is None
 
 
+def test_find_parser_skips_parsers_that_do_not_declare_the_format(
+    install_modules: Any, source_factory: Any, tmp_path: Path
+) -> None:
+    install_modules(
+        "etfh.parse",
+        {"aa_first": _PARSER_BODY.format(tag="first", matches=True)},
+    )
+    assert find_parser(_raw(tmp_path, ext="txt"), source_factory("syn_csv")) is None
+
+
 def test_non_list_parsers_attribute_raises(install_modules: Any) -> None:
     install_modules("etfh.parse", {"bad": "PARSERS = 'not a list'\n"})
     with pytest.raises(TypeError, match="PARSERS must be a list"):

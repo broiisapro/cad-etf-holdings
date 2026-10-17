@@ -48,10 +48,15 @@ def all_parsers() -> list[Parser]:
 def find_parser(raw: RawFile, source: Source) -> Parser | None:
     """Return the first discovered parser that claims ``raw``, else ``None``.
 
+    A parser is only asked about files whose extension is one of the formats
+    it declares, then the first parser whose ``can_parse`` returns true wins.
     ``source`` is the registry entry the file was collected for; it is passed
     for context and future use (for example issuer-specific settings).
     """
+    extension = raw.ext.lower().lstrip(".")
     for parser in all_parsers():
+        if not any(extension == fmt.value for fmt in parser.formats):
+            continue
         if parser.can_parse(raw):
             return parser
     return None
