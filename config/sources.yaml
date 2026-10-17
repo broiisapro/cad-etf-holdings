@@ -1,0 +1,331 @@
+# Source registry for cad-etf-holdings.
+#
+# Every source carries a terms-of-use record. A source is collected only when
+# its decision is `allowed` or `allowed_with_conditions` AND `supported: true`;
+# anything else means "do not fetch". All real candidate sources start as
+# `pending_review` until a human records a decision with a reviewer and date.
+
+sources:
+  - id: ishares_ca_daily
+    issuer: ishares_ca
+    kind: daily_holdings
+    format: csv
+    url_patterns:
+      - "https://www.blackrock.com/ca/investors/en/products/<product_id>/<slug>/1464253357814.ajax?fileType=csv&fileName=<TICKER>_holdings&dataType=fund"
+    update_frequency: daily
+    supported: true
+    notes: "terms prohibit automated access without written permission"
+    terms:
+      url: "https://www.blackrock.com/ca/investors/en/terms-and-conditions"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: ishares_ca_qpd
+    issuer: ishares_ca
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://www.blackrock.com/ca/investors/en/literature/quarterly-portfolio-disclosure/qpd-<ticker>-en-ca.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://www.blackrock.com/ca/investors/en/terms-and-conditions"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: bmo_daily
+    issuer: bmo
+    kind: daily_holdings
+    format: xlsx
+    url_patterns:
+      - "https://df.bmogam.com/assets/static/reports/etf-funds-holdings/Holdings_Extract_en_US_<TICKER>_<YYYYMMDD>.xlsx"
+    update_frequency: daily
+    supported: true
+    notes: ""
+    terms:
+      url: "https://bmogam.com/ca-en/legal/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: bmo_qpd
+    issuer: bmo
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://bmogam.com/ca-en/investing-resources/legal-and-regulatory-documents/"
+    update_frequency: quarterly
+    supported: true
+    notes: "listing page; documents are hosted on bmo.bynder.com"
+    terms:
+      url: "https://bmogam.com/ca-en/legal/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: vanguard_ca_daily
+    issuer: vanguard_ca
+    kind: daily_holdings
+    format: xlsx
+    url_patterns:
+      - "https://www.vanguard.ca/en/product/etf/<TICKER>"
+    update_frequency: daily
+    supported: false
+    notes: "page is JavaScript-rendered, no static download link"
+    terms:
+      url: "https://www.vanguard.ca/en/website-terms-of-use"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: vanguard_ca_qpd
+    issuer: vanguard_ca
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://fund-docs.vanguard.com/qpd-<TICKER>-en.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://www.vanguard.ca/en/website-terms-of-use"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: globalx_ca_daily
+    issuer: globalx_ca
+    kind: daily_holdings
+    format: csv
+    url_patterns:
+      - "https://www.globalx.ca/product/<slug>"
+    update_frequency: daily
+    supported: false
+    notes: "only top 10 holdings shown; bot challenge"
+    terms:
+      url: "https://www.globalx.ca/terms-of-use"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: globalx_ca_qpd
+    issuer: globalx_ca
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://www.globalx.ca/wp-content/uploads/<YYYY>/<MM>/<filename>.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: "document links are read from product pages"
+    terms:
+      url: "https://www.globalx.ca/terms-of-use"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+      min_interval_seconds: 30
+
+  - id: purpose_daily
+    issuer: purpose
+    kind: daily_holdings
+    format: json
+    url_patterns:
+      - "https://www.purposeinvest.com/api/funds/<slug>"
+    update_frequency: daily
+    supported: true
+    notes: "robots disallows /documents/ and /download/ on www"
+    terms:
+      url: "https://www.purposeinvest.com/legal"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: purpose_qpd
+    issuer: purpose
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://documents.purposeinvest.com/Docs/PDF/quarterly_portfolio_disclosure/en/<Fund Name> Quarterly Portfolio Disclosure <YYYY-MM-DD>.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://www.purposeinvest.com/legal"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: evolve_daily
+    issuer: evolve
+    kind: daily_holdings
+    format: csv
+    url_patterns:
+      - "https://evolveetfs.com/wp-content/uploads/holdings/<TICKER>.csv"
+    update_frequency: daily
+    supported: true
+    notes: "no terms-of-use page found on 2026-10-16"
+    terms:
+      url: "https://evolveetfs.com/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+      min_interval_seconds: 10
+
+  - id: evolve_qpd
+    issuer: evolve
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://evolveetfs.com/wp-content/uploads/<YYYY>/<MM>/<filename>.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: "no terms-of-use page found on 2026-10-16; links read from product pages"
+    terms:
+      url: "https://evolveetfs.com/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+      min_interval_seconds: 10
+
+  - id: harvest_monthly
+    issuer: harvest
+    kind: daily_holdings
+    format: xlsx
+    url_patterns:
+      - "https://harvestportfolios.com/wp-content/uploads/monthly_perf/holdings/<TICKER>.xlsx"
+    update_frequency: monthly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://harvestportfolios.com/contact-us/legal-terms-conditions/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: harvest_qpd
+    issuer: harvest
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://harvestportfolios.com/wp-content/uploads/quarterly_disclosure/<YYYY>/Q<n>/<Fund_Name>_Quarterly_Disclosure.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://harvestportfolios.com/contact-us/legal-terms-conditions/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: hamilton_qpd
+    issuer: hamilton
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://hamiltonetfs.com/wp-content/uploads/<YYYY>/<MM>/<TICKER>_SOI_<YYYY>Q<n>.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://hamiltonetfs.com/legal/"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  - id: mackenzie_qpd
+    issuer: mackenzie
+    kind: quarterly_disclosure
+    format: pdf
+    url_patterns:
+      - "https://www.mackenzieinvestments.com/content/dam/mackenzie/en/qpds/qpd-q<n>-<ticker>-en.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: ""
+    terms:
+      url: "https://www.mackenzieinvestments.com/en/about/legal/legal-disclaimers"
+      reviewer: null
+      reviewed_on: null
+      decision: pending_review
+
+  # Synthetic sources used by tests and fixtures. No network requests are ever
+  # made for these; the URL scheme is synthetic://.
+  - id: syn_csv
+    issuer: synthetic
+    kind: synthetic
+    format: csv
+    url_patterns:
+      - "synthetic://fixtures/<TICKER>.csv"
+    update_frequency: daily
+    supported: true
+    notes: "generated by etfh.synthetic"
+    terms:
+      url: "synthetic://fixtures/syn_csv"
+      reviewer: "synthetic fixture"
+      reviewed_on: 2026-10-16
+      decision: allowed
+      redistribution_allowed: true
+
+  - id: syn_xlsx
+    issuer: synthetic
+    kind: synthetic
+    format: xlsx
+    url_patterns:
+      - "synthetic://fixtures/<TICKER>.xlsx"
+    update_frequency: daily
+    supported: true
+    notes: "generated by etfh.synthetic"
+    terms:
+      url: "synthetic://fixtures/syn_xlsx"
+      reviewer: "synthetic fixture"
+      reviewed_on: 2026-10-16
+      decision: allowed
+      redistribution_allowed: true
+
+  - id: syn_json
+    issuer: synthetic
+    kind: synthetic
+    format: json
+    url_patterns:
+      - "synthetic://fixtures/<TICKER>.json"
+    update_frequency: daily
+    supported: true
+    notes: "generated by etfh.synthetic"
+    terms:
+      url: "synthetic://fixtures/syn_json"
+      reviewer: "synthetic fixture"
+      reviewed_on: 2026-10-16
+      decision: allowed
+      redistribution_allowed: true
+
+  - id: syn_pdf
+    issuer: synthetic
+    kind: synthetic
+    format: pdf
+    url_patterns:
+      - "synthetic://fixtures/<TICKER>.pdf"
+    update_frequency: quarterly
+    supported: true
+    notes: "generated by etfh.synthetic"
+    terms:
+      url: "synthetic://fixtures/syn_pdf"
+      reviewer: "synthetic fixture"
+      reviewed_on: 2026-10-16
+      decision: allowed
+      redistribution_allowed: true
+
+  - id: syn_blocked
+    issuer: synthetic
+    kind: synthetic
+    format: csv
+    url_patterns:
+      - "synthetic://fixtures/blocked/<TICKER>.csv"
+    update_frequency: daily
+    supported: false
+    notes: "exists so the terms gate has a not_allowed case"
+    terms:
+      url: "synthetic://fixtures/syn_blocked"
+      reviewer: "synthetic fixture"
+      reviewed_on: 2026-10-16
+      decision: not_allowed
