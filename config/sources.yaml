@@ -2,8 +2,8 @@
 #
 # Every source carries a terms-of-use record. A source is collected only when
 # its decision is `allowed` or `allowed_with_conditions` AND `supported: true`;
-# anything else means "do not fetch". All real candidate sources start as
-# `pending_review` until a human records a decision with a reviewer and date.
+# anything else means "do not fetch". The decisions below were recorded by the
+# human reviewer on 2026-10-17 (D40).
 
 sources:
   - id: ishares_ca_daily
@@ -14,12 +14,12 @@ sources:
       - "https://www.blackrock.com/ca/investors/en/products/<product_id>/<slug>/1464253357814.ajax?fileType=csv&fileName=<TICKER>_holdings&dataType=fund"
     update_frequency: daily
     supported: true
-    notes: "terms prohibit automated access without written permission"
+    notes: "not selected: terms prohibit automated access without written permission"
     terms:
       url: "https://www.blackrock.com/ca/investors/en/terms-and-conditions"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: ishares_ca_qpd
     issuer: ishares_ca
@@ -29,12 +29,12 @@ sources:
       - "https://www.blackrock.com/ca/investors/en/literature/quarterly-portfolio-disclosure/qpd-<ticker>-en-ca.pdf"
     update_frequency: quarterly
     supported: true
-    notes: ""
+    notes: "not selected: terms prohibit automated access without written permission"
     terms:
       url: "https://www.blackrock.com/ca/investors/en/terms-and-conditions"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: bmo_daily
     issuer: bmo
@@ -47,9 +47,14 @@ sources:
     notes: ""
     terms:
       url: "https://bmogam.com/ca-en/legal/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - 'grey-area terms ("only as needed to evaluate whether to invest"); human accepted; stop if BMO objects'
 
   - id: bmo_qpd
     issuer: bmo
@@ -62,9 +67,14 @@ sources:
     notes: "listing page; documents are hosted on bmo.bynder.com"
     terms:
       url: "https://bmogam.com/ca-en/legal/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - 'grey-area terms ("only as needed to evaluate whether to invest"); human accepted; stop if BMO objects'
 
   - id: vanguard_ca_daily
     issuer: vanguard_ca
@@ -74,12 +84,12 @@ sources:
       - "https://www.vanguard.ca/en/product/etf/<TICKER>"
     update_frequency: daily
     supported: false
-    notes: "page is JavaScript-rendered, no static download link"
+    notes: "not selected: no usable daily file (JavaScript-rendered); personal-use licence"
     terms:
       url: "https://www.vanguard.ca/en/website-terms-of-use"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: vanguard_ca_qpd
     issuer: vanguard_ca
@@ -92,9 +102,14 @@ sources:
     notes: ""
     terms:
       url: "https://www.vanguard.ca/en/website-terms-of-use"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "personal, non-commercial research only"
 
   - id: globalx_ca_daily
     issuer: globalx_ca
@@ -104,12 +119,12 @@ sources:
       - "https://www.globalx.ca/product/<slug>"
     update_frequency: daily
     supported: false
-    notes: "only top 10 holdings shown; bot challenge"
+    notes: "not selected: only top-10 holdings shown; Cloudflare bot challenge"
     terms:
       url: "https://www.globalx.ca/terms-of-use"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: globalx_ca_qpd
     issuer: globalx_ca
@@ -122,9 +137,14 @@ sources:
     notes: "document links are read from product pages"
     terms:
       url: "https://www.globalx.ca/terms-of-use"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "minimum interval 30 s (Crawl-delay); links read from product pages"
       min_interval_seconds: 30
 
   - id: purpose_daily
@@ -138,9 +158,14 @@ sources:
     notes: "robots disallows /documents/ and /download/ on www"
     terms:
       url: "https://www.purposeinvest.com/legal"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "respect robots.txt: /documents/ and /download/ are disallowed on www"
 
   - id: purpose_qpd
     issuer: purpose
@@ -153,9 +178,13 @@ sources:
     notes: ""
     terms:
       url: "https://www.purposeinvest.com/legal"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
 
   - id: evolve_daily
     issuer: evolve
@@ -168,9 +197,14 @@ sources:
     notes: "no terms-of-use page found on 2026-10-16"
     terms:
       url: "https://evolveetfs.com/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "minimum interval 10 s (Crawl-delay)"
       min_interval_seconds: 10
 
   - id: evolve_qpd
@@ -184,9 +218,14 @@ sources:
     notes: "no terms-of-use page found on 2026-10-16; links read from product pages"
     terms:
       url: "https://evolveetfs.com/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "minimum interval 10 s (Crawl-delay)"
       min_interval_seconds: 10
 
   - id: harvest_monthly
@@ -197,12 +236,12 @@ sources:
       - "https://harvestportfolios.com/wp-content/uploads/monthly_perf/holdings/<TICKER>.xlsx"
     update_frequency: monthly
     supported: true
-    notes: ""
+    notes: "not selected: terms prohibit copying"
     terms:
       url: "https://harvestportfolios.com/contact-us/legal-terms-conditions/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: harvest_qpd
     issuer: harvest
@@ -212,12 +251,12 @@ sources:
       - "https://harvestportfolios.com/wp-content/uploads/quarterly_disclosure/<YYYY>/Q<n>/<Fund_Name>_Quarterly_Disclosure.pdf"
     update_frequency: quarterly
     supported: true
-    notes: ""
+    notes: "not selected: terms prohibit copying"
     terms:
       url: "https://harvestportfolios.com/contact-us/legal-terms-conditions/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: hamilton_qpd
     issuer: hamilton
@@ -227,12 +266,12 @@ sources:
       - "https://hamiltonetfs.com/wp-content/uploads/<YYYY>/<MM>/<TICKER>_SOI_<YYYY>Q<n>.pdf"
     update_frequency: quarterly
     supported: true
-    notes: ""
+    notes: "not selected: terms restrict copying/storing"
     terms:
       url: "https://hamiltonetfs.com/legal/"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   - id: mackenzie_qpd
     issuer: mackenzie
@@ -242,12 +281,12 @@ sources:
       - "https://www.mackenzieinvestments.com/content/dam/mackenzie/en/qpds/qpd-q<n>-<ticker>-en.pdf"
     update_frequency: quarterly
     supported: true
-    notes: ""
+    notes: "not selected: terms restrict copying/storing"
     terms:
       url: "https://www.mackenzieinvestments.com/en/about/legal/legal-disclaimers"
-      reviewer: null
-      reviewed_on: null
-      decision: pending_review
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-17
+      decision: not_allowed
 
   # Synthetic sources used by tests and fixtures. No network requests are ever
   # made for these; the URL scheme is synthetic://.

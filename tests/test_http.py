@@ -167,6 +167,48 @@ def test_retry_on_429_then_success(
     assert 2.0 in fake_clock.sleeps
 
 
+def test_retry_after_above_cap_aborts_without_sleeping(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    state = {"data_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        state["data_calls"] += 1
+        return httpx.Response(429, headers={"Retry-After": "121"})
+
+    source = source_factory()
+    client = _client(handler, fake_clock)
+    with pytest.raises(HTTPRetryError) as excinfo:
+        client.get("https://a.example.com/holdings.csv", source=source)
+    assert excinfo.value.status_code == 429
+    assert "Retry-After" in str(excinfo.value)
+    assert state["data_calls"] == 1
+    assert fake_clock.sleeps == [1.0]
+
+
+def test_retry_after_at_cap_is_honoured(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    state = {"data_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        state["data_calls"] += 1
+        if state["data_calls"] == 1:
+            return httpx.Response(503, headers={"Retry-After": "120"})
+        return httpx.Response(200, text="data")
+
+    source = source_factory()
+    client = _client(handler, fake_clock)
+    response = client.get("https://a.example.com/holdings.csv", source=source)
+    assert response.status_code == 200
+    assert state["data_calls"] == 2
+    assert 120.0 in fake_clock.sleeps
+
+
 def test_retry_on_timeout_then_success(
     fake_clock: FakeClock, source_factory: Callable[..., Source]
 ) -> None:

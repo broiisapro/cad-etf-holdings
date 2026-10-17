@@ -17,6 +17,7 @@ from etfh.registry import (
     Source,
     TermsNotAllowedError,
     TermsRecord,
+    funds_for_source,
     is_collectable,
     load_funds,
     load_sources,
@@ -26,6 +27,32 @@ from etfh.types import Decision, FileFormat, SourceKind
 from tests.conftest import FakeClock
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+
+ALLOWED_REAL_SOURCES = {
+    "purpose_daily",
+    "evolve_daily",
+    "bmo_daily",
+    "vanguard_ca_qpd",
+    "globalx_ca_qpd",
+    "purpose_qpd",
+    "evolve_qpd",
+    "bmo_qpd",
+}
+NOT_ALLOWED_REAL_SOURCES = {
+    "ishares_ca_daily",
+    "ishares_ca_qpd",
+    "vanguard_ca_daily",
+    "globalx_ca_daily",
+    "harvest_monthly",
+    "harvest_qpd",
+    "hamilton_qpd",
+    "mackenzie_qpd",
+}
+COMMON_CONDITIONS = [
+    "internal research use only",
+    "no redistribution of raw holdings",
+    "polite rate limit and identifiable User-Agent",
+]
 
 
 def _source_entry(**overrides: object) -> dict[str, object]:
@@ -53,16 +80,34 @@ def _write_sources(path: Path, entries: list[dict[str, object]]) -> Path:
     return path
 
 
+_FUND_COLUMNS = (
+    "ticker",
+    "issuer",
+    "name",
+    "asset_class",
+    "source_ids",
+    "exchange",
+    "params",
+)
+
+
+def _fund_row(**overrides: str) -> dict[str, str]:
+    row = {
+        "ticker": "AAA",
+        "issuer": "x",
+        "name": "X",
+        "asset_class": "equity",
+        "source_ids": "syn_csv",
+        "exchange": "XTSE",
+        "params": "",
+    }
+    row.update(overrides)
+    return row
+
+
 def _write_funds(path: Path, rows: list[dict[str, str]]) -> Path:
-    header = "ticker,issuer,name,asset_class,source_id,exchange\n"
-    body = "".join(
-        ",".join(
-            row[column]
-            for column in ("ticker", "issuer", "name", "asset_class", "source_id", "exchange")
-        )
-        + "\n"
-        for row in rows
-    )
+    header = ",".join(_FUND_COLUMNS) + "\n"
+    body = "".join(",".join(row[column] for column in _FUND_COLUMNS) + "\n" for row in rows)
     path.write_text(header + body, encoding="utf-8")
     return path
 
@@ -81,6 +126,10 @@ class TestTermsRecordValidation:
     def test_reviewed_decision_requires_reviewer_and_date(self) -> None:
         with pytest.raises(ValidationError, match="reviewer, reviewed_on"):
             TermsRecord(url="https://example.com/terms", decision=Decision.allowed)
+
+    def test_not_allowed_requires_reviewer_and_date(self) -> None:
+        with pytest.raises(ValidationError, match="reviewer, reviewed_on"):
+            TermsRecord(url="https://example.com/terms", decision=Decision.not_allowed)
 
     def test_pending_review_needs_no_review_fields(self) -> None:
         record = TermsRecord(decision=Decision.pending_review)
@@ -114,62 +163,135 @@ class TestLoadSources:
 class TestLoadFunds:
     def test_unknown_source_id_fails(self, tmp_path: Path) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
-        path = _write_funds(
-            tmp_path / "funds.csv",
-            [
-                {
-                    "ticker": "AAA",
-                    "issuer": "x",
-                    "name": "X",
-                    "asset_class": "equity",
-                    "source_id": "nope",
-                    "exchange": "XTSE",
-                }
-            ],
-        )
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(source_ids="nope")])
         with pytest.raises(ValueError, match="unknown source id"):
+            load_funds(path, sources)
+
+    def test_unknown_source_id_in_list_fails(self, tmp_path: Path) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(source_ids="syn_csv;nope")])
+        with pytest.raises(ValueError, match="unknown source id 'nope'"):
+            load_funds(path, sources)
+
+    def test_empty_source_list_fails(self, tmp_path: Path) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(source_ids="")])
+        with pytest.raises(ValueError, match="one or more"):
             load_funds(path, sources)
 
     def test_duplicate_ticker_fails(self, tmp_path: Path) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
-        row = {
-            "ticker": "AAA",
-            "issuer": "x",
-            "name": "X",
-            "asset_class": "equity",
-            "source_id": "syn_csv",
-            "exchange": "XTSE",
-        }
+        row = _fund_row()
         path = _write_funds(tmp_path / "funds.csv", [row, row])
         with pytest.raises(ValueError, match="duplicate fund ticker"):
             load_funds(path, sources)
 
     def test_bad_asset_class_fails(self, tmp_path: Path) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
-        row = {
-            "ticker": "AAA",
-            "issuer": "x",
-            "name": "X",
-            "asset_class": "crypto",
-            "source_id": "syn_csv",
-            "exchange": "XTSE",
-        }
-        path = _write_funds(tmp_path / "funds.csv", [row])
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(asset_class="crypto")])
         with pytest.raises(ValidationError):
             load_funds(path, sources)
 
+    def test_multi_source_and_params_parse(self, tmp_path: Path) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        path = _write_funds(
+            tmp_path / "funds.csv",
+            [
+                _fund_row(
+                    ticker="AAA",
+                    source_ids="syn_csv; syn_xlsx",
+                    params="mode=test; label=two words",
+                ),
+                _fund_row(ticker="BBB", source_ids="syn_json", params=""),
+            ],
+        )
+        funds = load_funds(path, sources)
+        assert funds[0].source_ids == ("syn_csv", "syn_xlsx")
+        assert funds[0].params == {"mode": "test", "label": "two words"}
+        assert funds[1].params == {}
+
+    def test_duplicate_source_id_in_list_fails(self, tmp_path: Path) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(source_ids="syn_csv;syn_csv")])
+        with pytest.raises(ValueError, match="duplicate"):
+            load_funds(path, sources)
+
+    def test_malformed_params_fail(self, tmp_path: Path) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(params="novalue")])
+        with pytest.raises(ValueError, match="key=value"):
+            load_funds(path, sources)
+
+    def test_duplicate_param_keys_fail(self, tmp_path: Path) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        path = _write_funds(tmp_path / "funds.csv", [_fund_row(params="a=1;a=2")])
+        with pytest.raises(ValueError, match="duplicate key"):
+            load_funds(path, sources)
+
+
+class TestFundsForSource:
+    def test_returns_funds_listing_the_source(self) -> None:
+        def fund(ticker: str, source_ids: tuple[str, ...]) -> Fund:
+            return Fund(
+                ticker=ticker,
+                issuer="x",
+                name=ticker,
+                asset_class="equity",
+                source_ids=source_ids,
+            )
+
+        funds = [
+            fund("AAA", ("syn_csv",)),
+            fund("BBB", ("syn_csv", "syn_xlsx")),
+            fund("CCC", ("syn_json",)),
+        ]
+        assert [item.ticker for item in funds_for_source(funds, "syn_csv")] == ["AAA", "BBB"]
+        assert [item.ticker for item in funds_for_source(funds, "syn_xlsx")] == ["BBB"]
+        assert funds_for_source(funds, "missing") == []
+
 
 class TestCommittedConfig:
-    def test_sources_load_and_candidates_are_pending_review(self) -> None:
+    def test_sources_load_with_recorded_decisions(self) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
         assert len(sources) == 21
-        for source_id, source in sources.items():
+        real = {
+            source_id: source
+            for source_id, source in sources.items()
+            if source.issuer != "synthetic"
+        }
+        assert set(real) == ALLOWED_REAL_SOURCES | NOT_ALLOWED_REAL_SOURCES
+        for source_id, source in real.items():
+            assert source.terms.reviewer == "Moksh Siruvani", source_id
+            assert source.terms.reviewed_on == date(2026, 10, 17), source_id
+            assert source.terms.url, source_id
+            if source_id in ALLOWED_REAL_SOURCES:
+                assert source.terms.decision is Decision.allowed_with_conditions, source_id
+                missing = [
+                    condition
+                    for condition in COMMON_CONDITIONS
+                    if condition not in source.terms.conditions
+                ]
+                assert missing == [], source_id
+                assert is_collectable(source), source_id
+            else:
+                assert source.terms.decision is Decision.not_allowed, source_id
+                assert source.terms.conditions == [], source_id
+                assert not is_collectable(source), source_id
+        assert sources["vanguard_ca_daily"].supported is False
+        assert sources["globalx_ca_daily"].supported is False
+
+    def test_every_not_allowed_real_source_is_refused(self) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        refused = 0
+        for source in sources.values():
             if source.issuer == "synthetic":
                 continue
-            assert source.terms.decision is Decision.pending_review, source_id
-            assert source.terms.reviewer is None, source_id
-            assert source.terms.reviewed_on is None, source_id
-            assert source.terms.url, source_id
+            if source.terms.decision is not Decision.not_allowed:
+                continue
+            refused += 1
+            with pytest.raises(TermsNotAllowedError):
+                require_collectable(source)
+        assert refused == len(NOT_ALLOWED_REAL_SOURCES)
 
     def test_synthetic_sources_are_gated(self) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
@@ -191,6 +313,8 @@ class TestCommittedConfig:
             "SYNX",
         ]
         assert all(fund.ticker.startswith("SYN") for fund in funds)
+        assert funds[0].source_ids == ("syn_csv",)
+        assert funds[0].params == {}
 
 
 class TestTermsGate:
@@ -274,6 +398,7 @@ def test_fund_default_exchange() -> None:
         issuer="x",
         name="X",
         asset_class="equity",
-        source_id="syn_csv",
+        source_ids=("syn_csv",),
     )
     assert fund.exchange == "XTSE"
+    assert fund.params == {}

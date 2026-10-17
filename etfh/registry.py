@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +17,7 @@ __all__ = [
     "Source",
     "TermsNotAllowedError",
     "TermsRecord",
+    "funds_for_source",
     "is_collectable",
     "load_funds",
     "load_sources",
@@ -90,8 +91,9 @@ class Fund(BaseModel):
     issuer: str
     name: str
     asset_class: AssetClass
-    source_id: str
+    source_ids: tuple[str, ...] = Field(min_length=1)
     exchange: str = "XTSE"
+    params: dict[str, str] = Field(default_factory=dict)
 
 
 class TermsNotAllowedError(PermissionError):
@@ -122,26 +124,71 @@ def load_sources(path: str | Path) -> dict[str, Source]:
     return sources
 
 
+def _parse_source_ids(text: str) -> tuple[str, ...]:
+    ids = tuple(part.strip() for part in text.split(";"))
+    if not ids or any(not source_id for source_id in ids):
+        raise ValueError("source_ids must be one or more ';'-separated source ids")
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"source_ids contains a duplicate: {text!r}")
+    return ids
+
+
+def _parse_params(text: str) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for part in text.split(";"):
+        entry = part.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(f"params entries must be key=value pairs: {entry!r}")
+        key, value = entry.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"params entry has an empty key: {entry!r}")
+        if key in params:
+            raise ValueError(f"params contains a duplicate key: {key!r}")
+        params[key] = value
+    return params
+
+
 def load_funds(path: str | Path, sources: Mapping[str, Source]) -> list[Fund]:
     """Load and validate ``funds.csv`` against the loaded sources."""
     funds: list[Fund] = []
     seen: set[str] = set()
     with Path(path).open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        required = {"ticker", "issuer", "name", "asset_class", "source_id", "exchange"}
+        required = {
+            "ticker",
+            "issuer",
+            "name",
+            "asset_class",
+            "source_ids",
+            "exchange",
+            "params",
+        }
         if reader.fieldnames is None or set(reader.fieldnames) != required:
             raise ValueError(f"{path}: expected columns {sorted(required)}")
         for row in reader:
-            fund = Fund.model_validate(row)
+            values = dict(row)
+            source_ids = _parse_source_ids(values.pop("source_ids", "") or "")
+            params = _parse_params(values.pop("params", "") or "")
+            fund = Fund.model_validate({**values, "source_ids": source_ids, "params": params})
             if fund.ticker in seen:
                 raise ValueError(f"{path}: duplicate fund ticker {fund.ticker!r}")
-            if fund.source_id not in sources:
+            unknown = [source_id for source_id in fund.source_ids if source_id not in sources]
+            if unknown:
                 raise ValueError(
-                    f"{path}: fund {fund.ticker!r} references unknown source id {fund.source_id!r}"
+                    f"{path}: fund {fund.ticker!r} references unknown source id {unknown[0]!r}"
                 )
             seen.add(fund.ticker)
             funds.append(fund)
     return funds
+
+
+def funds_for_source(funds: Sequence[Fund], source_id: str) -> list[Fund]:
+    """Return the funds that list ``source_id`` among their sources."""
+    return [fund for fund in funds if source_id in fund.source_ids]
 
 
 def is_collectable(source: Source) -> bool:
