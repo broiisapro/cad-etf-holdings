@@ -171,7 +171,7 @@ def load_funds(path: str | Path, sources: Mapping[str, Source]) -> list[Fund]:
             raise ValueError(f"{path}: expected columns {sorted(required)}")
         for row in reader:
             values = dict(row)
-            source_ids = _parse_source_ids(values.pop("source_ids", ""))
+            source_ids = _parse_source_ids(values.pop("source_ids", "") or "")
             params = _parse_params(values.pop("params", "") or "")
             fund = Fund.model_validate({**values, "source_ids": source_ids, "params": params})
             if fund.ticker in seen:
