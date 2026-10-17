@@ -8,6 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from etfh.parse import qpd_pdf
 from etfh.parse.qpd_pdf import QpdPdfError, QpdPdfParser, parse_qpd_date
 from etfh.schema import ParsedHoldings
 from tests._qpd_helpers import raw_file_for_pdf, write_qpd_pdf, write_raw_text_pdf
@@ -214,7 +215,7 @@ def test_missing_stated_total_raises(tmp_path: Path) -> None:
         _parse(path)
 
 
-def test_no_holdings_raises(tmp_path: Path) -> None:
+def test_no_holdings_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = write_raw_text_pdf(
         tmp_path / "empty.pdf",
         [
@@ -222,8 +223,29 @@ def test_no_holdings_raises(tmp_path: Path) -> None:
             "Total of the holdings listed above: 0.00% of net asset value",
         ],
     )
+    monkeypatch.setattr(qpd_pdf, "_camelot_rows", lambda _path: ([], False))
     with pytest.raises(QpdPdfError, match="no holdings table"):
         _parse(path)
+
+
+def test_camelot_fallback_is_used_when_words_find_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "fallback.pdf"
+    path.write_bytes(b"%PDF-1.4 fake")
+    text = (
+        "Summary of Investment Portfolio as at September 30, 2026\n"
+        "Total of the holdings listed above: 20.00% of net asset value"
+    )
+    monkeypatch.setattr(qpd_pdf, "_pdfplumber_rows", lambda _path, _rules: ([], text, False))
+    monkeypatch.setattr(
+        qpd_pdf,
+        "_camelot_rows",
+        lambda _path: ([qpd_pdf._Row(name="Fallback Corp.", weight=20.0, sector="Unknown")], False),
+    )
+    parsed = QpdPdfParser().parse(raw_file_for_pdf(path))
+    assert parsed.frame["security_name"].to_list() == ["Fallback Corp."]
+    assert float(parsed.frame["weight"][0]) == pytest.approx(0.20)
 
 
 def test_can_parse_only_pdfs(tmp_path: Path) -> None:

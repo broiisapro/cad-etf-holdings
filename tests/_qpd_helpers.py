@@ -245,3 +245,149 @@ def qpd_fund(
         asset_class=asset_class,
         source_ids=(source_id,),
     )
+
+
+def write_globalx_lookalike(path: Path) -> Path:
+    """Write a fictional Global X-style disclosure with several tables."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+
+    def amount_row(y: float, name: str, dollars: str | None, percent: str | None) -> None:
+        pdf.drawString(_LEFT, y, name)
+        if dollars is not None:
+            pdf.drawRightString(440, y, dollars)
+        if percent is not None:
+            pdf.drawRightString(_RIGHT, y, percent)
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Global X Fictional 60 Index Corporate Class ETF (GXF, GXF.U:TSX)")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 18, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 32, "As at March 31, 2026")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "Asset Mix")
+    pdf.drawString(_LEFT, _TOP - 76, "% of ETF's")
+    pdf.drawRightString(440, _TOP - 76, "Net Asset Value")
+    pdf.drawRightString(_RIGHT, _TOP - 76, "Net Asset Value")
+    pdf.setFont("Helvetica", 9)
+    amount_row(
+        _TOP - 92,
+        "Fictional Equity Exposure through Index Swaps",
+        "$ 4,736,760,236",
+        "99.89%",
+    )
+    amount_row(_TOP - 106, "Cash - Other", "3,057,087", "0.06%")
+    amount_row(_TOP - 120, "Other Assets less Liabilities", "2,067,217", "0.05%")
+    pdf.setFont("Helvetica-Bold", 9)
+    amount_row(_TOP - 136, "", "$ 4,741,884,540", "100.00%")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 166, "Top Holdings")
+    pdf.drawString(_LEFT, _TOP - 180, "% of ETF's")
+    pdf.drawRightString(440, _TOP - 180, "Net Asset Value")
+    pdf.drawRightString(_RIGHT, _TOP - 180, "Net Asset Value")
+    pdf.setFont("Helvetica", 9)
+    amount_row(
+        _TOP - 196,
+        "Fair Value of Index Swaps (notional value $2,153,681,434)(1)",
+        None,
+        "54.51%",
+    )
+    amount_row(_TOP - 210, "Cash held for Collateral", None, "45.38%")
+    amount_row(_TOP - 224, "Cash - Other", None, "0.06%")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(
+        _LEFT,
+        _TOP - 254,
+        "Top 25 Securities in the Underlying Index - Fictional 60 Index",
+    )
+    pdf.drawRightString(_RIGHT, _TOP - 254, "% Weighting in Underlying Index")
+    pdf.setFont("Helvetica", 9)
+    underlying = [
+        ("Northgate Bank", "8.45%"),
+        ("Maplecrest Properties", "5.86%"),
+        ("Pineview Software Corp.", "5.44%"),
+        ("Cedarline Energy Corp.", "4.42%"),
+    ]
+    for index, (name, weight) in enumerate(underlying, start=1):
+        amount_row(_TOP - 254 - index * 14, name, None, weight)
+
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(
+        _LEFT,
+        _TOP - 340,
+        "(1) The fair value of index swap(s) represents the amount receivable "
+        "from the counterparty.",
+    )
+    pdf.drawString(
+        _LEFT,
+        _TOP - 352,
+        "The summary of investment portfolio may change due to ongoing portfolio transactions.",
+    )
+    pdf.save()
+    return path
+
+
+def write_globalx_direct_lookalike(path: Path) -> Path:
+    """Write a fictional Global X direct-holding disclosure (top-25 layout)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Global X Fictional Nasdaq ETF (GXD, GXD.U:TSX)")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 18, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 32, "As at March 31, 2026")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "Asset Mix")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 76, "U.S. Equities")
+    pdf.drawRightString(440, _TOP - 76, "$ 904,735,751")
+    pdf.drawRightString(_RIGHT, _TOP - 76, "95.90%")
+    pdf.drawString(_LEFT, _TOP - 90, "Cash and Cash Equivalents")
+    pdf.drawRightString(440, _TOP - 90, "644,595")
+    pdf.drawRightString(_RIGHT, _TOP - 90, "4.10%")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawRightString(440, _TOP - 104, "$ 943,415,807")
+    pdf.drawRightString(_RIGHT, _TOP - 104, "100.00%")
+
+    pdf.showPage()
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Global X Fictional Nasdaq ETF (GXD, GXD.U:TSX)")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 18, "Summary of Investment Portfolio (continued)")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 32, "As at March 31, 2026")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "Top 25 Holdings")
+    pdf.drawRightString(_RIGHT, _TOP - 62, "% of ETF's Net Asset Value")
+    pdf.setFont("Helvetica", 9)
+    holdings = [
+        ("Juniper Health Corp.", "8.69%"),
+        ("Northwind Materials Inc.", "7.64%"),
+        ("Pineview Software Corp.", "6.63%"),
+        ("Uplands Chemicals Inc.", "5.63%"),
+        ("Elmsworth Capital Corp.", "4.58%"),
+    ]
+    for index, (name, weight) in enumerate(holdings, start=1):
+        pdf.drawString(_LEFT, _TOP - 62 - index * 14, name)
+        pdf.drawRightString(_RIGHT, _TOP - 62 - index * 14, weight)
+
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(
+        _LEFT,
+        _TOP - 150,
+        "The summary of investment portfolio may change due to ongoing portfolio transactions.",
+    )
+    pdf.save()
+    return path
