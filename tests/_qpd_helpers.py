@@ -391,3 +391,44 @@ def write_globalx_direct_lookalike(path: Path) -> Path:
     )
     pdf.save()
     return path
+
+
+def write_bmo_lookalike(path: Path) -> Path:
+    """Write a fictional BMO-style disclosure with shares and dollar columns."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+
+    def row(y: float, name: str, shares: str, value: str, percent: str) -> None:
+        pdf.drawString(_LEFT, y, name)
+        pdf.drawRightString(340, y, shares)
+        pdf.drawRightString(470, y, value)
+        pdf.drawRightString(_RIGHT, y, percent)
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "BMO Fictional Canadian Equity Index ETF (ZFN)")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 18, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 32, "As at June 30, 2026")
+
+    pdf.setFont("Helvetica-Bold", 8)
+    pdf.drawString(_LEFT, _TOP - 62, "Security Name")
+    pdf.drawRightString(340, _TOP - 62, "Number of Shares")
+    pdf.drawRightString(470, _TOP - 62, "Market Value ($)")
+    pdf.drawRightString(_RIGHT, _TOP - 62, "% of Net Assets")
+    pdf.setFont("Helvetica", 9)
+    rows = [
+        ("Northgate Bank", "1,234,500", "$ 45,678,900", "44.56%"),
+        ("Maplecrest Properties", "987,654", "$ 23,456,700", "32.34%"),
+        ("Pineview Software Corp.", "456,789", "$ 12,345,600", "21.23%"),
+        ("Cash and Cash Equivalents", "-", "$ 1,000,000", "0.97%"),
+    ]
+    for index, data in enumerate(rows, start=1):
+        row(_TOP - 62 - index * 14, *data)
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawRightString(_RIGHT, _TOP - 150, "Total Investments 99.10%")
+    pdf.save()
+    return path
