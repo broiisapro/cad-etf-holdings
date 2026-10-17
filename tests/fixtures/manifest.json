@@ -99,7 +99,7 @@
       "as_of_date": "2026-11-03",
       "path": "synthetic/SYNA/2026-11-03/20261103T220000Z.csv",
       "fetched_at": "2026-11-03T22:00:00+00:00",
-      "note": "as-of date after the 2026-11-02 cutoff; must not affect the result"
+      "note": "as-of date after the 2026-11-02 cutoff with materially different weights; must not affect the result"
     }
   ],
   "mapl_pair": [

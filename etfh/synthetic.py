@@ -467,6 +467,21 @@ _SYNB_ENTRIES = (
     + _entries(_SYNB_ONLY, _SYNB_EMIT)
 )
 
+# The two late-known files (the lookahead trap) hold every common security at a
+# token weight, so leaking either of them into the 2026-11-02 answer changes the
+# SYNA/SYNB overlap by more than 0.24 -- far above the 0.05 the fixture tests
+# require.
+_LOOKAHEAD_OVERRIDES = {
+    "NWM": 2,
+    "CDL": 1,
+    "KES": 2,
+    "FHV": 1,
+    "GLO": 1,
+    "IRO": 1,
+    "ELM": 1,
+    "FXN": 1,
+}
+
 
 def _fund_versions() -> list[FundVersion]:
     nav_syna = Decimal(10_000_000)
@@ -536,7 +551,7 @@ def _fund_versions() -> list[FundVersion]:
                 lookahead_syna,
                 seed=_SEED + 3,
                 nav=nav_syna,
-                overrides={"NWM": 900, "CDL": 60},
+                overrides=_LOOKAHEAD_OVERRIDES,
             ),
         )
     )
@@ -614,7 +629,7 @@ def _fund_versions() -> list[FundVersion]:
                 lookahead_synb,
                 seed=_SEED + 12,
                 nav=nav_synb,
-                overrides={"CDL": 500, "NWM": 40},
+                overrides=_LOOKAHEAD_OVERRIDES,
             ),
         )
     )
@@ -1271,7 +1286,8 @@ def _build_manifest(root: Path, raws: Sequence[tuple[FundVersion, RawFile]]) -> 
             as_of_date=date(2026, 11, 3).isoformat(),
             path=path_of("SYNA", date(2026, 11, 3), _fetched(date(2026, 11, 3))),
             fetched_at=_fetched(date(2026, 11, 3)).isoformat(),
-            note="as-of date after the 2026-11-02 cutoff; must not affect the result",
+            note="as-of date after the 2026-11-02 cutoff with materially different "
+            "weights; must not affect the result",
         ),
     ]
     mapl_pair = [
