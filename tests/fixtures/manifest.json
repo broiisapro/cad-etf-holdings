@@ -1,0 +1,179 @@
+{
+  "funds": {
+    "SYNA": {
+      "source_id": "syn_csv",
+      "format": "csv",
+      "weight_unit": "percent",
+      "as_of_dates": [
+        "2026-10-29",
+        "2026-10-30",
+        "2026-11-02",
+        "2026-11-03"
+      ]
+    },
+    "SYNB": {
+      "source_id": "syn_xlsx",
+      "format": "xlsx",
+      "weight_unit": "fraction",
+      "as_of_dates": [
+        "2026-10-29",
+        "2026-10-30",
+        "2026-11-02"
+      ]
+    },
+    "SYNC": {
+      "source_id": "syn_csv",
+      "format": "csv",
+      "weight_unit": "fraction",
+      "as_of_dates": [
+        "2026-10-29"
+      ]
+    },
+    "SYND": {
+      "source_id": "syn_xlsx",
+      "format": "xlsx",
+      "weight_unit": "fraction",
+      "as_of_dates": [
+        "2026-10-29"
+      ]
+    },
+    "SYNE": {
+      "source_id": "syn_json",
+      "format": "json",
+      "weight_unit": "fraction",
+      "as_of_dates": [
+        "2026-10-29",
+        "2026-10-30",
+        "2026-11-02"
+      ]
+    },
+    "SYNF": {
+      "source_id": "syn_pdf",
+      "format": "pdf",
+      "weight_unit": "percent",
+      "as_of_dates": [
+        "2026-09-30"
+      ]
+    }
+  },
+  "bad_files": [
+    {
+      "fund_ticker": "SYNC",
+      "path": "synthetic/SYNC/2026-10-29/20261029T220000Z.csv",
+      "failing_check": "weight_sum",
+      "detail": "weights sum to 0.8500 for an equity fund (expected 1.0000)"
+    },
+    {
+      "fund_ticker": "SYND",
+      "path": "synthetic/SYND/2026-10-29/20261029T220000Z.xlsx",
+      "failing_check": "duplicate_security",
+      "detail": "Northwind Materials Inc. appears twice after normalization (ISIN row and CUSIP row)"
+    }
+  ],
+  "republished_file": {
+    "fund_ticker": "SYNB",
+    "as_of_date": "2026-10-30",
+    "versions": [
+      {
+        "path": "synthetic/SYNB/2026-10-30/20261030T220000Z.xlsx",
+        "fetched_at": "2026-10-30T22:00:00+00:00",
+        "note": "file_version 1"
+      },
+      {
+        "path": "synthetic/SYNB/2026-10-30/20261031T140000Z.xlsx",
+        "fetched_at": "2026-10-31T14:00:00+00:00",
+        "note": "file_version 2; one weight corrected"
+      }
+    ]
+  },
+  "lookahead_files": [
+    {
+      "fund_ticker": "SYNB",
+      "as_of_date": "2026-11-02",
+      "path": "synthetic/SYNB/2026-11-02/20261103T150000Z.xlsx",
+      "fetched_at": "2026-11-03T15:00:00+00:00",
+      "note": "republished after the as-of cutoff with materially different weights; must not affect the 2026-11-02 result"
+    },
+    {
+      "fund_ticker": "SYNA",
+      "as_of_date": "2026-11-03",
+      "path": "synthetic/SYNA/2026-11-03/20261103T220000Z.csv",
+      "fetched_at": "2026-11-03T22:00:00+00:00",
+      "note": "as-of date after the 2026-11-02 cutoff; must not affect the result"
+    }
+  ],
+  "mapl_pair": [
+    {
+      "fund_ticker": "SYNA",
+      "exchange": "XTSE",
+      "security_name": "Maple Ridge Resources Inc."
+    },
+    {
+      "fund_ticker": "SYNB",
+      "exchange": "XNYS",
+      "security_name": "Maple Ridge Systems Corp."
+    }
+  ],
+  "percent_fraction_pair": {
+    "fund_a": "SYNA",
+    "unit_a": "percent",
+    "fund_b": "SYNB",
+    "unit_b": "fraction"
+  },
+  "pdf_stated_total": {
+    "path": "synthetic/SYNF/2026-09-30/20261028T220000Z.pdf",
+    "as_of_date": "2026-09-30",
+    "published_at": "2026-10-28",
+    "stated_total": "82.35",
+    "table_sum": "82.35"
+  },
+  "expected_overlap": {
+    "fund_a": "SYNA",
+    "fund_b": "SYNB",
+    "asof": "2026-11-02",
+    "overlap": "0.2484",
+    "common_count": 8,
+    "common": [
+      {
+        "security_id": "ISIN:CA600000AA15",
+        "weight_a": "0.0654",
+        "weight_b": "0.0362"
+      },
+      {
+        "security_id": "ISIN:CA600002AA70",
+        "weight_a": "0.0326",
+        "weight_b": "0.0093"
+      },
+      {
+        "security_id": "ISIN:CA600005AA02",
+        "weight_a": "0.0103",
+        "weight_b": "0.0853"
+      },
+      {
+        "security_id": "ISIN:CA600006AA84",
+        "weight_a": "0.0471",
+        "weight_b": "0.0655"
+      },
+      {
+        "security_id": "ISIN:CA600008AA41",
+        "weight_a": "0.0571",
+        "weight_b": "0.0646"
+      },
+      {
+        "security_id": "ISIN:CA600010AA05",
+        "weight_a": "0.0441",
+        "weight_b": "0.0344"
+      },
+      {
+        "security_id": "TKR:XNYS:ELM",
+        "weight_a": "0.0219",
+        "weight_b": "0.0581"
+      },
+      {
+        "security_id": "TKR:XNYS:FXN",
+        "weight_a": "0.0321",
+        "weight_b": "0.0550"
+      }
+    ]
+  }
+}

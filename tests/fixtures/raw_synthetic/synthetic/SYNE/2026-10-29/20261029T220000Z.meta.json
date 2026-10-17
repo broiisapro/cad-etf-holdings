@@ -1,0 +1,14 @@
+{
+  "as_of_hint": "2026-10-29",
+  "bytes": 8263,
+  "content_type": "application/json",
+  "etag": null,
+  "fetched_at": "2026-10-29T22:00:00+00:00",
+  "fund_ticker": "SYNE",
+  "http_status": 200,
+  "issuer": "synthetic",
+  "last_modified": null,
+  "sha256": "0ca3b1b7532d026564aed7af29553f4645b5f98f90c0add4bb7de78879209168",
+  "source_id": "syn_json",
+  "url": "synthetic://fixtures/SYNE.json"
+}

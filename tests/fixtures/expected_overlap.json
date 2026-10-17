@@ -1,0 +1,49 @@
+{
+  "fund_a": "SYNA",
+  "fund_b": "SYNB",
+  "asof": "2026-11-02",
+  "overlap": "0.2484",
+  "common_count": 8,
+  "common": [
+    {
+      "security_id": "ISIN:CA600000AA15",
+      "weight_a": "0.0654",
+      "weight_b": "0.0362"
+    },
+    {
+      "security_id": "ISIN:CA600002AA70",
+      "weight_a": "0.0326",
+      "weight_b": "0.0093"
+    },
+    {
+      "security_id": "ISIN:CA600005AA02",
+      "weight_a": "0.0103",
+      "weight_b": "0.0853"
+    },
+    {
+      "security_id": "ISIN:CA600006AA84",
+      "weight_a": "0.0471",
+      "weight_b": "0.0655"
+    },
+    {
+      "security_id": "ISIN:CA600008AA41",
+      "weight_a": "0.0571",
+      "weight_b": "0.0646"
+    },
+    {
+      "security_id": "ISIN:CA600010AA05",
+      "weight_a": "0.0441",
+      "weight_b": "0.0344"
+    },
+    {
+      "security_id": "TKR:XNYS:ELM",
+      "weight_a": "0.0219",
+      "weight_b": "0.0581"
+    },
+    {
+      "security_id": "TKR:XNYS:FXN",
+      "weight_a": "0.0321",
+      "weight_b": "0.0550"
+    }
+  ]
+}

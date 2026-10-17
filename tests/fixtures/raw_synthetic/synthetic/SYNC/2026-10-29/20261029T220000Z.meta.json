@@ -1,0 +1,14 @@
+{
+  "as_of_hint": "2026-10-29",
+  "bytes": 2017,
+  "content_type": "text/csv",
+  "etag": null,
+  "fetched_at": "2026-10-29T22:00:00+00:00",
+  "fund_ticker": "SYNC",
+  "http_status": 200,
+  "issuer": "synthetic",
+  "last_modified": null,
+  "sha256": "9ea184f118ba15718d6d34f8565957c572908cb5da8cfef4fd3fb2ad8a296966",
+  "source_id": "syn_csv",
+  "url": "synthetic://fixtures/SYNC.csv"
+}

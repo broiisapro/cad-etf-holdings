@@ -1,0 +1,14 @@
+{
+  "as_of_hint": "2026-10-29",
+  "bytes": 6516,
+  "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "etag": null,
+  "fetched_at": "2026-10-29T22:00:00+00:00",
+  "fund_ticker": "SYND",
+  "http_status": 200,
+  "issuer": "synthetic",
+  "last_modified": null,
+  "sha256": "e5172e4e3545821497cf0ca99b71e5a11382e6602f65f82d50ab75f391ec6489",
+  "source_id": "syn_xlsx",
+  "url": "synthetic://fixtures/SYND.xlsx"
+}

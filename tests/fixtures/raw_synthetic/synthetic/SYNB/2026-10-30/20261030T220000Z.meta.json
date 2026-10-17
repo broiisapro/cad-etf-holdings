@@ -1,0 +1,14 @@
+{
+  "as_of_hint": "2026-10-30",
+  "bytes": 6757,
+  "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "etag": null,
+  "fetched_at": "2026-10-30T22:00:00+00:00",
+  "fund_ticker": "SYNB",
+  "http_status": 200,
+  "issuer": "synthetic",
+  "last_modified": null,
+  "sha256": "a596575cc316132d923ef5284d2f5b125a41809823918d5ff98737a83eceb3d3",
+  "source_id": "syn_xlsx",
+  "url": "synthetic://fixtures/SYNB.xlsx"
+}
