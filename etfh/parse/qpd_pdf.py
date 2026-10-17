@@ -154,6 +154,12 @@ class QpdRules:
     sector_grouping: bool = True
     column_gap: float = 10.0
     two_column: bool = False
+    section_start_patterns: tuple[str, ...] = ()
+    section_end_patterns: tuple[str, ...] = ()
+    ignored_segment_patterns: tuple[str, ...] = ()
+    name_cleanup_patterns: tuple[str, ...] = ()
+    partial_section_pattern: str = ""
+    stated_total_applies_to_partial: bool = True
     table_settings: dict[str, Any] | None = None
 
 
@@ -170,7 +176,32 @@ VANGUARD_RULES = replace(
     ),
 )
 
+GLOBALX_RULES = replace(
+    DEFAULT_RULES,
+    name="globalx_ca",
+    section_start_patterns=(r"^top\s+(?:\d+\s+)?holdings\b",),
+    partial_section_pattern=r"^top\s+\d+\s+holdings\b",
+    stated_total_applies_to_partial=False,
+    section_end_patterns=(
+        r"^top\s+\d+\s+securities\b",
+        r"^the\s+summary\s+of\s+investment\b",
+    ),
+    ignored_segment_patterns=(
+        r"^\$\s*[\d,]+",
+        r"^\(notional\b",
+    ),
+    name_cleanup_patterns=(
+        r"\s*\(notional\s+value\s*$",
+        r"\s*\(notional\s+value\s+[^)]*\)(?:\(\d+\))?",
+    ),
+    total_patterns=(
+        r"\$\s*[\d,]+\s+([<>]?\s*-?\d[\d\s.,]*\s*%)",
+        *DEFAULT_RULES.total_patterns,
+    ),
+)
+
 QPD_RULES["vanguard_ca_qpd"] = VANGUARD_RULES
+QPD_RULES["globalx_ca_qpd"] = GLOBALX_RULES
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +211,14 @@ class _Row:
     name: str
     weight: float
     sector: str
+
+
+@dataclass(slots=True)
+class _Extraction:
+    """Rows found in a document plus whether they came from a partial section."""
+
+    rows: list[_Row]
+    partial_section: bool = False
 
 
 def _clean(value: str) -> str:
@@ -376,7 +415,20 @@ def _is_subtotal(name: str, current_sector: str | None) -> bool:
     return False
 
 
-def _entries_from_segments(segments: Sequence[str], sector: str) -> list[_Row]:
+def _clean_name(name: str, rules: QpdRules) -> str:
+    value = _clean(name)
+    for pattern in rules.name_cleanup_patterns:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+    return _clean(value)
+
+
+def _ignored_segment(text: str, rules: QpdRules) -> bool:
+    return any(
+        re.search(pattern, text, re.IGNORECASE) for pattern in rules.ignored_segment_patterns
+    )
+
+
+def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules) -> list[_Row]:
     """Parse name/weight segments left-to-right into rows.
 
     A segment that is only a number closes the accumulated name; a segment
@@ -388,13 +440,17 @@ def _entries_from_segments(segments: Sequence[str], sector: str) -> list[_Row]:
     name_parts: list[str] = []
     for raw_segment in segments:
         segment = _clean(raw_segment)
-        if not segment:
+        if not segment or _ignored_segment(segment, rules):
             continue
         if name_parts:
             standalone = _weight_value(segment)
             if standalone is not None:
                 rows.append(
-                    _Row(name=" ".join(name_parts).strip(), weight=standalone, sector=sector)
+                    _Row(
+                        name=_clean_name(" ".join(name_parts), rules),
+                        weight=standalone,
+                        sector=sector,
+                    )
                 )
                 name_parts = []
                 continue
@@ -402,7 +458,13 @@ def _entries_from_segments(segments: Sequence[str], sector: str) -> list[_Row]:
         if trailing is not None:
             if name:
                 name_parts.append(name)
-            rows.append(_Row(name=" ".join(name_parts).strip(), weight=trailing, sector=sector))
+            rows.append(
+                _Row(
+                    name=_clean_name(" ".join(name_parts), rules),
+                    weight=trailing,
+                    sector=sector,
+                )
+            )
             name_parts = []
         else:
             name_parts.append(segment)
@@ -456,16 +518,35 @@ def _lines_from_page(page: Any, rules: QpdRules) -> list[list[str]]:
     return grouped
 
 
-def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> list[_Row]:
+def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extraction:
     rows: list[_Row] = []
     sector: str | None = None
+    partial_section = False
+    active = not rules.section_start_patterns
     for index, segments in enumerate(lines):
         text = _clean(" ".join(segments))
-        if not text or _is_header(text, rules) or _is_skippable(text, rules):
+        if not text:
+            continue
+        if rules.section_start_patterns and any(
+            re.search(pattern, text, re.IGNORECASE) for pattern in rules.section_start_patterns
+        ):
+            active = True
+            sector = None
+            if rules.partial_section_pattern and re.search(
+                rules.partial_section_pattern, text, re.IGNORECASE
+            ):
+                partial_section = True
+            continue
+        if active and any(
+            re.search(pattern, text, re.IGNORECASE) for pattern in rules.section_end_patterns
+        ):
+            active = False
+            continue
+        if not active or _is_header(text, rules) or _is_skippable(text, rules):
             continue
         if _is_total_line(text, rules):
             continue
-        parsed = _entries_from_segments(segments, sector or "Unknown")
+        parsed = _entries_from_segments(segments, sector or "Unknown", rules)
         if parsed:
             for row in parsed:
                 if _is_subtotal(row.name, sector):
@@ -474,40 +555,44 @@ def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> list[_R
             continue
         if rules.sector_grouping and _sector_candidate(text):
             has_following_holding = any(
-                _entries_from_segments(following, "Unknown")
+                _entries_from_segments(following, "Unknown", rules)
                 for following in lines[index + 1 : index + 3]
             )
             if has_following_holding:
                 sector = text
-    return rows
+    return _Extraction(rows=rows, partial_section=partial_section)
 
 
-def _rows_from_table(table: Sequence[Sequence[str | None]]) -> list[_Row]:
-    rows: list[_Row] = []
+def _rows_from_table(table: Sequence[Sequence[str | None]], rules: QpdRules) -> _Extraction:
+    lines: list[list[str]] = []
     for raw_row in table:
         segments = [_clean(cell) for cell in raw_row if cell is not None and _clean(cell)]
-        if not segments:
-            continue
-        rows.extend(_entries_from_segments(segments, "Unknown"))
-    return rows
+        if segments:
+            lines.append(segments)
+    return _rows_from_lines(lines, rules)
 
 
-def _pdfplumber_rows(path: Any, rules: QpdRules) -> tuple[list[_Row], str]:
+def _pdfplumber_rows(path: Any, rules: QpdRules) -> tuple[list[_Row], str, bool]:
     rows: list[_Row] = []
     texts: list[str] = []
+    partial = False
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
             page_text = page.extract_text() or ""
             texts.append(page_text)
-            rows.extend(_rows_from_lines(_lines_from_page(page, rules), rules))
+            extraction = _rows_from_lines(_lines_from_page(page, rules), rules)
+            rows.extend(extraction.rows)
+            partial = partial or extraction.partial_section
         if not rows:
             for page in pdf.pages:
                 for table in page.extract_tables(table_settings=rules.table_settings):
-                    rows.extend(_rows_from_table(table))
-    return rows, "\n".join(texts)
+                    extraction = _rows_from_table(table, rules)
+                    rows.extend(extraction.rows)
+                    partial = partial or extraction.partial_section
+    return rows, "\n".join(texts), partial
 
 
-def _camelot_rows(path: Any) -> list[_Row]:
+def _camelot_rows(path: Any) -> tuple[list[_Row], bool]:
     from camelot.io import read_pdf as camelot_read_pdf
 
     for flavor in ("stream", "lattice"):
@@ -516,11 +601,14 @@ def _camelot_rows(path: Any) -> list[_Row]:
         except Exception:
             continue
         rows: list[_Row] = []
+        partial = False
         for table in tables:
-            rows.extend(_rows_from_table(table.data))
+            extraction = _rows_from_table(table.data, DEFAULT_RULES)
+            rows.extend(extraction.rows)
+            partial = partial or extraction.partial_section
         if rows:
-            return rows
-    return []
+            return rows, partial
+    return [], False
 
 
 class QpdPdfParser:
@@ -550,16 +638,17 @@ class QpdPdfParser:
         rules = self.rules_for(raw)
         if raw.path.suffix.lower() != ".pdf":
             raise QpdPdfError(f"{raw.path}: not a PDF")
-        rows, text = _pdfplumber_rows(raw.path, rules)
+        rows, text, partial = _pdfplumber_rows(raw.path, rules)
         if not rows:
-            rows = _camelot_rows(raw.path)
+            rows, partial = _camelot_rows(raw.path)
         if not rows:
             raise QpdPdfError(f"{raw.path}: no holdings table found")
         as_of_date = _date_from_text(text, rules.as_of_patterns)
         if as_of_date is None:
             raise QpdPdfError(f"{raw.path}: no portfolio date found")
         stated_total = _stated_total(text, rules)
-        if stated_total is None:
+        omit_stated_total = partial and not rules.stated_total_applies_to_partial
+        if stated_total is None and not omit_stated_total:
             raise QpdPdfError(f"{raw.path}: no stated total found")
 
         names: list[str] = []
@@ -611,9 +700,10 @@ class QpdPdfParser:
                 "raw_file_sha256": pl.String,
             },
         )
-        stated_total_fraction = stated_total / 100.0
         notes = ["declared_unit=percent", "partial_list=true"]
-        notes.append(f"stated_total_fraction={stated_total_fraction:.10g}")
+        if stated_total is not None and not omit_stated_total:
+            stated_total_fraction = stated_total / 100.0
+            notes.append(f"stated_total_fraction={stated_total_fraction:.10g}")
         unit_check = check_unit(raw_weights, WeightUnit.percent)
         if not unit_check.consistent and unit_check.suggested is not None:
             notes.append(f"unit_check={unit_check.detail()}")
