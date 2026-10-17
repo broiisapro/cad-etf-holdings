@@ -1,8 +1,8 @@
-ticker,issuer,name,asset_class,source_id,exchange
-SYNA,synthetic,Synthetic Aurora Equity Fund,equity,syn_csv,XTSE
-SYNB,synthetic,Synthetic Borealis Equity Fund,equity,syn_xlsx,XTSE
-SYNC,synthetic,Synthetic Cascade Equity Fund,equity,syn_csv,XTSE
-SYND,synthetic,Synthetic Dunes Equity Fund,equity,syn_xlsx,XTSE
-SYNE,synthetic,Synthetic Ember Equity Fund,equity,syn_json,XTSE
-SYNF,synthetic,Synthetic Fjord Equity Fund,equity,syn_pdf,XTSE
-SYNX,synthetic,Synthetic Granite Equity Fund,equity,syn_blocked,XTSE
+ticker,issuer,name,asset_class,source_ids,exchange,params
+SYNA,synthetic,Synthetic Aurora Equity Fund,equity,syn_csv,XTSE,
+SYNB,synthetic,Synthetic Borealis Equity Fund,equity,syn_xlsx,XTSE,
+SYNC,synthetic,Synthetic Cascade Equity Fund,equity,syn_csv,XTSE,
+SYND,synthetic,Synthetic Dunes Equity Fund,equity,syn_xlsx,XTSE,
+SYNE,synthetic,Synthetic Ember Equity Fund,equity,syn_json,XTSE,
+SYNF,synthetic,Synthetic Fjord Equity Fund,equity,syn_pdf,XTSE,
+SYNX,synthetic,Synthetic Granite Equity Fund,equity,syn_blocked,XTSE,
