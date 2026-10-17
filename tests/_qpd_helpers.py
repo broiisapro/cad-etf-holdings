@@ -432,3 +432,44 @@ def write_bmo_lookalike(path: Path) -> Path:
     pdf.drawRightString(_RIGHT, _TOP - 150, "Total Investments 99.10%")
     pdf.save()
     return path
+
+
+def write_purpose_lookalike(path: Path) -> Path:
+    """Write a fictional Purpose-style disclosure PDF."""
+    return write_qpd_pdf(
+        path,
+        as_of="June 30, 2026",
+        fund_name="Purpose Fictional Dividend Fund",
+        published=None,
+        header="Holding % of Net Asset Value",
+        rows=[
+            "Canadian Equity",
+            ("Maplecrest Properties", "15.40"),
+            ("Northgate Bank", "9.85"),
+            ("Cedarline Energy Corp.", "7.20"),
+            "U.S. Equity",
+            ("Pineview Software Corp.", "4.50"),
+            ("Juniper Health Corp.", "3.66"),
+            ("Uplands Chemicals Inc.", "2.60"),
+        ],
+        total="Total of the holdings listed above: 43.21% of net asset value",
+    )
+
+
+def write_evolve_lookalike(path: Path) -> Path:
+    """Write a fictional Evolve-style disclosure PDF."""
+    return write_qpd_pdf(
+        path,
+        as_of="June 30, 2026",
+        fund_name="Evolve Fictional Cyber Security Index ETF (CYBX)",
+        published=None,
+        header="Security % of Net Assets",
+        rows=[
+            ("Northwind Materials Inc.", "25.10"),
+            ("Harbourside Logistics Corp.", "12.30"),
+            ("Foxglove Networks Inc.", "5.40"),
+            ("Quarrystone Cement Inc.", "2.60"),
+            ("Birchwood Timber Corp.", "1.40"),
+        ],
+        total="Total of the holdings listed above: 46.80% of net asset value",
+    )

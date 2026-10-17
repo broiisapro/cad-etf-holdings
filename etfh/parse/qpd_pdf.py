@@ -215,9 +215,14 @@ BMO_RULES = replace(
     ),
 )
 
+PURPOSE_RULES = replace(DEFAULT_RULES, name="purpose")
+EVOLVE_RULES = replace(DEFAULT_RULES, name="evolve")
+
 QPD_RULES["vanguard_ca_qpd"] = VANGUARD_RULES
 QPD_RULES["globalx_ca_qpd"] = GLOBALX_RULES
 QPD_RULES["bmo_qpd"] = BMO_RULES
+QPD_RULES["purpose_qpd"] = PURPOSE_RULES
+QPD_RULES["evolve_qpd"] = EVOLVE_RULES
 
 
 @dataclass(frozen=True, slots=True)
