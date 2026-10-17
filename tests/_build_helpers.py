@@ -9,6 +9,7 @@ from typing import Any
 import polars as pl
 
 from etfh.build import BuildResult, build
+from etfh.secmaster.identifiers import cusip_to_isin
 from etfh.storage import RawStore
 from etfh.types import ParsedFile
 from etfh.validate import QaFinding
@@ -20,14 +21,24 @@ CONFIG_DIR = REPO_ROOT / "config"
 
 
 class FakeSecurityMaster:
-    """Contract-compatible security master: deterministic identifier mapping."""
+    """Contract-compatible security master: deterministic identifier mapping.
+
+    Mirrors the D23 order (provided ISIN, derived ISIN for CA/US CUSIPs, plain
+    CUSIP, exchange-qualified ticker, cash) using the real identifier helpers so
+    tests reproduce the committed expected overlap.
+    """
 
     def assign(self, frame: pl.DataFrame) -> pl.DataFrame:
+        derived = pl.struct("cusip", "country").map_elements(
+            _derive_isin, return_dtype=pl.String, skip_nulls=False
+        )
         identifier = (
             pl.when(pl.col("asset_class") == "cash")
             .then(pl.concat_str([pl.lit("CASH:"), pl.col("currency")]))
             .when(pl.col("isin").is_not_null())
             .then(pl.concat_str([pl.lit("ISIN:"), pl.col("isin")]))
+            .when(derived.is_not_null())
+            .then(pl.concat_str([pl.lit("ISIN:"), derived]))
             .when(pl.col("cusip").is_not_null())
             .then(pl.concat_str([pl.lit("CUSIP:"), pl.col("cusip")]))
             .when(pl.col("security_ticker").is_not_null() & pl.col("exchange").is_not_null())
@@ -39,6 +50,14 @@ class FakeSecurityMaster:
             .otherwise(pl.lit(None, dtype=pl.String))
         )
         return frame.with_columns(identifier.alias("security_id"))
+
+
+def _derive_isin(row: dict[str, Any]) -> str | None:
+    cusip = row["cusip"]
+    country = row["country"]
+    if not cusip or country not in {"CA", "US"}:
+        return None
+    return cusip_to_isin(cusip, country)
 
 
 def fake_validator(
