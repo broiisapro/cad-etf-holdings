@@ -181,7 +181,7 @@ def test_asof_picker_defaults_to_latest_available(tmp_path, monkeypatch) -> None
     assert app.date_input(key="asof").value == date(2025, 1, 2)
 
 
-def test_apptest_against_real_synthetic_build(tmp_path, monkeypatch, synthetic_db) -> None:
+def test_apptest_against_real_synthetic_build(monkeypatch, synthetic_db) -> None:
     monkeypatch.setenv("ETFH_DB", str(synthetic_db))
     app = AppTest.from_file(str(APP_PATH), default_timeout=60)
     app.run()
@@ -210,7 +210,7 @@ def test_apptest_against_real_synthetic_build(tmp_path, monkeypatch, synthetic_d
         assert round(float(row["weight_b"]), 4) == float(want["weight_b"])
 
 
-def test_real_build_labels_partial_funds(tmp_path, monkeypatch, synthetic_db) -> None:
+def test_real_build_labels_partial_funds(monkeypatch, synthetic_db) -> None:
     monkeypatch.setenv("ETFH_DB", str(synthetic_db))
     app = AppTest.from_file(str(APP_PATH), default_timeout=60)
     app.run()
