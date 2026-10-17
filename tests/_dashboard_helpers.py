@@ -215,3 +215,11 @@ def make_empty_db(path: Path) -> Path:
     """Create a valid, empty DuckDB file the app can open read-only."""
     duckdb.connect(str(path)).close()
     return path
+
+
+def build_synthetic_db(out_dir: Path) -> Path:
+    """Build the committed synthetic raw store into ``out_dir``; return the DB."""
+    from etfh.build import build
+
+    build(REPO_ROOT / "tests" / "fixtures" / "raw_synthetic", out_dir)
+    return out_dir / "etfh.duckdb"
