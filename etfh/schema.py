@@ -35,6 +35,10 @@ class ParsedHoldings(pa.DataFrameModel):
     enters validation or the build. Nullable columns must still be given their
     proper dtype by parsers (for example ``pl.String`` for an all-null
     ``cusip`` column), because validation is strict.
+
+    Per D45 (correction to D6): ``shares`` and ``market_value`` are nullable
+    and accept any sign, and ``weight`` is constrained to ``[-1, 1]`` so short,
+    liability and derivative lines are representable.
     """
 
     fund_ticker: str = pa.Field(str_length={"min_value": 1})
@@ -48,9 +52,9 @@ class ParsedHoldings(pa.DataFrameModel):
     sector: str
     country: str
     currency: str | None = pa.Field(nullable=True)
-    weight: float = pa.Field(ge=0.0, le=1.0)
-    shares: float = pa.Field(ge=0.0)
-    market_value: float | None = pa.Field(nullable=True, ge=0.0)
+    weight: float = pa.Field(ge=-1.0, le=1.0)
+    shares: float | None = pa.Field(nullable=True)
+    market_value: float | None = pa.Field(nullable=True)
     source_id: str = pa.Field(str_length={"min_value": 1})
     raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
 
@@ -72,9 +76,9 @@ class Holdings(pa.DataFrameModel):
     sector: str
     country: str
     currency: str | None = pa.Field(nullable=True)
-    weight: float = pa.Field(ge=0.0, le=1.0)
-    shares: float = pa.Field(ge=0.0)
-    market_value: float | None = pa.Field(nullable=True, ge=0.0)
+    weight: float = pa.Field(ge=-1.0, le=1.0)
+    shares: float | None = pa.Field(nullable=True)
+    market_value: float | None = pa.Field(nullable=True)
     source_id: str = pa.Field(str_length={"min_value": 1})
     raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
 
@@ -148,7 +152,7 @@ CREATE TABLE IF NOT EXISTS holdings (
     country VARCHAR NOT NULL,
     currency VARCHAR,
     weight DOUBLE NOT NULL,
-    shares DOUBLE NOT NULL,
+    shares DOUBLE,
     market_value DOUBLE,
     source_id VARCHAR NOT NULL,
     raw_file_sha256 VARCHAR NOT NULL

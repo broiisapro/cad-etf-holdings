@@ -237,3 +237,14 @@ All names and signatures below match the merged code on `main`.
   fixture tests; real parsers must implement the stated-total check (D17).
 - **The raw store protocol does not constrain read APIs**, so collectors should import
   `RawStore` from `etfh.storage` for the concrete methods.
+
+## Correction (Epic 1, D45)
+
+The frozen holdings schema could not represent real files: quarterly disclosures carry no
+share counts, and short, liability and derivative lines have negative weights and values.
+The only allowed schema change (D45, applied in the interfaces PR for Epic 1) relaxes
+`etfh.schema.ParsedHoldings` and `etfh.schema.Holdings` so that `shares` is nullable and
+accepts any sign, `market_value` is nullable and accepts any sign, and `weight` is
+constrained to `[-1, 1]`. `DDL_HOLDINGS` drops `NOT NULL` from `shares` to match, and
+`sector`/`country` stay non-null strings (parsers write `Unknown` when the source omits
+them). The schema is frozen again after that change; later waves must not alter it.
