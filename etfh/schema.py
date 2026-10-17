@@ -1,0 +1,182 @@
+"""Frozen schemas for parsed and normalized holdings tables, plus DuckDB DDL.
+
+The ``DataFrameModel`` classes define the frozen data contracts (D6). The DDL
+constants create the same tables in DuckDB so ``etfh build`` can write them;
+``tests/test_schema.py`` asserts that the DDL columns match the models in name
+and order.
+"""
+
+from __future__ import annotations
+
+import pandera.polars as pa
+import polars as pl
+
+__all__ = [
+    "DDL_FILE_VERSIONS",
+    "DDL_HOLDINGS",
+    "DDL_HOLDINGS_CHANGES",
+    "DDL_QA_EVENTS",
+    "FileVersion",
+    "Holdings",
+    "HoldingsChange",
+    "ParsedHoldings",
+    "QaEvent",
+]
+
+_HEX64_PATTERN = r"^[0-9a-f]{64}$"
+_MIC_PATTERN = r"^[A-Z0-9]{4}$"
+_UTC = "UTC"
+
+
+class ParsedHoldings(pa.DataFrameModel):
+    """Parser output: one row per fund/security holding, weights as fractions.
+
+    Every frame produced by a parser must validate against this model before it
+    enters validation or the build. Nullable columns must still be given their
+    proper dtype by parsers (for example ``pl.String`` for an all-null
+    ``cusip`` column), because validation is strict.
+    """
+
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date
+    security_name: str = pa.Field(str_length={"min_value": 1})
+    security_ticker: str | None = pa.Field(nullable=True)
+    exchange: str | None = pa.Field(nullable=True, str_matches=_MIC_PATTERN)
+    isin: str | None = pa.Field(nullable=True, str_length=12)
+    cusip: str | None = pa.Field(nullable=True, str_length=9)
+    asset_class: str = pa.Field(str_length={"min_value": 1})
+    sector: str
+    country: str
+    currency: str | None = pa.Field(nullable=True)
+    weight: float = pa.Field(ge=0.0, le=1.0)
+    shares: float = pa.Field(ge=0.0)
+    market_value: float | None = pa.Field(nullable=True, ge=0.0)
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
+
+
+class Holdings(pa.DataFrameModel):
+    """Normalized holdings table: parsed rows plus point-in-time resolution."""
+
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date
+    known_at: pl.Datetime("us", _UTC)  # type: ignore[valid-type]
+    file_version: pl.Int32 = pa.Field(ge=1)
+    security_id: str | None = pa.Field(nullable=True)
+    security_name: str = pa.Field(str_length={"min_value": 1})
+    security_ticker: str | None = pa.Field(nullable=True)
+    exchange: str | None = pa.Field(nullable=True, str_matches=_MIC_PATTERN)
+    isin: str | None = pa.Field(nullable=True, str_length=12)
+    cusip: str | None = pa.Field(nullable=True, str_length=9)
+    asset_class: str = pa.Field(str_length={"min_value": 1})
+    sector: str
+    country: str
+    currency: str | None = pa.Field(nullable=True)
+    weight: float = pa.Field(ge=0.0, le=1.0)
+    shares: float = pa.Field(ge=0.0)
+    market_value: float | None = pa.Field(nullable=True, ge=0.0)
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
+
+
+class FileVersion(pa.DataFrameModel):
+    """One stored version of one raw file for one fund and as-of date."""
+
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date
+    file_version: pl.Int32 = pa.Field(ge=1)
+    known_at: pl.Datetime("us", _UTC)  # type: ignore[valid-type]
+    raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
+    path: str = pa.Field(str_length={"min_value": 1})
+    status: str = pa.Field(isin=["included", "excluded"])
+
+
+class QaEvent(pa.DataFrameModel):
+    """A validation finding for one raw file."""
+
+    raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date | None = pa.Field(nullable=True)
+    check: str = pa.Field(str_length={"min_value": 1})
+    severity: str = pa.Field(isin=["error", "warning", "info"])
+    detail: str
+    excluded: bool
+
+
+class HoldingsChange(pa.DataFrameModel):
+    """An add, drop or weight change between two consecutive as-of dates."""
+
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    from_as_of: pl.Date
+    to_as_of: pl.Date
+    security_id: str | None = pa.Field(nullable=True)
+    change_type: str = pa.Field(isin=["add", "drop", "weight_change"])
+    weight_before: float | None = pa.Field(nullable=True, ge=0.0, le=1.0)
+    weight_after: float | None = pa.Field(nullable=True, ge=0.0, le=1.0)
+    delta: float | None = pa.Field(nullable=True)
+
+
+DDL_FILE_VERSIONS = """
+CREATE TABLE IF NOT EXISTS file_versions (
+    source_id VARCHAR NOT NULL,
+    fund_ticker VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    file_version INTEGER NOT NULL,
+    known_at TIMESTAMPTZ NOT NULL,
+    raw_file_sha256 VARCHAR NOT NULL,
+    path VARCHAR NOT NULL,
+    status VARCHAR NOT NULL
+);
+"""
+
+DDL_HOLDINGS = """
+CREATE TABLE IF NOT EXISTS holdings (
+    fund_ticker VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    known_at TIMESTAMPTZ NOT NULL,
+    file_version INTEGER NOT NULL,
+    security_id VARCHAR,
+    security_name VARCHAR NOT NULL,
+    security_ticker VARCHAR,
+    exchange VARCHAR,
+    isin VARCHAR,
+    cusip VARCHAR,
+    asset_class VARCHAR NOT NULL,
+    sector VARCHAR NOT NULL,
+    country VARCHAR NOT NULL,
+    currency VARCHAR,
+    weight DOUBLE NOT NULL,
+    shares DOUBLE NOT NULL,
+    market_value DOUBLE,
+    source_id VARCHAR NOT NULL,
+    raw_file_sha256 VARCHAR NOT NULL
+);
+"""
+
+DDL_QA_EVENTS = """
+CREATE TABLE IF NOT EXISTS qa_events (
+    raw_file_sha256 VARCHAR NOT NULL,
+    source_id VARCHAR NOT NULL,
+    fund_ticker VARCHAR NOT NULL,
+    as_of_date DATE,
+    check VARCHAR NOT NULL,
+    severity VARCHAR NOT NULL,
+    detail VARCHAR NOT NULL,
+    excluded BOOLEAN NOT NULL
+);
+"""
+
+DDL_HOLDINGS_CHANGES = """
+CREATE TABLE IF NOT EXISTS holdings_changes (
+    fund_ticker VARCHAR NOT NULL,
+    from_as_of DATE NOT NULL,
+    to_as_of DATE NOT NULL,
+    security_id VARCHAR,
+    change_type VARCHAR NOT NULL,
+    weight_before DOUBLE,
+    weight_after DOUBLE,
+    delta DOUBLE
+);
+"""
