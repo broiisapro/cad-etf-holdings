@@ -63,6 +63,13 @@ files = ["etfh"]
 module = ["yaml", "camelot", "pdfplumber", "openpyxl", "reportlab.lib.pagesizes", "reportlab.pdfgen"]
 ignore_missing_imports = true
 
+# Modules owned by other wave-02 workstreams that merge after the interface
+# pull request; remove these overrides in the Epic 1 integration issue once
+# etfh.secmaster and etfh.validate are on main.
+[[tool.mypy.overrides]]
+module = ["etfh.secmaster", "etfh.secmaster.*", "etfh.validate"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = '-m "not network"'
