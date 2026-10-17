@@ -46,6 +46,7 @@ _TORONTO = ZoneInfo("America/Toronto")
 _WHITESPACE = re.compile(r"\s+")
 _NBSP = "\u00a0"
 _NARROW_NBSP = "\u202f"
+_NULL_SEGMENTS = {"-", "\u2212", "\u2013", "\u2014"}
 
 _DATE_FORMATS = (
     "%B %d, %Y",
@@ -200,8 +201,23 @@ GLOBALX_RULES = replace(
     ),
 )
 
+BMO_RULES = replace(
+    DEFAULT_RULES,
+    name="bmo",
+    total_patterns=(
+        r"total\s+investments?\s*:?\s*([<>]?\s*-?\d[\d\s.,]*\s*%)",
+        *DEFAULT_RULES.total_patterns,
+    ),
+    ignored_segment_patterns=(
+        r"^\$.*",
+        r"^\d{1,3}(?:,\d{3})+(?:\.\d+)?$",
+        r"^\(\d{1,3}(?:,\d{3})+(?:\.\d+)?\)$",
+    ),
+)
+
 QPD_RULES["vanguard_ca_qpd"] = VANGUARD_RULES
 QPD_RULES["globalx_ca_qpd"] = GLOBALX_RULES
+QPD_RULES["bmo_qpd"] = BMO_RULES
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,7 +456,7 @@ def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules
     name_parts: list[str] = []
     for raw_segment in segments:
         segment = _clean(raw_segment)
-        if not segment or _ignored_segment(segment, rules):
+        if not segment or segment in _NULL_SEGMENTS or _ignored_segment(segment, rules):
             continue
         if name_parts:
             standalone = _weight_value(segment)
