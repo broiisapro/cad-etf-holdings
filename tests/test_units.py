@@ -60,13 +60,14 @@ def test_parse_number_parentheses_negate(value: float) -> None:
     assert parse_number(f"({text})") == -float(text)
 
 
-class TestNormalizeWeights:
-    def test_weights_percent_vs_fraction_normalized(self) -> None:
-        percent = normalize_weights(pl.Series([5.2, 3.0, 91.8]), WeightUnit.percent)
-        fraction = normalize_weights(pl.Series([0.052, 0.03, 0.918]), WeightUnit.fraction)
-        assert percent.to_list() == pytest.approx(fraction.to_list())
-        assert percent.to_list() == pytest.approx([0.052, 0.03, 0.918])
+def test_weights_percent_vs_fraction_normalized() -> None:
+    percent = normalize_weights(pl.Series([5.2, 3.0, 91.8]), WeightUnit.percent)
+    fraction = normalize_weights(pl.Series([0.052, 0.03, 0.918]), WeightUnit.fraction)
+    assert percent.to_list() == pytest.approx(fraction.to_list())
+    assert percent.to_list() == pytest.approx([0.052, 0.03, 0.918])
 
+
+class TestNormalizeWeights:
     def test_fraction_passthrough(self) -> None:
         values = pl.Series([0.5, 0.5])
         assert normalize_weights(values, WeightUnit.fraction).to_list() == [0.5, 0.5]
