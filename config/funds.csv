@@ -6,3 +6,55 @@ SYND,synthetic,Synthetic Dunes Equity Fund,equity,syn_xlsx,XTSE,
 SYNE,synthetic,Synthetic Ember Equity Fund,equity,syn_json,XTSE,
 SYNF,synthetic,Synthetic Fjord Equity Fund,equity,syn_pdf,XTSE,
 SYNX,synthetic,Synthetic Granite Equity Fund,equity,syn_blocked,XTSE,
+ZSP,bmo,BMO S&P 500 Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZCN,bmo,BMO S&P/TSX Capped Composite Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZEA,bmo,BMO MSCI EAFE Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZEM,bmo,BMO MSCI Emerging Markets Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZQQ,bmo,BMO Nasdaq 100 Equity Hedged to CAD Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZLB,bmo,BMO Low Volatility Canadian Equity ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZEB,bmo,BMO Equal Weight Banks Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZDV,bmo,BMO Canadian Dividend ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZWB,bmo,BMO Covered Call Canadian Banks ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZUT,bmo,BMO Equal Weight Utilities Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZRE,bmo,BMO Equal Weight REITs Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZGD,bmo,BMO Equal Weight Global Gold Index ETF,equity,bmo_daily;bmo_qpd,XTSE,
+ZAG,bmo,BMO Aggregate Bond Index ETF,fixed_income,bmo_daily;bmo_qpd,XTSE,
+ZCS,bmo,BMO Short Corporate Bond Index ETF,fixed_income,bmo_daily;bmo_qpd,XTSE,
+ZFL,bmo,BMO Long Federal Bond Index ETF,fixed_income,bmo_daily;bmo_qpd,XTSE,
+ZST,bmo,BMO Ultra Short-Term Bond ETF,fixed_income,bmo_daily;bmo_qpd,XTSE,
+PDF,purpose,Purpose Core Dividend Fund,equity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-core-dividend-fund
+PDIV,purpose,Purpose Enhanced Dividend Fund,equity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-enhanced-dividend-fund
+PID,purpose,Purpose International Dividend Fund,equity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-international-dividend-fund
+REM,purpose,Purpose Emerging Markets Dividend Fund,equity,purpose_daily;purpose_qpd,NEOE,purpose_slug=purpose-emerging-markets-dividend-fund
+BNC,purpose,Purpose Canadian Financial Income Fund,equity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-canadian-financial-income-fund
+RDE,purpose,Purpose Core Equity Income Fund,equity,purpose_daily;purpose_qpd,NEOE,purpose_slug=purpose-core-equity-income-fund
+PHR,purpose,Purpose Real Estate Income Fund,equity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-real-estate-income-fund
+PINV,purpose,Purpose Global Innovators Fund,equity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-global-innovators-fund
+BND,purpose,Purpose Global Bond Fund,fixed_income,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-global-bond-fund
+KILO,purpose,Purpose Gold Bullion Fund,commodity,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-gold-bullion-fund
+PSA,purpose,Purpose High Interest Savings Fund,fixed_income,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-high-interest-savings-fund
+PRP,purpose,Purpose Conservative Income Fund,balanced,purpose_daily;purpose_qpd,XTSE,purpose_slug=purpose-conservative-income-fund
+EDGE,evolve,Evolve Innovation Index Fund,equity,evolve_daily;evolve_qpd,XTSE,
+EBNK,evolve,Evolve European Banks Enhanced Yield ETF,equity,evolve_daily;evolve_qpd,XTSE,
+ESPX,evolve,Evolve S&P 500® Enhanced Yield Fund,equity,evolve_daily;evolve_qpd,XTSE,
+CALL,evolve,Evolve US Banks Enhanced Yield Fund,equity,evolve_daily;evolve_qpd,XTSE,
+LIFE,evolve,Evolve Global Healthcare Enhanced Yield Fund,equity,evolve_daily;evolve_qpd,XTSE,
+CYBR,evolve,Evolve Cyber Security Index Fund,equity,evolve_daily;evolve_qpd,XTSE,
+VFV,vanguard_ca,Vanguard S&P 500 Index ETF,equity,vanguard_ca_qpd,XTSE,
+VCN,vanguard_ca,Vanguard FTSE Canada All Cap Index ETF,equity,vanguard_ca_qpd,XTSE,
+VUN,vanguard_ca,Vanguard U.S. Total Market Index ETF,equity,vanguard_ca_qpd,XTSE,
+VCE,vanguard_ca,Vanguard FTSE Canada Index ETF,equity,vanguard_ca_qpd,XTSE,
+VDY,vanguard_ca,Vanguard FTSE Canadian High Dividend Yield Index ETF,equity,vanguard_ca_qpd,XTSE,
+VAB,vanguard_ca,Vanguard Canadian Aggregate Bond Index ETF,fixed_income,vanguard_ca_qpd,XTSE,
+VRE,vanguard_ca,Vanguard FTSE Canadian Capped REIT Index ETF,equity,vanguard_ca_qpd,XTSE,
+VXC,vanguard_ca,Vanguard FTSE Global All Cap ex Canada Index ETF,equity,vanguard_ca_qpd,XTSE,
+VEE,vanguard_ca,Vanguard FTSE Emerging Markets All Cap Index ETF,equity,vanguard_ca_qpd,XTSE,
+VGG,vanguard_ca,Vanguard U.S. Dividend Appreciation Index ETF,equity,vanguard_ca_qpd,XTSE,
+HXT,globalx_ca,Global X S&P/TSX 60 Index Corporate Class ETF,equity,globalx_ca_qpd,XTSE,
+HXQ,globalx_ca,Global X Nasdaq-100 Index Corporate Class ETF,equity,globalx_ca_qpd,XTSE,
+HXS,globalx_ca,Global X S&P 500 Index Corporate Class ETF,equity,globalx_ca_qpd,XTSE,
+HXCN,globalx_ca,Global X S&P/TSX Capped Composite Index Corporate Class ETF,equity,globalx_ca_qpd,XTSE,
+HMMJ,globalx_ca,Global X Marijuana Life Sciences Index ETF,equity,globalx_ca_qpd,XTSE,
+CASH,globalx_ca,Global X High Interest Savings ETF,fixed_income,globalx_ca_qpd,XTSE,
+HAB,globalx_ca,Global X Active Corporate Bond ETF,fixed_income,globalx_ca_qpd,XTSE,
+UTIL,globalx_ca,Global X Equal Weight Canadian Utilities Index ETF,equity,globalx_ca_qpd,XTSE,

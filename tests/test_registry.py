@@ -303,7 +303,8 @@ class TestCommittedConfig:
     def test_funds_load_against_sources(self) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
         funds = load_funds(CONFIG_DIR / "funds.csv", sources)
-        assert [fund.ticker for fund in funds] == [
+        synthetic = [fund for fund in funds if fund.issuer == "synthetic"]
+        assert [fund.ticker for fund in synthetic] == [
             "SYNA",
             "SYNB",
             "SYNC",
@@ -312,7 +313,6 @@ class TestCommittedConfig:
             "SYNF",
             "SYNX",
         ]
-        assert all(fund.ticker.startswith("SYN") for fund in funds)
         assert funds[0].source_ids == ("syn_csv",)
         assert funds[0].params == {}
 
