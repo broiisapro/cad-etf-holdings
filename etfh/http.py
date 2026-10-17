@@ -26,6 +26,7 @@ __all__ = ["HTTPRetryError", "PoliteClient", "RobotsDisallowedError"]
 
 _MAX_ATTEMPTS = 4
 _BASE_INTERVAL_SECONDS = 1.0
+_MAX_RETRY_AFTER_SECONDS = 120.0
 
 
 class RobotsDisallowedError(PermissionError):
@@ -35,12 +36,12 @@ class RobotsDisallowedError(PermissionError):
 class HTTPRetryError(Exception):
     """Raised after retryable responses (429/5xx) exhaust the attempts."""
 
-    def __init__(self, url: str, status_code: int) -> None:
+    def __init__(self, url: str, status_code: int, reason: str | None = None) -> None:
         self.url = url
         self.status_code = status_code
-        super().__init__(
-            f"giving up on {url}: last status {status_code} after {_MAX_ATTEMPTS} attempts"
-        )
+        self.reason = reason
+        detail = reason or f"last status {status_code} after {_MAX_ATTEMPTS} attempts"
+        super().__init__(f"giving up on {url}: {detail}")
 
 
 class _RetryableStatus(Exception):
@@ -173,6 +174,15 @@ class PoliteClient:
             response = self._client.get(url, headers=headers)
             if response.status_code == 429 or response.status_code >= 500:
                 retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                if retry_after is not None and retry_after > _MAX_RETRY_AFTER_SECONDS:
+                    raise HTTPRetryError(
+                        url,
+                        response.status_code,
+                        reason=(
+                            f"Retry-After {retry_after:.0f}s exceeds the "
+                            f"{_MAX_RETRY_AFTER_SECONDS:.0f}s cap"
+                        ),
+                    )
                 raise _RetryableStatus(response.status_code, retry_after)
             return response
 
