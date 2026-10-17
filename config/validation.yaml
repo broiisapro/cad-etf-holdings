@@ -1,0 +1,17 @@
+# Validation tolerances for per-file holdings checks (D18, D38).
+#
+# `weight_sum_tolerance` is the allowed absolute deviation of a daily holdings
+# file's weight total from 1.0, per fund asset class (weights are fractions).
+# `qpd_total_tolerance` is the same bound for the difference between a quarterly
+# disclosure's table sum and the total printed in the document (0.005 = 0.5 pp).
+# `future_as_of_days` allows an as-of date this many days after the fetch date
+# in America/Toronto before `future_as_of` fails (0 means "not after the fetch
+# date").
+weight_sum_tolerance:
+  equity: 0.005
+  fixed_income: 0.01
+  balanced: 0.02
+  commodity: 0.02
+  other: 0.02
+qpd_total_tolerance: 0.005
+future_as_of_days: 0
