@@ -173,19 +173,28 @@ def _asset_class(value: Any) -> str:
     return text or "other"
 
 
+def _is_cash_like(record: dict[str, Any]) -> bool:
+    ticker = _clean_identifier(record.get("security_ticker"))
+    name = (_clean_text(record.get("security_name")) or "").lower()
+    return ticker == "CASH" or name.startswith("cash")
+
+
 def _row(record: dict[str, Any]) -> dict[str, Any]:
     weight = parse_number(_clean_text(record.get("weight")))
     if weight is None:
         raise ValueError(f"missing weight for holding {record.get('security_name')!r}")
     shares = parse_number(_clean_text(record.get("shares")))
     market_value = parse_number(_clean_text(record.get("market_value")))
+    asset_class = _asset_class(record.get("asset_class"))
+    if asset_class == "other" and _is_cash_like(record):
+        asset_class = "cash"
     return {
         "security_name": _clean_text(record.get("security_name")) or "",
         "security_ticker": _clean_identifier(record.get("security_ticker")),
         "exchange": _clean_identifier(record.get("exchange")),
         "isin": _clean_identifier(record.get("isin")),
         "cusip": _clean_identifier(record.get("cusip")),
-        "asset_class": _asset_class(record.get("asset_class")),
+        "asset_class": asset_class,
         "sector": _clean_text(record.get("sector")) or "Unknown",
         "country": _clean_text(record.get("country")) or "Unknown",
         "currency": _clean_identifier(record.get("currency")),

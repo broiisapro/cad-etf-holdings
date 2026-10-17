@@ -33,17 +33,17 @@ EXPECTED_REPORT = (
     "    error duplicate_security: security_id=ISIN:CA600000AA15 appears 2 times "
     "(rows 2, 3)\n"
     "warnings: 0\n"
-    "unmatched securities: 30 row(s), showing up to 10:\n"
-    "  SYNB Cash and Cash Equivalents\n"
-    "  SYNB Cash and Cash Equivalents\n"
-    "  SYNB Cash and Cash Equivalents\n"
-    "  SYNB Cash and Cash Equivalents\n"
-    "  SYNB Cash and Cash Equivalents\n"
+    "unmatched securities: 25 row(s), showing up to 10:\n"
     "  SYNF Birchwood Timber Corp.\n"
     "  SYNF Cash and Cash Equivalents\n"
     "  SYNF Cedarline Energy Corp.\n"
     "  SYNF Dunmore Mining Inc.\n"
     "  SYNF Elmsworth Capital Corp.\n"
+    "  SYNF Everfield Agriculture Corp.\n"
+    "  SYNF Fairhaven Financial Group\n"
+    "  SYNF Foxglove Networks Inc.\n"
+    "  SYNF Glenora Utilities Inc.\n"
+    "  SYNF Harbourside Logistics Corp.\n"
 )
 
 

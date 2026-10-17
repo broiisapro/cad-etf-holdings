@@ -318,7 +318,9 @@ def test_reports_and_result_counts_match_the_tables(
     )
     assert len(unmatched_lines) - 1 == result.n_unmatched
     proposals_lines = (reports / "fuzzy_proposals.csv").read_text(encoding="utf-8").splitlines()
-    assert proposals_lines == ["security_name,candidate_security_id,candidate_name,score"]
+    assert proposals_lines[0] == "security_name,candidate_security_id,candidate_name,score"
+    assert len(proposals_lines) > 1
+    assert any("ISIN:" in line for line in proposals_lines[1:])
     counts = {
         table: _query(out_dir, f"SELECT COUNT(*) AS n FROM {table}")["n"][0]
         for table in ("file_versions", "holdings", "qa_events", "holdings_changes")
