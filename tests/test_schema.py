@@ -94,7 +94,7 @@ class TestParsedHoldings:
         with pytest.raises(pa.errors.SchemaError):
             ParsedHoldings.validate(frame)
 
-    @pytest.mark.parametrize("bad_weight", [float("nan"), float("inf"), -0.1, 1.5])
+    @pytest.mark.parametrize("bad_weight", [float("nan"), float("inf"), -1.5, 1.5])
     def test_non_finite_or_out_of_range_weight_fails(self, bad_weight: float) -> None:
         frame = _parsed_frame(weight=[bad_weight])
         with pytest.raises(pa.errors.SchemaError):
@@ -104,6 +104,18 @@ class TestParsedHoldings:
         frame = _parsed_frame(weight=pl.Series([None], dtype=pl.Float64))
         with pytest.raises(pa.errors.SchemaError):
             ParsedHoldings.validate(frame)
+
+    def test_negative_weight_and_negative_values_pass(self) -> None:
+        frame = _parsed_frame(
+            weight=[-0.45],
+            shares=[-1200.0],
+            market_value=pl.Series([-45000.0], dtype=pl.Float64),
+        )
+        assert ParsedHoldings.validate(frame).height == 1
+
+    def test_null_shares_pass(self) -> None:
+        frame = _parsed_frame(shares=pl.Series([None], dtype=pl.Float64))
+        assert ParsedHoldings.validate(frame).height == 1
 
     def test_all_null_nullable_column_with_dtype_passes(self) -> None:
         frame = _parsed_frame(
@@ -144,6 +156,14 @@ class TestHoldings:
 
     def test_null_security_id_allowed(self) -> None:
         frame = _holdings_frame().with_columns(pl.Series("security_id", [None], dtype=pl.String))
+        assert Holdings.validate(frame).height == 1
+
+    def test_short_line_with_null_shares_and_negative_weight_passes(self) -> None:
+        frame = _holdings_frame().with_columns(
+            pl.Series("weight", [-0.3], dtype=pl.Float64),
+            pl.Series("shares", [None], dtype=pl.Float64),
+            pl.Series("market_value", [-25000.0], dtype=pl.Float64),
+        )
         assert Holdings.validate(frame).height == 1
 
 
