@@ -6,23 +6,146 @@ parser, applies the security master and validation, and writes
 always a full rebuild: the same raw store produces byte-identical tables (D19,
 D15).
 
-The implementation lands in the build issue; this module currently fixes the
-shared interface (``BuildResult`` and the dependency-injection signature) that
-the CLI and tests build against.
+Point-in-time rules (D20):
+
+- a version is one distinct SHA-256 for one ``(source, fund, as_of_date)``;
+  repeated fetches of identical bytes collapse into one version whose
+  ``known_at`` is the earliest fetch that produced the hash;
+- a different SHA-256 for the same fund and as-of date is a new version
+  (``file_version`` 1, 2, ...) ordered by ``known_at``;
+- ``known_at`` is the stated publication date when the file carries one,
+  otherwise the fetch time.
+
+Every table is sorted on a documented key before writing (D15):
+
+- ``file_versions``: source_id, fund_ticker, as_of_date, file_version
+- ``holdings``: fund_ticker, as_of_date, file_version, security_id,
+  security_name, security_ticker, isin, cusip, currency
+- ``qa_events``: source_id, fund_ticker, as_of_date, check, detail,
+  raw_file_sha256
+- ``holdings_changes``: fund_ticker, from_as_of, to_as_of, change_type,
+  security_id
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import duckdb
+import polars as pl
+from polars.datatypes import DataType, DataTypeClass
+
+from etfh.parse.registry import find_parser
+from etfh.registry import Fund, Source, load_funds, load_sources
+from etfh.schema import (
+    DDL_FILE_VERSIONS,
+    DDL_HOLDINGS,
+    DDL_HOLDINGS_CHANGES,
+    DDL_QA_EVENTS,
+)
+from etfh.storage import RawStore
+from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
+from etfh.validate import ValidationConfig, is_excluded, validate_file
 
 if TYPE_CHECKING:
     from etfh.secmaster.resolve import SecurityMaster
     from etfh.validate import QaFinding
 
-__all__ = ["BuildResult", "build"]
+__all__ = ["CHANGE_THRESHOLD", "BuildResult", "build"]
+
+CHANGE_THRESHOLD = 0.001
+
+_DDLS = (DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES)
+
+_FILE_VERSIONS_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "source_id": pl.String,
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "file_version": pl.Int32,
+    "known_at": pl.Datetime("us", "UTC"),
+    "raw_file_sha256": pl.String,
+    "path": pl.String,
+    "status": pl.String,
+}
+
+_HOLDINGS_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "known_at": pl.Datetime("us", "UTC"),
+    "file_version": pl.Int32,
+    "security_id": pl.String,
+    "security_name": pl.String,
+    "security_ticker": pl.String,
+    "exchange": pl.String,
+    "isin": pl.String,
+    "cusip": pl.String,
+    "asset_class": pl.String,
+    "sector": pl.String,
+    "country": pl.String,
+    "currency": pl.String,
+    "weight": pl.Float64,
+    "shares": pl.Float64,
+    "market_value": pl.Float64,
+    "source_id": pl.String,
+    "raw_file_sha256": pl.String,
+}
+
+_QA_EVENTS_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "raw_file_sha256": pl.String,
+    "source_id": pl.String,
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "check": pl.String,
+    "severity": pl.String,
+    "detail": pl.String,
+    "excluded": pl.Boolean,
+}
+
+_HOLDINGS_CHANGES_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "fund_ticker": pl.String,
+    "from_as_of": pl.Date,
+    "to_as_of": pl.Date,
+    "security_id": pl.String,
+    "change_type": pl.String,
+    "weight_before": pl.Float64,
+    "weight_after": pl.Float64,
+    "delta": pl.Float64,
+}
+
+_UNMATCHED_COLUMNS = (
+    "fund_ticker",
+    "as_of_date",
+    "security_name",
+    "security_ticker",
+    "exchange",
+    "source_id",
+    "raw_file_sha256",
+)
+
+_FUZZY_PROPOSAL_COLUMNS = (
+    "security_name",
+    "candidate_security_id",
+    "candidate_name",
+    "score",
+)
+
+_HOLDINGS_SORT_KEY = (
+    "fund_ticker",
+    "as_of_date",
+    "file_version",
+    "security_id",
+    "security_name",
+    "security_ticker",
+    "isin",
+    "cusip",
+    "currency",
+    "weight",
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +168,25 @@ class BuildResult:
     n_unmatched: int
 
 
+@dataclass
+class _Candidate:
+    parsed: ParsedFile
+    source: Source
+    fund: Fund
+    known_at: datetime
+    fetched_at: datetime
+    path: str
+
+
+@dataclass
+class _Version:
+    source_id: str
+    fund_ticker: str
+    as_of_date: date
+    file_version: int
+    candidate: _Candidate = field(repr=False)
+
+
 def build(
     raw_root: Path,
     out_dir: Path,
@@ -60,4 +202,388 @@ def build(
     :func:`etfh.validate.validate_file` are imported lazily. Tests pass fakes
     that follow the same contracts.
     """
-    raise NotImplementedError
+    raw_root = Path(raw_root)
+    out_dir = Path(out_dir)
+    sources = _load_sources(config_dir / "sources.yaml")
+    funds = load_funds(config_dir / "funds.csv", sources)
+    funds_by_ticker = {fund.ticker: fund for fund in funds}
+    if security_master is None:
+        security_master = _default_security_master(config_dir)
+    validation_config = ValidationConfig.load(config_dir / "validation.yaml")
+    if validator is None:
+        validator = validate_file
+
+    raws = RawStore(raw_root).iter_raw()
+    parsed_cache: dict[str, ParsedFile] = {}
+    failures: dict[str, tuple[str, str]] = {}
+    qa_rows: list[dict[str, Any]] = []
+    candidates: dict[tuple[str, str, date], dict[str, _Candidate]] = {}
+
+    for raw in raws:
+        source = sources.get(raw.source_id)
+        if source is None:
+            qa_rows.append(
+                _qa_row(
+                    raw,
+                    raw.as_of_hint,
+                    "unknown_source",
+                    "error",
+                    f"source {raw.source_id!r} is not in sources.yaml",
+                    excluded=True,
+                )
+            )
+            continue
+        fund = funds_by_ticker.get(raw.fund_ticker)
+        if fund is None:
+            qa_rows.append(
+                _qa_row(
+                    raw,
+                    raw.as_of_hint,
+                    "unknown_fund",
+                    "error",
+                    f"fund {raw.fund_ticker!r} is not in funds.csv",
+                    excluded=True,
+                )
+            )
+            continue
+        if raw.sha256 not in parsed_cache and raw.sha256 not in failures:
+            parser = find_parser(raw, source)
+            if parser is None:
+                failures[raw.sha256] = (
+                    "no_parser",
+                    f"no parser for .{raw.ext} files from source {source.id}",
+                )
+            else:
+                try:
+                    parsed_cache[raw.sha256] = parser.parse(raw)
+                except Exception as error:
+                    failures[raw.sha256] = ("parse_error", f"{type(error).__name__}: {error}")
+        if raw.sha256 in failures:
+            check, detail = failures[raw.sha256]
+            qa_rows.append(_qa_row(raw, raw.as_of_hint, check, "error", detail, excluded=True))
+            continue
+        parsed = parsed_cache[raw.sha256]
+        known_at = parsed.published_at if parsed.published_at is not None else raw.fetched_at
+        group = candidates.setdefault((raw.source_id, raw.fund_ticker, parsed.as_of_date), {})
+        previous = group.get(raw.sha256)
+        if previous is None:
+            group[raw.sha256] = _Candidate(
+                parsed=parsed,
+                source=source,
+                fund=fund,
+                known_at=known_at,
+                fetched_at=raw.fetched_at,
+                path=str(raw.path),
+            )
+        else:
+            previous.known_at = min(previous.known_at, known_at)
+            previous.fetched_at = min(previous.fetched_at, raw.fetched_at)
+            previous.path = min(previous.path, str(raw.path))
+
+    versions: list[_Version] = []
+    for source_id, fund_ticker, as_of_date in sorted(candidates):
+        group = candidates[(source_id, fund_ticker, as_of_date)]
+        ordered = sorted(group.items(), key=lambda item: (item[1].known_at, item[0]))
+        for index, (_, candidate) in enumerate(ordered, start=1):
+            versions.append(
+                _Version(
+                    source_id=source_id,
+                    fund_ticker=fund_ticker,
+                    as_of_date=as_of_date,
+                    file_version=index,
+                    candidate=candidate,
+                )
+            )
+
+    file_version_rows: list[dict[str, Any]] = []
+    holdings_frames: list[pl.DataFrame] = []
+    for version in versions:
+        candidate = version.candidate
+        assigned = security_master.assign(candidate.parsed.frame)
+        parsed_with_id = ParsedFile(
+            raw=candidate.parsed.raw,
+            as_of_date=candidate.parsed.as_of_date,
+            published_at=candidate.parsed.published_at,
+            frame=assigned,
+            notes=list(candidate.parsed.notes),
+        )
+        findings = validator(
+            parsed_with_id,
+            source=candidate.source,
+            fund_asset_class=candidate.fund.asset_class,
+            config=validation_config,
+        )
+        excluded = is_excluded(findings)
+        file_version_rows.append(
+            {
+                "source_id": version.source_id,
+                "fund_ticker": version.fund_ticker,
+                "as_of_date": version.as_of_date,
+                "file_version": version.file_version,
+                "known_at": candidate.known_at,
+                "raw_file_sha256": candidate.parsed.raw.sha256,
+                "path": candidate.path,
+                "status": "excluded" if excluded else "included",
+            }
+        )
+        for finding in findings:
+            qa_rows.append(
+                {
+                    "raw_file_sha256": candidate.parsed.raw.sha256,
+                    "source_id": version.source_id,
+                    "fund_ticker": version.fund_ticker,
+                    "as_of_date": version.as_of_date,
+                    "check": finding.check,
+                    "severity": finding.severity,
+                    "detail": finding.detail,
+                    "excluded": excluded,
+                }
+            )
+        if not excluded:
+            holdings_frames.append(
+                _holdings_frame(
+                    assigned,
+                    known_at=candidate.known_at,
+                    file_version=version.file_version,
+                )
+            )
+
+    file_versions = _sorted(
+        pl.DataFrame(file_version_rows, schema=_FILE_VERSIONS_SCHEMA),
+        ("source_id", "fund_ticker", "as_of_date", "file_version"),
+    )
+    holdings = _sorted(
+        pl.concat(holdings_frames, how="vertical")
+        if holdings_frames
+        else pl.DataFrame(schema=_HOLDINGS_SCHEMA),
+        _HOLDINGS_SORT_KEY,
+    )
+    qa_events = _sorted(
+        pl.DataFrame(qa_rows, schema=_QA_EVENTS_SCHEMA),
+        ("source_id", "fund_ticker", "as_of_date", "check", "detail", "raw_file_sha256"),
+    )
+    priority = {source_id: _source_priority(source) for source_id, source in sources.items()}
+    holdings_changes = _compute_changes(holdings, priority)
+
+    frames = {
+        "file_versions": file_versions,
+        "holdings": holdings,
+        "qa_events": qa_events,
+        "holdings_changes": holdings_changes,
+    }
+    db_path = _write_database(out_dir, frames)
+    unmatched = _write_reports(out_dir, holdings)
+    return BuildResult(
+        out_dir=out_dir,
+        db_path=db_path,
+        n_file_versions=file_versions.height,
+        n_included_files=file_versions.filter(pl.col("status") == "included").height,
+        n_excluded_files=file_versions.filter(pl.col("status") == "excluded").height,
+        n_holdings=holdings.height,
+        n_changes=holdings_changes.height,
+        n_qa_events=qa_events.height,
+        n_unmatched=unmatched.height,
+    )
+
+
+def _qa_row(
+    raw: RawFile,
+    as_of_date: date | None,
+    check: str,
+    severity: str,
+    detail: str,
+    *,
+    excluded: bool,
+) -> dict[str, Any]:
+    return {
+        "raw_file_sha256": raw.sha256,
+        "source_id": raw.source_id,
+        "fund_ticker": raw.fund_ticker,
+        "as_of_date": as_of_date,
+        "check": check,
+        "severity": severity,
+        "detail": detail,
+        "excluded": excluded,
+    }
+
+
+def _holdings_frame(frame: pl.DataFrame, *, known_at: datetime, file_version: int) -> pl.DataFrame:
+    added = frame.with_columns(
+        pl.lit(known_at).alias("known_at"),
+        pl.lit(file_version, dtype=pl.Int32).alias("file_version"),
+    )
+    return added.select(list(_HOLDINGS_SCHEMA))
+
+
+def _sorted(frame: pl.DataFrame, keys: tuple[str, ...]) -> pl.DataFrame:
+    return frame.sort(list(keys))
+
+
+def _source_priority(source: Source) -> int:
+    if source.kind is SourceKind.quarterly_disclosure:
+        return 1
+    if source.kind is SourceKind.synthetic and source.format is FileFormat.pdf:
+        return 1
+    return 0
+
+
+def _compute_changes(holdings: pl.DataFrame, priority: Mapping[str, int]) -> pl.DataFrame:
+    """Compare consecutive as-of dates per fund, preferring daily sources (D42)."""
+    if holdings.is_empty():
+        return pl.DataFrame(schema=_HOLDINGS_CHANGES_SCHEMA)
+    priority_frame = pl.DataFrame(
+        {
+            "source_id": pl.Series(list(priority), dtype=pl.String),
+            "_priority": pl.Series(list(priority.values()), dtype=pl.Int32),
+        }
+    )
+    versions = (
+        holdings.select("fund_ticker", "as_of_date", "file_version", "source_id")
+        .unique()
+        .join(priority_frame, on="source_id", how="left")
+        .with_columns(pl.col("_priority").fill_null(1))
+    )
+    preferred = (
+        versions.sort(
+            ["fund_ticker", "as_of_date", "_priority", "file_version", "source_id"],
+            descending=[False, False, False, True, False],
+        )
+        .unique(subset=["fund_ticker", "as_of_date"], keep="first", maintain_order=True)
+        .select("fund_ticker", "as_of_date", "file_version", "source_id")
+    )
+    timeline = preferred.select("fund_ticker", "as_of_date").sort(["fund_ticker", "as_of_date"])
+    pairs = (
+        timeline.with_columns(
+            pl.col("as_of_date").shift(1).over("fund_ticker").alias("from_as_of"),
+            pl.col("as_of_date").alias("to_as_of"),
+        )
+        .filter(pl.col("from_as_of").is_not_null())
+        .select("fund_ticker", "from_as_of", "to_as_of")
+    )
+    if pairs.is_empty():
+        return pl.DataFrame(schema=_HOLDINGS_CHANGES_SCHEMA)
+    selected = holdings.join(
+        preferred, on=["fund_ticker", "as_of_date", "file_version", "source_id"], how="inner"
+    ).with_columns(
+        pl.coalesce(
+            pl.col("security_id"),
+            pl.concat_str(
+                ["security_name", "security_ticker", "currency"], separator="|", ignore_nulls=True
+            ),
+        ).alias("_key")
+    )
+    per_version = selected.group_by(["fund_ticker", "as_of_date", "_key"]).agg(
+        pl.col("security_id").drop_nulls().first().alias("security_id"),
+        pl.col("weight").sum().alias("weight"),
+    )
+    before = per_version.rename(
+        {
+            "as_of_date": "from_as_of",
+            "weight": "weight_before",
+            "security_id": "security_id_before",
+        }
+    ).join(pairs, on=["fund_ticker", "from_as_of"], how="inner")
+    after = per_version.rename(
+        {"as_of_date": "to_as_of", "weight": "weight_after", "security_id": "security_id_after"}
+    ).join(pairs, on=["fund_ticker", "to_as_of"], how="inner")
+    keys = ["fund_ticker", "from_as_of", "to_as_of", "_key"]
+    added = after.join(before.select(keys), on=keys, how="anti").select(
+        "fund_ticker",
+        "from_as_of",
+        "to_as_of",
+        pl.col("security_id_after").alias("security_id"),
+        pl.lit("add", dtype=pl.String).alias("change_type"),
+        pl.lit(None, dtype=pl.Float64).alias("weight_before"),
+        pl.col("weight_after"),
+        pl.lit(None, dtype=pl.Float64).alias("delta"),
+    )
+    dropped = before.join(after.select(keys), on=keys, how="anti").select(
+        "fund_ticker",
+        "from_as_of",
+        "to_as_of",
+        pl.col("security_id_before").alias("security_id"),
+        pl.lit("drop", dtype=pl.String).alias("change_type"),
+        pl.col("weight_before"),
+        pl.lit(None, dtype=pl.Float64).alias("weight_after"),
+        pl.lit(None, dtype=pl.Float64).alias("delta"),
+    )
+    changed = (
+        before.join(after, on=keys, how="inner")
+        .with_columns((pl.col("weight_after") - pl.col("weight_before")).alias("delta"))
+        .filter(pl.col("delta").abs() >= CHANGE_THRESHOLD)
+        .select(
+            "fund_ticker",
+            "from_as_of",
+            "to_as_of",
+            pl.coalesce("security_id_after", "security_id_before").alias("security_id"),
+            pl.lit("weight_change", dtype=pl.String).alias("change_type"),
+            "weight_before",
+            "weight_after",
+            "delta",
+        )
+    )
+    changes = pl.concat([added, dropped, changed], how="vertical")
+    return _sorted(
+        changes,
+        ("fund_ticker", "from_as_of", "to_as_of", "change_type", "security_id"),
+    )
+
+
+def _write_database(out_dir: Path, frames: Mapping[str, pl.DataFrame]) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    db_path = out_dir / "etfh.duckdb"
+    db_path.unlink(missing_ok=True)
+    connection = duckdb.connect(str(db_path))
+    try:
+        for ddl in _DDLS:
+            connection.execute(ddl)
+        for table, frame in frames.items():
+            connection.register("_etfh_frame", frame)
+            connection.execute(f"INSERT INTO {table} SELECT * FROM _etfh_frame")
+            connection.unregister("_etfh_frame")
+    finally:
+        connection.close()
+    parquet_dir = out_dir / "parquet"
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    for table, frame in frames.items():
+        frame.write_parquet(parquet_dir / f"{table}.parquet")
+    return db_path
+
+
+def _write_reports(out_dir: Path, holdings: pl.DataFrame) -> pl.DataFrame:
+    reports_dir = out_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    unmatched = _sorted(
+        holdings.filter(pl.col("security_id").is_null()).select(list(_UNMATCHED_COLUMNS)).unique(),
+        ("fund_ticker", "as_of_date", "security_name", "source_id"),
+    )
+    unmatched.write_csv(reports_dir / "unmatched.csv")
+    proposals = pl.DataFrame(
+        schema={
+            "security_name": pl.String,
+            "candidate_security_id": pl.String,
+            "candidate_name": pl.String,
+            "score": pl.Float64,
+        }
+    )
+    proposals.write_csv(reports_dir / "fuzzy_proposals.csv")
+    return unmatched
+
+
+@lru_cache(maxsize=4)
+def _cached_sources(path: str, mtime_ns: int, size: int) -> dict[str, Source]:
+    return load_sources(path)
+
+
+def _load_sources(path: Path) -> dict[str, Source]:
+    stat = path.stat()
+    return _cached_sources(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _default_security_master(config_dir: Path) -> SecurityMaster:
+    from etfh.secmaster.overrides import load_overrides
+    from etfh.secmaster.resolve import SecurityMaster
+
+    overrides_path = config_dir / "security_overrides.csv"
+    overrides = load_overrides(overrides_path) if overrides_path.exists() else []
+    return SecurityMaster(overrides=overrides)
