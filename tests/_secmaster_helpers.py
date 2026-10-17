@@ -57,11 +57,19 @@ def fixture_frame(ticker: str, *, as_of: date | None = None) -> pl.DataFrame:
     return parse_fixture(ticker, as_of=as_of).frame
 
 
-def holdings_frame(rows: list[dict[str, object]]) -> pl.DataFrame:
-    """Build a small all-String holdings frame from partial row dictionaries.
+def holdings_frame(
+    rows: list[dict[str, object]],
+    *,
+    as_of: date = date(2026, 11, 2),
+    source_id: str = "syn_csv",
+    raw_file_sha256: str = "0" * 64,
+) -> pl.DataFrame:
+    """Build a holdings frame from partial row dictionaries.
 
     Columns not named in a row are null, so a test only spells out what the
-    resolution rule under test needs.
+    rule under test needs. ``as_of_date``, ``source_id`` and
+    ``raw_file_sha256`` can be overridden per row or for the whole frame;
+    they are needed by the unmatched report.
     """
     fields = (
         "fund_ticker",
@@ -74,9 +82,22 @@ def holdings_frame(rows: list[dict[str, object]]) -> pl.DataFrame:
         "country",
         "currency",
     )
-    return pl.DataFrame(
+    frame = pl.DataFrame(
         {
             field: pl.Series(field, [row.get(field) for row in rows], dtype=pl.String)
             for field in fields
         }
+    )
+    return frame.with_columns(
+        pl.Series("as_of_date", [row.get("as_of_date", as_of) for row in rows], dtype=pl.Date),
+        pl.Series(
+            "source_id",
+            [row.get("source_id", source_id) for row in rows],
+            dtype=pl.String,
+        ),
+        pl.Series(
+            "raw_file_sha256",
+            [row.get("raw_file_sha256", raw_file_sha256) for row in rows],
+            dtype=pl.String,
+        ),
     )
