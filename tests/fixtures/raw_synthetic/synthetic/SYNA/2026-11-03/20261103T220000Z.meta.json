@@ -1,6 +1,6 @@
 {
   "as_of_hint": "2026-11-03",
-  "bytes": 2327,
+  "bytes": 2296,
   "content_type": "text/csv",
   "etag": null,
   "fetched_at": "2026-11-03T22:00:00+00:00",
@@ -8,7 +8,7 @@
   "http_status": 200,
   "issuer": "synthetic",
   "last_modified": null,
-  "sha256": "4f54c64f718197b187f453785686bbf81825525333fa336e0ac6ff43820e793f",
+  "sha256": "265315b8b904ce35ab97bc5a7b1ed2c21398fdeaf080756559300c9f4741978c",
   "source_id": "syn_csv",
   "url": "synthetic://fixtures/SYNA.csv"
 }

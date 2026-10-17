@@ -195,20 +195,38 @@ def test_expected_overlap_matches_ground_truth() -> None:
         assert Decimal(entry.weight_b) == weights_b[entry.security_id]
 
 
-def test_lookahead_versions_would_change_the_overlap() -> None:
-    overlap = _overlap_fixture()
-    leaked_cutoff = datetime(2026, 11, 4, tzinfo=UTC)
-    weights_a = ground_truth_holdings("SYNA", date(2026, 11, 2), known_before=leaked_cutoff)
-    weights_b = ground_truth_holdings("SYNB", date(2026, 11, 2), known_before=leaked_cutoff)
+def _overlap_of(weights_a: dict[str, Decimal], weights_b: dict[str, Decimal]) -> Decimal:
     common_ids = {
         security_id
         for security_id in set(weights_a) & set(weights_b)
-        if not security_id.startswith("CASH:")
+        if not security_id.startswith(("CASH:", "DERIV:"))
     }
-    leaked = sum((min(weights_a[sid], weights_b[sid]) for sid in common_ids), Decimal(0)).quantize(
+    return sum((min(weights_a[sid], weights_b[sid]) for sid in common_ids), Decimal(0)).quantize(
         Decimal("0.0001")
     )
-    assert leaked != Decimal(overlap.overlap)
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        pytest.param("syna", id="late SYNA 2026-11-03 file leaks"),
+        pytest.param("synb", id="republished SYNB 2026-11-02 file leaks"),
+        pytest.param("both", id="both late files leak"),
+    ],
+)
+def test_lookahead_versions_would_change_the_overlap(leak: str) -> None:
+    """Each late-known file alone must move the 2026-11-02 overlap by >= 0.05."""
+    overlap = _overlap_fixture()
+    leaked_cutoff = datetime(2026, 11, 4, tzinfo=UTC)
+    weights_a = ground_truth_holdings(
+        "SYNA", date(2026, 11, 2), known_before=leaked_cutoff if leak in ("syna", "both") else None
+    )
+    weights_b = ground_truth_holdings(
+        "SYNB", date(2026, 11, 2), known_before=leaked_cutoff if leak in ("synb", "both") else None
+    )
+    leaked = _overlap_of(weights_a, weights_b)
+    gap = abs(leaked - Decimal(overlap.overlap))
+    assert gap >= Decimal("0.05"), (leak, gap)
 
 
 def test_republished_file_has_two_versions_with_one_corrected_weight() -> None:
