@@ -1,0 +1,55 @@
+{
+  "code": "PURA",
+  "name": "Purpose Lookalike Income Fund",
+  "urlName": "purpose-lookalike-income-fund",
+  "fundCode": "PURA",
+  "assetClass": [
+    {
+      "fields": {
+        "slug": "equity",
+        "className": "Equity",
+        "displayName": "Equity"
+      }
+    }
+  ],
+  "portfolio": {
+    "dt": "2026-10-16",
+    "exposure": {},
+    "Level1": {
+      "sector": {
+        "Financials": 40.0,
+        "Utilities": 30.0,
+        "Cash": 30.0
+      },
+      "geo": {
+        "Canada": 70.0,
+        "Cash": 30.0
+      }
+    },
+    "Level4": {
+      "holdings": [
+        {
+          "name": "Northvale Banking Corp.",
+          "geo": "Canada",
+          "sector": "Financials",
+          "weight": "40.00%"
+        },
+        {
+          "name": "Pinehurst Utilities Inc.",
+          "geo": "Canada",
+          "sector": "Utilities",
+          "weight": "30.00%"
+        },
+        {
+          "name": "Cedar Hollow Cash Account",
+          "weight": "30.00%"
+        },
+        {
+          "name": "Total",
+          "weight": "100.00%"
+        }
+      ]
+    },
+    "holdings_data": null
+  }
+}
