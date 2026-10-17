@@ -192,7 +192,8 @@ def test_changes_filters_by_fund_and_date_range() -> None:
     assert rows.height == 1
     assert rows["security_id"].to_list() == ["ISIN:B"]
     assert rows["from_as_of"].to_list() == [date(2026, 10, 30)]
-    assert analytics.changes(con, "XFUND", date(2026, 10, 1), date(2026, 10, 29)).height == 1
+    assert analytics.changes(con, "XFUND", date(2026, 10, 29), date(2026, 10, 29)).height == 0
+    assert analytics.changes(con, "XFUND", date(2026, 10, 1), date(2026, 10, 30)).height == 1
 
 
 def test_funds_available_and_unknown_fund() -> None:

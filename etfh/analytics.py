@@ -227,13 +227,17 @@ def overlap_matrix(
 
 
 def changes(con: duckdb.DuckDBPyConnection, fund: str, start: date, end: date) -> pl.DataFrame:
-    """Rows of ``holdings_changes`` for ``fund`` with ``from_as_of`` in range."""
+    """Rows of ``holdings_changes`` observed within ``[start, end]``.
+
+    A change is observed on its ``to_as_of`` date, so its ``from_as_of`` must be
+    at or after ``start`` and its ``to_as_of`` at or before ``end``.
+    """
     return con.execute(
         """
         SELECT fund_ticker, from_as_of, to_as_of, security_id, change_type,
                weight_before, weight_after, delta
         FROM holdings_changes
-        WHERE fund_ticker = ? AND from_as_of >= ? AND from_as_of <= ?
+        WHERE fund_ticker = ? AND from_as_of >= ? AND to_as_of <= ?
         ORDER BY from_as_of, to_as_of, change_type, security_id
         """,
         [fund, start, end],
