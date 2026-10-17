@@ -10,11 +10,14 @@ import polars as pl
 import pytest
 
 from etfh.parse.purpose import PARSERS, PurposeParser
+from etfh.parse.registry import find_parser
+from etfh.registry import load_sources
 from etfh.schema import ParsedHoldings
 from etfh.types import RawFile
 from tests._parse_helpers import make_raw
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "issuers" / "purpose" / "lookalike.json"
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
 def _raw(path: Path = FIXTURE, fund_ticker: str = "PURA") -> RawFile:
@@ -49,12 +52,11 @@ def test_parses_lookalike_holdings() -> None:
     assert "Total" not in frame["security_name"].to_list()
 
 
-def test_parsed_frame_validates_once_nullable_shares_land() -> None:
-    schema = ParsedHoldings.to_schema()
-    shares_nullable = bool(schema.columns["shares"].nullable)
-    if not shares_nullable:
-        pytest.skip("waiting for the D45 schema correction (nullable shares)")
-    ParsedHoldings.validate(PurposeParser().parse(_raw()).frame)
+def test_parsed_frame_validates_against_schema() -> None:
+    parsed = PurposeParser().parse(_raw())
+    ParsedHoldings.validate(parsed.frame)
+    assert parsed.frame["shares"].null_count() == parsed.frame.height
+    assert parsed.frame["market_value"].null_count() == parsed.frame.height
 
 
 def test_missing_portfolio_date_raises(tmp_path: Path) -> None:
@@ -84,6 +86,22 @@ def test_can_parse_only_purpose_json() -> None:
     assert not parser.can_parse(other)
     assert len(PARSERS) == 1
     assert isinstance(PARSERS[0], PurposeParser)
+
+
+def test_exchange_labels_are_normalized_to_mics(tmp_path: Path) -> None:
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["portfolio"]["Level4"]["holdings"][0]["exchange"] = "TSX"
+    path = tmp_path / "with_exchange.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    parsed = PurposeParser().parse(_raw(path))
+    exchange = parsed.frame.filter(pl.col("security_name") == "Northvale Banking Corp.")
+    assert exchange["exchange"][0] == "XTSE"
+
+
+def test_discovered_by_the_parser_registry() -> None:
+    source = load_sources(CONFIG_DIR / "sources.yaml")["purpose_daily"]
+    parser = find_parser(_raw(), source)
+    assert isinstance(parser, PurposeParser)
 
 
 def test_uses_fund_level_asset_class_for_non_cash_rows() -> None:

@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from etfh.collect.purpose import COLLECTORS, CollectError, PurposeCollector
+from etfh.collect.registry import collector_for
 from etfh.http import PoliteClient
 from etfh.parse.purpose import PurposeParser
 from etfh.registry import Fund, Source, TermsNotAllowedError, load_sources
@@ -190,6 +191,12 @@ def test_missing_slug_raises(tmp_path: Path, fake_clock: FakeClock) -> None:
         pytest.raises(CollectError, match="purpose_slug"),
     ):
         collector.fetch(_fund(params={}), date(2026, 10, 17), client, store)
+
+
+def test_discovered_by_the_collector_registry() -> None:
+    collector = collector_for(_source())
+    assert isinstance(collector, PurposeCollector)
+    assert collector.source_id == "purpose_daily"
 
 
 def test_collectors_registry_exports_the_collector() -> None:
