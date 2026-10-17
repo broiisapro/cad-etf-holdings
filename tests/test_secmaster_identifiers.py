@@ -21,6 +21,8 @@ from etfh.secmaster.identifiers import (
 
 _CUSIP_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ*@#"
 _ISIN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_DIGITS = "0123456789"
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _FIXTURES = Path(__file__).parent / "fixtures" / "raw_synthetic"
 
 
@@ -162,7 +164,15 @@ def test_corrupting_one_isin_character_invalidates_it(nsin: str, position: int) 
     payload = "CA" + nsin
     isin = payload + _isin_check(payload)
     assert isin_is_valid(isin)
-    replacement = _ISIN_ALPHABET[(_ISIN_ALPHABET.index(isin[position]) + 1) % 36]
+    character = isin[position]
+    # Luhn runs over the letter-expanded string, so a digit<->letter swap would
+    # change the expansion length and shift parity - a limitation of the
+    # standard algorithm, not a validation bug. Keep the replacement in the
+    # same class so the property matches a real single-character corruption.
+    if character in _DIGITS:
+        replacement = _DIGITS[(_DIGITS.index(character) + 1) % 10]
+    else:
+        replacement = _LETTERS[(_LETTERS.index(character) + 1) % 26]
     corrupted = isin[:position] + replacement + isin[position + 1 :]
     assert not isin_is_valid(corrupted)
 
