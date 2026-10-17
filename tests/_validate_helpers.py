@@ -30,7 +30,6 @@ RAW_ROOT = FIXTURES / "raw_synthetic"
 MANIFEST_PATH = FIXTURES / "manifest.json"
 _TORONTO = ZoneInfo("America/Toronto")
 _STRING_COLUMNS = ("security_ticker", "exchange", "isin", "cusip", "currency")
-_ISIN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 def load_manifest() -> dict[str, Any]:

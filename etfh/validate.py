@@ -307,7 +307,7 @@ def _check_unit_contradiction(parsed: ParsedFile) -> list[QaFinding]:
 def _check_negative_weight(parsed: ParsedFile) -> list[QaFinding]:
     """Negative weights on security rows are a warning; cash/fx/derivative rows may be negative."""
     frame = parsed.frame
-    if _weight_dtype(frame) is None or "asset_class" not in frame.columns:
+    if _weight_dtype(frame) is None or not {"asset_class", "security_name"}.issubset(frame.columns):
         return []
     negative = (frame["weight"] < 0).fill_null(False)
     non_security = frame["asset_class"].str.to_lowercase().is_in(_NON_SECURITY_ASSET_CLASSES)

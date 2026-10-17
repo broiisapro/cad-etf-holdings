@@ -253,13 +253,12 @@ class TestValidateFileSchemaCheck:
         assert "sector" in findings[0].detail
 
 
-class TestWeightSumTolerance:
-    @pytest.mark.parametrize(("asset_class", "total", "expect_error"), _tolerance_cases())
-    def test_weights_sum_tolerance_by_asset_class(
-        self, asset_class: AssetClass, total: float, expect_error: bool
-    ) -> None:
-        errors = _weight_sum_errors(asset_class, total)
-        assert (errors == {"weight_sum"}) is expect_error
+@pytest.mark.parametrize(("asset_class", "total", "expect_error"), _tolerance_cases())
+def test_weights_sum_tolerance_by_asset_class(
+    asset_class: AssetClass, total: float, expect_error: bool
+) -> None:
+    errors = _weight_sum_errors(asset_class, total)
+    assert (errors == {"weight_sum"}) is expect_error
 
 
 def _validate_raw(raw: RawFile) -> list[QaFinding]:
