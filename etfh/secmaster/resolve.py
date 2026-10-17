@@ -24,6 +24,7 @@ from etfh.secmaster.identifiers import (
     normalize_exchange,
     normalize_ticker,
 )
+from etfh.secmaster.openfigi import FigiLookup
 from etfh.secmaster.overrides import Override
 
 __all__ = ["SecurityMaster"]
@@ -63,10 +64,21 @@ class SecurityMaster:
     Invalid provided identifiers are ignored and counted in
     :attr:`invalid_identifier_count` for the most recent :meth:`assign` call,
     never used.
+
+    When a :class:`~etfh.secmaster.openfigi.FigiLookup` is passed, a
+    ticker-only row whose ``(MIC, ticker)`` maps to the same composite FIGI as
+    an ISIN row *in the same frame* is upgraded to that row's ``ISIN:`` id.
+    Nothing else changes; with ``figi=None`` the result is identical to the
+    no-lookup behaviour.
     """
 
-    def __init__(self, overrides: Sequence[Override] = ()) -> None:
+    def __init__(
+        self,
+        overrides: Sequence[Override] = (),
+        figi: FigiLookup | None = None,
+    ) -> None:
         self.overrides = list(overrides)
+        self.figi = figi
         self.invalid_identifier_count = 0
         self._by_isin: dict[str, str] = {}
         self._by_cusip: dict[str, str] = {}
@@ -86,9 +98,10 @@ class SecurityMaster:
     def assign(self, frame: pl.DataFrame) -> pl.DataFrame:
         """Return ``frame`` with a nullable Utf8 ``security_id`` column added.
 
-        The row count and row order are preserved exactly. ``figi`` lookups
-        are a later addition (issue #24); with no lookup the result depends
-        only on the frame and the overrides.
+        The row count and row order are preserved exactly. With a ``figi``
+        lookup, ticker-only rows can be upgraded to an ``ISIN:`` id present in
+        the same frame; otherwise the result depends only on the frame and the
+        overrides.
         """
         missing = [column for column in _REQUIRED_COLUMNS if column not in frame.columns]
         if missing:
@@ -132,7 +145,56 @@ class SecurityMaster:
             security_ids.append(security_id)
             invalid += row_invalid
         self.invalid_identifier_count = invalid
+        if self.figi is not None:
+            security_ids = self._apply_figi(frame, security_ids)
         return frame.with_columns(pl.Series("security_id", security_ids, dtype=pl.String))
+
+    def _apply_figi(self, frame: pl.DataFrame, security_ids: list[str | None]) -> list[str | None]:
+        """Upgrade ticker-only rows whose FIGI matches an in-frame ISIN row."""
+        assert self.figi is not None
+        jobs: list[tuple[str, str, str | None]] = []
+        isin_rows: list[tuple[str, str | None]] = []
+        ticker_rows: list[tuple[int, str, str]] = []
+        tickers = frame["security_ticker"].to_list()
+        exchanges = frame["exchange"].to_list()
+        isins = frame["isin"].to_list()
+        cusips = frame["cusip"].to_list()
+        asset_classes = frame["asset_class"].to_list()
+        for index in range(frame.height):
+            provided_isin = _clean(isins[index])
+            mic = _mic(exchanges[index])
+            ticker = normalize_ticker(tickers[index])
+            if provided_isin is not None and isin_is_valid(provided_isin):
+                jobs.append(("ID_ISIN", provided_isin, mic))
+                isin_rows.append((provided_isin, mic))
+                continue
+            if provided_isin is not None or _clean(cusips[index]) is not None:
+                continue
+            normalized_class = (asset_classes[index] or "").strip().lower()
+            if normalized_class in _CASH_CLASSES or normalized_class in _DERIVATIVE_CLASSES:
+                continue
+            if mic is not None and ticker is not None:
+                jobs.append(("TICKER", ticker, mic))
+                ticker_rows.append((index, mic, ticker))
+        if not jobs:
+            return security_ids
+        values = self.figi.lookup_many(jobs)
+        isin_by_composite: dict[str, str] = {}
+        for provided_isin, mic in isin_rows:
+            composite = values.get(("ID_ISIN", provided_isin, mic))
+            if composite is not None and composite not in isin_by_composite:
+                isin_by_composite[composite] = provided_isin
+        upgraded = list(security_ids)
+        for index, mic, ticker in ticker_rows:
+            if upgraded[index] != f"TKR:{mic}:{ticker}":
+                continue
+            composite = values.get(("TICKER", ticker, mic))
+            if composite is None:
+                continue
+            matched_isin = isin_by_composite.get(composite)
+            if matched_isin is not None:
+                upgraded[index] = f"ISIN:{matched_isin}"
+        return upgraded
 
     def _resolve(
         self,
