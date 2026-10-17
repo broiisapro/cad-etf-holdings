@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS qa_events (
     source_id VARCHAR NOT NULL,
     fund_ticker VARCHAR NOT NULL,
     as_of_date DATE,
-    check VARCHAR NOT NULL,
+    "check" VARCHAR NOT NULL,
     severity VARCHAR NOT NULL,
     detail VARCHAR NOT NULL,
     excluded BOOLEAN NOT NULL
