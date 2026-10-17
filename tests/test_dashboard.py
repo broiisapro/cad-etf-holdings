@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,15 +11,25 @@ from datetime import date
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from tests._dashboard_helpers import (
     APP_PATH,
     AS_OF,
+    REPO_ROOT,
+    build_synthetic_db,
     install_fake_analytics,
     make_empty_db,
     overlap_matrix,
 )
+
+EXPECTED_OVERLAP_PATH = REPO_ROOT / "tests" / "fixtures" / "expected_overlap.json"
+
+
+@pytest.fixture(scope="module")
+def synthetic_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_synthetic_db(tmp_path_factory.mktemp("synthetic"))
 
 
 def _run_app(monkeypatch, db_path: Path) -> AppTest:
@@ -168,3 +179,46 @@ def test_asof_picker_defaults_to_latest_available(tmp_path, monkeypatch) -> None
 
     assert not app.exception
     assert app.date_input(key="asof").value == date(2025, 1, 2)
+
+
+def test_apptest_against_real_synthetic_build(monkeypatch, synthetic_db) -> None:
+    monkeypatch.setenv("ETFH_DB", str(synthetic_db))
+    app = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    app.run()
+    assert not app.exception
+    assert app.selectbox(key="fund").options == ["SYNA", "SYNB", "SYNE", "SYNF"]
+
+    app.date_input(key="asof").set_value(AS_OF).run()
+    app.selectbox(key="overlap_fund_a").select("SYNA").run()
+    app.selectbox(key="overlap_fund_b").select("SYNB").run()
+    assert not app.exception
+
+    expected = json.loads(EXPECTED_OVERLAP_PATH.read_text(encoding="utf-8"))
+    assert expected["fund_a"] == "SYNA"
+    assert expected["fund_b"] == "SYNB"
+    assert expected["asof"] == AS_OF.isoformat()
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["Overlap"] == f"{float(expected['overlap']):.2%}"
+
+    common = list(app.dataframe)[2].value
+    rows = sorted(common.to_dict("records"), key=lambda row: row["security_id"])
+    wanted = sorted(expected["common"], key=lambda row: row["security_id"])
+    assert len(rows) == int(expected["common_count"])
+    assert [row["security_id"] for row in rows] == [row["security_id"] for row in wanted]
+    for row, want in zip(rows, wanted, strict=True):
+        assert round(float(row["weight_a"]), 4) == float(want["weight_a"])
+        assert round(float(row["weight_b"]), 4) == float(want["weight_b"])
+
+
+def test_real_build_labels_partial_funds(monkeypatch, synthetic_db) -> None:
+    monkeypatch.setenv("ETFH_DB", str(synthetic_db))
+    app = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    app.run()
+    app.date_input(key="asof").set_value(AS_OF).run()
+    app.selectbox(key="fund").select("SYNF").run()
+
+    assert not app.exception
+    assert any("Top holdings only" in info.value for info in app.info)
+    assert any(
+        "SYNF" in subheader.value and "2026-09-30" in subheader.value for subheader in app.subheader
+    )
