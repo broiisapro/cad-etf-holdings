@@ -10,13 +10,16 @@ with subtotal lines, and French-style decimal commas.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-from etfh.types import RawFile
+from etfh.registry import Fund, Source, TermsRecord
+from etfh.types import AssetClass, Decision, FileFormat, RawFile, SourceKind
 
 PdfRow = tuple[str, str] | str
 
@@ -68,8 +71,11 @@ def write_qpd_pdf(
             y -= 8
         if header:
             pdf.setFont("Helvetica-Bold", 9)
-            pdf.drawString(_LEFT, y, header.split(" %")[0].strip())
-            pdf.drawRightString(_RIGHT, y, "% of net asset value")
+            match = re.match(r"^(.*?)\s+(%.*)$", header)
+            left_header = match.group(1) if match else header
+            right_header = match.group(2) if match else "% of net asset value"
+            pdf.drawString(_LEFT, y, left_header)
+            pdf.drawRightString(_RIGHT, y, right_header)
             y -= 6
             if ruled:
                 pdf.line(_LEFT, y, _RIGHT, y)
@@ -190,4 +196,52 @@ def raw_file_for_pdf(
         sha256=hashlib.sha256(content).hexdigest(),
         content_type="application/pdf",
         ext="pdf",
+    )
+
+
+def qpd_source(
+    source_id: str = "vanguard_ca_qpd",
+    *,
+    issuer: str = "vanguard_ca",
+    decision: Decision = Decision.allowed_with_conditions,
+    supported: bool = True,
+    min_interval_seconds: float | None = None,
+) -> Source:
+    """Build a quarterly-disclosure Source for collector tests."""
+    conditions = (
+        ["internal research use only"] if decision is Decision.allowed_with_conditions else []
+    )
+    return Source(
+        id=source_id,
+        issuer=issuer,
+        kind=SourceKind.quarterly_disclosure,
+        format=FileFormat.pdf,
+        url_patterns=["https://example.invalid/qpd.pdf"],
+        update_frequency="quarterly",
+        supported=supported,
+        terms=TermsRecord(
+            url="https://example.invalid/terms",
+            reviewer="Test Reviewer",
+            reviewed_on=date(2026, 10, 17),
+            decision=decision,
+            conditions=conditions,
+            min_interval_seconds=min_interval_seconds,
+        ),
+    )
+
+
+def qpd_fund(
+    ticker: str = "NORTH",
+    *,
+    issuer: str = "vanguard_ca",
+    source_id: str = "vanguard_ca_qpd",
+    asset_class: AssetClass = AssetClass.equity,
+) -> Fund:
+    """Build a Fund for collector tests without touching config files."""
+    return Fund(
+        ticker=ticker,
+        issuer=issuer,
+        name=f"Fictional {ticker} Fund",
+        asset_class=asset_class,
+        source_ids=(source_id,),
     )

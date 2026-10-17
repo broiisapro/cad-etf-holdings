@@ -161,6 +161,17 @@ DEFAULT_RULES = QpdRules()
 
 QPD_RULES: dict[str, QpdRules] = {}
 
+VANGUARD_RULES = replace(
+    DEFAULT_RULES,
+    name="vanguard_ca",
+    total_patterns=(
+        r"total\s+investments?\s*:?\s*([<>]?\s*-?\d[\d\s.,]*\s*%)",
+        *DEFAULT_RULES.total_patterns,
+    ),
+)
+
+QPD_RULES["vanguard_ca_qpd"] = VANGUARD_RULES
+
 
 @dataclass(frozen=True, slots=True)
 class _Row:
