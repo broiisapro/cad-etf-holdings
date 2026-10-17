@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
+import duckdb
 import pandera.polars as pa
 import polars as pl
 import pytest
@@ -222,7 +223,9 @@ class TestOtherModels:
 
 def _ddl_columns(ddl: str) -> list[str]:
     body = ddl[ddl.index("(") + 1 : ddl.rindex(")")]
-    return [line.strip().split()[0] for line in body.strip().splitlines() if line.strip()]
+    return [
+        line.strip().split()[0].strip('"') for line in body.strip().splitlines() if line.strip()
+    ]
 
 
 @pytest.mark.parametrize(
@@ -236,3 +239,22 @@ def _ddl_columns(ddl: str) -> list[str]:
 )
 def test_ddl_columns_match_models(ddl: str, model: type[pa.DataFrameModel]) -> None:
     assert _ddl_columns(ddl) == list(model.to_schema().columns)
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    [DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES],
+)
+def test_ddl_executes_in_duckdb(ddl: str) -> None:
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(ddl)
+        table = _ddl_columns(ddl)
+        description = connection.execute(f"SELECT * FROM {_table_name(ddl)} LIMIT 0").description
+        assert [column[0] for column in description] == table
+    finally:
+        connection.close()
+
+
+def _table_name(ddl: str) -> str:
+    return ddl.split("CREATE TABLE IF NOT EXISTS", 1)[1].split("(", 1)[0].strip()
