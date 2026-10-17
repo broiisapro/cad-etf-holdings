@@ -14,26 +14,11 @@ from pathlib import Path
 
 import httpx
 
+from etfh.collect.registry import CollectError
 from etfh.http import HTTPRetryError, PoliteClient
 from etfh.registry import Fund, Source, load_sources
 from etfh.storage import RawStore
 from etfh.types import RawFile
-
-
-class CollectError(Exception):
-    """Raised when a collector cannot produce a file for a fund.
-
-    Local fallback with the same name and fields as
-    ``etfh.collect.registry.CollectError`` (interfaces.md §3); replaced with the
-    registry import once D's interface PR is merged.
-    """
-
-    def __init__(self, source_id: str, fund_ticker: str, reason: str) -> None:
-        self.source_id = source_id
-        self.fund_ticker = fund_ticker
-        self.reason = reason
-        super().__init__(f"{source_id} {fund_ticker}: {reason}")
-
 
 __all__ = ["COLLECTORS", "PurposeCollector"]
 
@@ -47,11 +32,11 @@ class PurposeCollector:
     source_id = "purpose_daily"
 
     def __init__(self, source: Source | None = None) -> None:
-        self._source = source
+        self.source = source
 
     def bind(self, source: Source) -> None:
         """Bind the registry entry the collector should fetch under."""
-        self._source = source
+        self.source = source
 
     def fetch(
         self,
@@ -68,7 +53,7 @@ class PurposeCollector:
                 fund.ticker,
                 "missing purpose_slug in fund params",
             )
-        source = self._resolve_source()
+        source = self._resolve_source(fund)
         etag, last_modified = _conditional_headers(store, self.source_id, fund.ticker)
         url = _API_URL.format(slug=slug)
         try:
@@ -115,14 +100,14 @@ class PurposeCollector:
         )
         return [raw]
 
-    def _resolve_source(self) -> Source:
-        if self._source is not None:
-            return self._source
+    def _resolve_source(self, fund: Fund) -> Source:
+        if self.source is not None:
+            return self.source
         sources = load_sources(_CONFIG_PATH)
         if self.source_id not in sources:
-            raise CollectError(self.source_id, "", f"source {self.source_id!r} not in config")
-        self._source = sources[self.source_id]
-        return self._source
+            raise CollectError(self.source_id, fund, f"source {self.source_id!r} not in config")
+        self.source = sources[self.source_id]
+        return self.source
 
 
 def _conditional_headers(

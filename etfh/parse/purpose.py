@@ -17,6 +17,7 @@ from typing import Any
 
 import polars as pl
 
+from etfh.secmaster.identifiers import normalize_exchange
 from etfh.types import FileFormat, ParsedFile, RawFile
 from etfh.units import WeightUnit, check_unit, normalize_weights, parse_number
 
@@ -48,6 +49,11 @@ _ASSET_CLASSES = {
     "cash": "cash",
     "commodity": "commodity",
     "balanced": "balanced",
+    "currency": "fx",
+    "foreign currency": "fx",
+    "fx": "fx",
+    "derivative": "derivative",
+    "derivatives": "derivative",
     "other": "other",
 }
 _TOTAL_NAMES = {"total", "totals", "total holdings", "total of holdings"}
@@ -141,7 +147,7 @@ class PurposeParser:
                 {
                     "security_name": name,
                     "security_ticker": _text(holding.get("ticker")),
-                    "exchange": _text(holding.get("exchange")),
+                    "exchange": normalize_exchange(_text(holding.get("exchange"))),
                     "isin": _text(holding.get("isin")),
                     "cusip": _text(holding.get("cusip")),
                     "asset_class": asset_class,
