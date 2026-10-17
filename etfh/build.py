@@ -48,6 +48,7 @@ from etfh.schema import (
     DDL_HOLDINGS_CHANGES,
     DDL_QA_EVENTS,
 )
+from etfh.secmaster.reports import fuzzy_proposals, unmatched_report
 from etfh.storage import RawStore
 from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
 from etfh.validate import ValidationConfig, is_excluded, validate_file
@@ -116,23 +117,6 @@ _HOLDINGS_CHANGES_SCHEMA: dict[str, DataTypeClass | DataType] = {
     "weight_after": pl.Float64,
     "delta": pl.Float64,
 }
-
-_UNMATCHED_COLUMNS = (
-    "fund_ticker",
-    "as_of_date",
-    "security_name",
-    "security_ticker",
-    "exchange",
-    "source_id",
-    "raw_file_sha256",
-)
-
-_FUZZY_PROPOSAL_COLUMNS = (
-    "security_name",
-    "candidate_security_id",
-    "candidate_name",
-    "score",
-)
 
 _HOLDINGS_SORT_KEY = (
     "fund_ticker",
@@ -553,19 +537,10 @@ def _write_database(out_dir: Path, frames: Mapping[str, pl.DataFrame]) -> Path:
 def _write_reports(out_dir: Path, holdings: pl.DataFrame) -> pl.DataFrame:
     reports_dir = out_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    unmatched = _sorted(
-        holdings.filter(pl.col("security_id").is_null()).select(list(_UNMATCHED_COLUMNS)).unique(),
-        ("fund_ticker", "as_of_date", "security_name", "source_id"),
-    )
+    unmatched = unmatched_report(holdings)
     unmatched.write_csv(reports_dir / "unmatched.csv")
-    proposals = pl.DataFrame(
-        schema={
-            "security_name": pl.String,
-            "candidate_security_id": pl.String,
-            "candidate_name": pl.String,
-            "score": pl.Float64,
-        }
-    )
+    known = holdings.select("security_id", "security_name")
+    proposals = fuzzy_proposals(unmatched, known)
     proposals.write_csv(reports_dir / "fuzzy_proposals.csv")
     return unmatched
 
