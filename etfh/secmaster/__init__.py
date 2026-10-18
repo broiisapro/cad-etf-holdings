@@ -1,9 +1,10 @@
 """Security master: identifier validation, resolution and reporting.
 
-The public API is re-exported here as each module lands. Identifier
-primitives (issue #21), reviewed overrides and row resolution (issue #22),
-the unmatched report with fuzzy proposals (issue #23) and the optional cached
-OpenFIGI lookup (issue #24) are all in.
+The public API is re-exported here. Identifier primitives (issue #21),
+reviewed overrides and row resolution (issue #22), the unmatched report with
+fuzzy proposals (issue #23), the optional cached OpenFIGI lookup (issue #24),
+Bloomberg exchange/composite codes (issue #73) and the optional composite-FIGI
+ids (issue #74) are all in.
 """
 
 from __future__ import annotations
