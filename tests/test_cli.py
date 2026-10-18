@@ -115,6 +115,65 @@ def test_help_lists_all_commands() -> None:
         assert command in result.output
 
 
+def test_build_openfigi_constructs_the_cached_lookup_and_prints_figi_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from etfh.build import BuildResult
+
+    created: dict[str, object] = {}
+
+    class FakeFigiLookup:
+        def __init__(self, cache_dir: Path, api_key: str | None = None, **kwargs: Any) -> None:
+            created["cache_dir"] = cache_dir
+            created["api_key"] = api_key
+
+    captured: dict[str, object] = {}
+
+    def fake_run_build(
+        raw: Path, out: Path, *, config_dir: Path, figi: object = None
+    ) -> BuildResult:
+        captured["figi"] = figi
+        return BuildResult(
+            out_dir=Path(out),
+            db_path=Path(out) / "etfh.duckdb",
+            n_file_versions=0,
+            n_included_files=0,
+            n_excluded_files=0,
+            n_holdings=0,
+            n_changes=0,
+            n_qa_events=0,
+            n_unmatched=0,
+            n_figi=7,
+        )
+
+    monkeypatch.setattr("etfh.cli.FigiLookup", FakeFigiLookup)
+    monkeypatch.setattr("etfh.cli.run_build", fake_run_build)
+    monkeypatch.setenv("OPENFIGI_API_KEY", "test-key")
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--out",
+            str(tmp_path / "out"),
+            "--openfigi",
+            "--figi-cache",
+            str(tmp_path / "figi-cache"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert isinstance(captured["figi"], FakeFigiLookup)
+    assert created == {"cache_dir": tmp_path / "figi-cache", "api_key": "test-key"}
+    assert "figi rows 7" in result.output
+
+
+def test_build_without_openfigi_prints_no_figi_line(fixture_build: Path) -> None:
+    result = runner.invoke(app, ["build", "--raw", str(RAW_ROOT), "--out", str(fixture_build)])
+    assert result.exit_code == 0, result.output
+    assert "figi" not in result.output
+
+
 def test_build_command_reports_counts(fixture_build: Path) -> None:
     result = runner.invoke(app, ["build", "--raw", str(RAW_ROOT), "--out", str(fixture_build)])
     assert result.exit_code == 0, result.output

@@ -9,9 +9,9 @@ import duckdb
 import polars as pl
 import pytest
 
-from etfh.build import BuildResult, connect
+from etfh.build import BuildResult, build, connect
 from etfh.storage import RawStore
-from tests._build_helpers import RAW_ROOT, build_fixture_db, copy_raw_files
+from tests._build_helpers import CONFIG_DIR, RAW_ROOT, build_fixture_db, copy_raw_files
 
 _SYNA_2026_10_29 = RAW_ROOT / "synthetic" / "SYNA" / "2026-10-29" / "20261029T220000Z.csv"
 
@@ -411,6 +411,77 @@ def test_every_table_is_written_in_its_documented_order(
     for table, sort_key in keys.items():
         frame = pl.read_parquet(out_dir / "parquet" / f"{table}.parquet")
         assert frame.equals(frame.sort(sort_key)), table
+
+
+class _FigiMaster:
+    """Security master stand-in that emits FIGI ids and records prefetch calls."""
+
+    def __init__(self) -> None:
+        self.prefetched: list[pl.DataFrame] = []
+
+    def prefetch(self, frames: object) -> None:
+        self.prefetched.extend(list(frames))  # type: ignore[call-overload]
+
+    def assign(self, frame: pl.DataFrame) -> pl.DataFrame:
+        return frame.with_columns(
+            pl.Series("security_id", ["FIGI:BBG000000001"] * frame.height, dtype=pl.String)
+        )
+
+
+def test_openfigi_prefetches_frames_and_counts_figi_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    master = _FigiMaster()
+    result = build(
+        raw_root,
+        tmp_path / "out",
+        config_dir=CONFIG_DIR,
+        security_master=master,
+        validator=lambda *args, **kwargs: [],
+        figi=object(),  # type: ignore[arg-type]
+    )
+    assert len(master.prefetched) == 1
+    assert master.prefetched[0].height == 25
+    assert result.n_figi == result.n_holdings == 25
+    figi_rows = _query(
+        tmp_path / "out",
+        "SELECT COUNT(*) AS n FROM holdings WHERE security_id LIKE 'FIGI:%'",
+    )
+    assert figi_rows["n"][0] == 25
+
+
+def test_build_without_openfigi_skips_prefetch(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    master = _FigiMaster()
+    build(
+        raw_root,
+        tmp_path / "out",
+        config_dir=CONFIG_DIR,
+        security_master=master,
+        validator=lambda *args, **kwargs: [],
+    )
+    assert master.prefetched == []
 
 
 def test_connect_honours_etfh_duckdb_threads(monkeypatch: pytest.MonkeyPatch) -> None:
