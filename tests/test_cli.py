@@ -123,6 +123,15 @@ def test_build_command_reports_counts(fixture_build: Path) -> None:
     assert (fixture_build / "etfh.duckdb").is_file()
 
 
+def test_commands_work_with_the_ci_thread_limit_set(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "1")
+    result = runner.invoke(app, ["qa", "--db", str(fixture_build / "etfh.duckdb")])
+    assert result.exit_code == 0, result.output
+    assert "files: 15 total (13 included, 2 excluded)" in result.output
+
+
 def test_qa_exits_zero_with_the_two_bad_files_excluded(fixture_build: Path) -> None:
     result = runner.invoke(app, ["qa", "--db", str(fixture_build / "etfh.duckdb")])
     assert result.exit_code == 0, result.output
