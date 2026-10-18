@@ -144,21 +144,24 @@ def test_missing_ticker_is_a_collect_error(tmp_path: Path, fake_clock: FakeClock
         client.close()
 
 
-def test_robots_refusal_on_listing_is_a_collect_error(
-    tmp_path: Path, fake_clock: FakeClock
-) -> None:
+def test_robots_403_allows_listing_and_download(tmp_path: Path, fake_clock: FakeClock) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
             return httpx.Response(403, text="Access Denied")
-        return httpx.Response(200, text=_listing_html())
+        if request.url.path.endswith("legal-and-regulatory-documents/"):
+            return httpx.Response(200, text=_listing_html())
+        return httpx.Response(
+            200, content=b"%PDF-1.4\n", headers={"content-type": "application/pdf"}
+        )
 
     collector = BmoQpdCollector(source=_source())
     client = _client(httpx.MockTransport(handler), fake_clock)
     try:
-        with pytest.raises(CollectError, match="robots.txt disallows"):
-            collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path))
+        raw_files = collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path))
     finally:
         client.close()
+    assert len(raw_files) == 1
+    assert raw_files[0].url == PDF_URL
 
 
 def test_non_pdf_response_is_a_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:

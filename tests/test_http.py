@@ -146,6 +146,192 @@ def test_robots_404_allows_all(
     assert response.status_code == 200
 
 
+_ACCESS_DENIED_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"
+)
+
+
+def test_robots_403_access_denied_allows_all(
+    fake_clock: FakeClock,
+    source_factory: Callable[..., Source],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[httpx.Request] = []
+    source = source_factory()
+    client = _client(
+        _handler(
+            {
+                "/robots.txt": httpx.Response(403, text=_ACCESS_DENIED_XML),
+                "/holdings.csv": httpx.Response(200, text="data"),
+            },
+            requests,
+        ),
+        fake_clock,
+    )
+    with caplog.at_level("INFO", logger="etfh.http"):
+        response = client.get("https://a.example.com/holdings.csv", source=source)
+    assert response.status_code == 200
+    assert [request.url.path for request in requests] == ["/robots.txt", "/holdings.csv"]
+    assert caplog.text.count("robots unavailable (status 403)") == 1
+
+
+def test_robots_401_allows_all(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    source = source_factory()
+    client = _client(
+        _handler(
+            {
+                "/robots.txt": httpx.Response(401, text="authentication required"),
+                "/holdings.csv": httpx.Response(200, text="data"),
+            }
+        ),
+        fake_clock,
+    )
+    response = client.get("https://a.example.com/holdings.csv", source=source)
+    assert response.status_code == 200
+
+
+def test_robots_unavailable_is_logged_once_per_host(
+    fake_clock: FakeClock,
+    source_factory: Callable[..., Source],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = source_factory()
+    client = _client(
+        _handler(
+            {
+                "/robots.txt": httpx.Response(403, text=_ACCESS_DENIED_XML),
+                "/holdings.csv": httpx.Response(200, text="data"),
+            }
+        ),
+        fake_clock,
+    )
+    with caplog.at_level("INFO", logger="etfh.http"):
+        client.get("https://a.example.com/holdings.csv", source=source)
+        client.get("https://a.example.com/holdings.csv", source=source)
+    assert caplog.text.count("robots unavailable (status 403)") == 1
+
+
+def test_robots_redirect_is_followed_and_obeyed(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    requests: list[httpx.Request] = []
+    source = source_factory()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(301, headers={"Location": "/static/robots.txt"})
+        if request.url.path == "/static/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /x\n")
+        if request.url.path.startswith("/x/"):
+            return httpx.Response(200, text="data")
+        return httpx.Response(200, text="data")
+
+    client = _client(handler, fake_clock)
+    assert client.get("https://a.example.com/open.csv", source=source).status_code == 200
+    with pytest.raises(RobotsDisallowedError):
+        client.get("https://a.example.com/x/holdings.csv", source=source)
+    assert [request.url.path for request in requests] == [
+        "/robots.txt",
+        "/static/robots.txt",
+        "/open.csv",
+    ]
+
+
+def test_robots_redirect_chain_beyond_five_disallows(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    requests: list[httpx.Request] = []
+    source = source_factory()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(302, headers={"Location": "/robots-1.txt"})
+        return httpx.Response(302, headers={"Location": "/robots-7.txt"})
+
+    client = _client(handler, fake_clock)
+    with pytest.raises(RobotsDisallowedError):
+        client.get("https://a.example.com/holdings.csv", source=source)
+    assert len(requests) == 6
+    assert all(request.url.path.startswith("/robots") for request in requests)
+
+
+def test_robots_redirect_without_location_disallows(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    requests: list[httpx.Request] = []
+    source = source_factory()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(302)
+        return httpx.Response(200, text="data")
+
+    client = _client(handler, fake_clock)
+    with pytest.raises(RobotsDisallowedError):
+        client.get("https://a.example.com/holdings.csv", source=source)
+    assert [request.url.path for request in requests] == ["/robots.txt"]
+
+
+def test_robots_html_page_parses_to_no_rules(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    source = source_factory()
+    client = _client(
+        _handler(
+            {
+                "/robots.txt": httpx.Response(
+                    200, text="<!DOCTYPE html><html><body>not a robots file</body></html>"
+                ),
+                "/holdings.csv": httpx.Response(200, text="data"),
+            }
+        ),
+        fake_clock,
+    )
+    response = client.get("https://a.example.com/holdings.csv", source=source)
+    assert response.status_code == 200
+
+
+def test_robots_transport_error_disallows_without_retry(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    requests: list[httpx.Request] = []
+    source = source_factory()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ConnectError("connection refused")
+
+    client = _client(handler, fake_clock)
+    with pytest.raises(RobotsDisallowedError):
+        client.get("https://a.example.com/holdings.csv", source=source)
+    assert [request.url.path for request in requests] == ["/robots.txt"]
+
+
+def test_robots_allow_all_not_cached_after_5xx(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    state = {"robots_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            state["robots_calls"] += 1
+            return httpx.Response(503)
+        return httpx.Response(200, text="data")
+
+    source = source_factory()
+    client = _client(handler, fake_clock)
+    for _ in range(2):
+        with pytest.raises(RobotsDisallowedError):
+            client.get("https://a.example.com/holdings.csv", source=source)
+    assert state["robots_calls"] == 1
+
+
 def test_retry_on_429_then_success(
     fake_clock: FakeClock, source_factory: Callable[..., Source]
 ) -> None:

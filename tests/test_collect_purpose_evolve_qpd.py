@@ -185,7 +185,9 @@ def test_purpose_invalid_json_is_a_collect_error(tmp_path: Path, fake_clock: Fak
         client.close()
 
 
-def test_purpose_robots_refusal_is_a_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
+def test_purpose_robots_403_allows_pdf_download(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf = write_purpose_lookalike(tmp_path / "purpose.pdf").read_bytes()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
             if request.url.host == "documents.purposeinvest.com":
@@ -193,15 +195,18 @@ def test_purpose_robots_refusal_is_a_collect_error(tmp_path: Path, fake_clock: F
             return httpx.Response(200, text="User-agent: *\nAllow: /")
         if request.url.host == "www.purposeinvest.com":
             return httpx.Response(200, json=_purpose_payload())
-        return httpx.Response(200, content=b"%PDF-1.4")
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
 
     collector = PurposeQpdCollector(source=_purpose_source())
     client = _client(httpx.MockTransport(handler), fake_clock)
     try:
-        with pytest.raises(CollectError, match="robots.txt disallows"):
-            collector.fetch(_purpose_fund(), date(2026, 7, 1), client, RawStore(tmp_path))
+        raw_files = collector.fetch(
+            _purpose_fund(), date(2026, 7, 1), client, RawStore(tmp_path / "raw")
+        )
     finally:
         client.close()
+    assert len(raw_files) == 1
+    assert raw_files[0].url == PURPOSE_PDF
 
 
 def test_evolve_fetch_stores_newest_pdf(tmp_path: Path, fake_clock: FakeClock) -> None:
@@ -253,26 +258,31 @@ def test_evolve_missing_link_is_a_collect_error(tmp_path: Path, fake_clock: Fake
         client.close()
 
 
-def test_evolve_robots_refusal_is_a_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
+def test_evolve_robots_403_allows_pdf_download(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf = write_evolve_lookalike(tmp_path / "evolve.pdf").read_bytes()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
             if request.url.host == "evolve-cdn.tor1.cdn.digitaloceanspaces.com":
                 return httpx.Response(403, text="Access Denied")
             return httpx.Response(200, text="User-agent: *\nAllow: /")
-        return httpx.Response(200, text=EVOLVE_HTML)
+        if request.url.host == "evolveetfs.com":
+            return httpx.Response(200, text=EVOLVE_HTML)
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
 
     collector = EvolveQpdCollector(source=_evolve_source())
     client = _client(httpx.MockTransport(handler), fake_clock)
     try:
-        with pytest.raises(CollectError, match="robots.txt disallows"):
-            collector.fetch(
-                qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
-                date(2026, 7, 1),
-                client,
-                RawStore(tmp_path),
-            )
+        raw_files = collector.fetch(
+            qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
+            date(2026, 7, 1),
+            client,
+            RawStore(tmp_path / "raw"),
+        )
     finally:
         client.close()
+    assert len(raw_files) == 1
+    assert raw_files[0].url == EVOLVE_NEW
 
 
 def test_evolve_non_pdf_is_a_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
