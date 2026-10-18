@@ -54,16 +54,17 @@ def candidate_days(day: date, steps: int = _MAX_STEPS_BACK) -> list[date]:
 
 
 class BmoCollector:
-    """Find and store the newest BMO holdings workbook near a requested day."""
+    """Find and store the newest BMO holdings workbook near a requested day.
+
+    The registry binds the source the CLI passes (``--config DIR``) by setting
+    ``source`` on a fresh copy; only when it is ``None`` does the collector
+    fall back to the default config. Every request goes through
+    ``client.get(url, source=self.source)``, so the terms gate always checks
+    the config the CLI selected.
+    """
 
     source_id = _SOURCE_ID
-
-    def __init__(self, source: Source | None = None) -> None:
-        self.source = source
-
-    def bind(self, source: Source) -> None:
-        """Bind the registry entry the collector should fetch under."""
-        self.source = source
+    source: Source | None = None
 
     def fetch(
         self,
@@ -132,8 +133,7 @@ class BmoCollector:
         sources = load_sources(_CONFIG_PATH)
         if self.source_id not in sources:
             raise CollectError(self.source_id, fund, f"source {self.source_id!r} not in config")
-        self.source = sources[self.source_id]
-        return self.source
+        return sources[self.source_id]
 
 
 def _conditional_for_url(
