@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import date
 from pathlib import Path
 
@@ -188,3 +189,70 @@ def test_not_modified_returns_no_new_file(tmp_path: Path, fake_clock: FakeClock)
         assert collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path)) == []
     finally:
         client.close()
+
+
+def test_source_is_a_class_attribute_bound_by_copy(tmp_path: Path) -> None:
+    assert BmoQpdCollector.source is None
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, text="User-agent: *\nAllow: /")
+
+    collector = copy.copy(BmoQpdCollector())
+    collector.source = qpd_source("bmo_qpd", issuer="bmo", decision=Decision.not_allowed)
+    client = _client(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(TermsNotAllowedError, match="skipped: terms"):
+            collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path))
+    finally:
+        client.close()
+    assert calls == []
+
+
+def test_unreachable_listing_fails_closed(tmp_path: Path, fake_clock: FakeClock) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("no response from the host")
+
+    collector = BmoQpdCollector(source=_source())
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        with pytest.raises(CollectError, match="robots.txt disallows or is unreachable"):
+            collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path))
+    finally:
+        client.close()
+
+
+def test_pdf_request_is_conditional(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf = write_bmo_lookalike(tmp_path / "bmo.pdf").read_bytes()
+    state = {"pdf_calls": 0}
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if request.url.path.endswith("legal-and-regulatory-documents/"):
+            return httpx.Response(200, text=_listing_html())
+        if request.url.host == "bmo.bynder.com":
+            state["pdf_calls"] += 1
+            if state["pdf_calls"] == 1:
+                return httpx.Response(
+                    200,
+                    content=pdf,
+                    headers={"content-type": "application/pdf", "etag": '"zsp-q2"'},
+                )
+            seen["if-none-match"] = request.headers.get("If-None-Match")
+            return httpx.Response(304)
+        return httpx.Response(404)
+
+    collector = BmoQpdCollector(source=_source())
+    store = RawStore(tmp_path / "raw")
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        first = collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, store)
+        second = collector.fetch(qpd_fund(TICKER), date(2026, 7, 2), client, store)
+    finally:
+        client.close()
+    assert len(first) == 1
+    assert second == []
+    assert seen["if-none-match"] == '"zsp-q2"'
