@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from collections.abc import Callable
 from datetime import UTC, date, datetime
@@ -30,6 +31,12 @@ USER_AGENT = "cad-etf-holdings-tests (https://example.com)"
 
 def _source() -> Source:
     return load_sources(CONFIG_DIR / "sources.yaml")["evolve_daily"]
+
+
+def _collector(source: Source | None = None) -> EvolveCollector:
+    collector = EvolveCollector()
+    collector.source = source
+    return collector
 
 
 def _fund(**overrides: object) -> Fund:
@@ -83,7 +90,7 @@ def _handler(
 
 def test_fetch_stores_csv_with_page_date(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     with _client(_handler(requests, csv_etag='"e1"'), fake_clock) as client:
         raws = collector.fetch(_fund(), date(2026, 10, 17), client, store)
@@ -101,7 +108,7 @@ def test_fetch_stores_csv_with_page_date(tmp_path: Path, fake_clock: FakeClock) 
 
 def test_unchanged_csv_gets_304_and_writes_nothing(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     handler = _handler(requests, csv_etag='"e1"')
     with _client(handler, fake_clock) as client:
@@ -117,7 +124,7 @@ def test_unchanged_csv_gets_304_and_writes_nothing(tmp_path: Path, fake_clock: F
 
 def test_page_without_holdings_date_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=_source())
+    collector = _collector(_source())
     html = b"<html><body><h4>Holdings</h4></body></html>"
     with (
         _client(_handler(page_body=html), fake_clock) as client,
@@ -126,9 +133,60 @@ def test_page_without_holdings_date_is_collect_error(tmp_path: Path, fake_clock:
         collector.fetch(_fund(), date(2026, 10, 17), client, store)
 
 
+def test_copy_bound_to_not_allowed_source_makes_no_requests(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    source = _source()
+    assert source.terms.decision is Decision.allowed_with_conditions
+    terms = source.terms.model_copy(update={"decision": Decision.not_allowed, "conditions": []})
+    refused = source.model_copy(update={"terms": terms})
+    collector = copy.copy(COLLECTORS[0])
+    collector.source = refused
+    requests: list[httpx.Request] = []
+    store = RawStore(tmp_path / "raw")
+    with (
+        _client(_handler(requests), fake_clock) as client,
+        pytest.raises(TermsNotAllowedError) as excinfo,
+    ):
+        collector.fetch(_fund(), date(2026, 10, 17), client, store)
+    assert str(excinfo.value).startswith("skipped: terms")
+    assert requests == []
+    assert store.iter_raw() == []
+
+
+def test_copy_bound_to_the_config_source_fetches(tmp_path: Path, fake_clock: FakeClock) -> None:
+    collector = copy.copy(COLLECTORS[0])
+    collector.source = _source()
+    store = RawStore(tmp_path / "raw")
+    with _client(_handler(), fake_clock) as client:
+        raws = collector.fetch(_fund(), date(2026, 10, 17), client, store)
+    assert len(raws) == 1
+    assert len(store.iter_raw()) == 1
+
+
+def test_unbound_collector_falls_back_to_the_default_config(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    collector = EvolveCollector()
+    assert collector.source is None
+    store = RawStore(tmp_path / "raw")
+    with _client(_handler(), fake_clock) as client:
+        raws = collector.fetch(_fund(), date(2026, 10, 17), client, store)
+    assert len(raws) == 1
+    assert collector.source is None
+
+
+def test_binding_a_copy_does_not_leak_into_other_copies() -> None:
+    first = copy.copy(COLLECTORS[0])
+    first.source = _source()
+    second = copy.copy(COLLECTORS[0])
+    assert second.source is None
+    assert COLLECTORS[0].source is None
+
+
 def test_page_http_error_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=_source())
+    collector = _collector(_source())
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -141,7 +199,7 @@ def test_page_http_error_is_collect_error(tmp_path: Path, fake_clock: FakeClock)
 
 def test_csv_http_error_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=_source())
+    collector = _collector(_source())
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -161,7 +219,7 @@ def test_gate_refuses_not_allowed_source_without_requests(
     terms = source.terms.model_copy(update={"decision": Decision.not_allowed, "conditions": []})
     refused = source.model_copy(update={"terms": terms})
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=refused)
+    collector = _collector(refused)
     requests: list[httpx.Request] = []
     with _client(_handler(requests), fake_clock) as client, pytest.raises(TermsNotAllowedError):
         collector.fetch(_fund(), date(2026, 10, 17), client, store)
@@ -170,7 +228,7 @@ def test_gate_refuses_not_allowed_source_without_requests(
 
 def test_non_csv_content_type_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = EvolveCollector(source=_source())
+    collector = _collector(_source())
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -212,7 +270,7 @@ def test_live_evolve_fetch_and_parse(tmp_path: Path) -> None:
     )
     store = RawStore(tmp_path / "raw")
     with PoliteClient() as client:
-        raws = EvolveCollector(source=source).fetch(fund, datetime.now(UTC).date(), client, store)
+        raws = _collector(source).fetch(fund, datetime.now(UTC).date(), client, store)
     assert len(raws) == 1
     assert raws[0].as_of_hint is not None
     parsed = EvolveParser().parse(raws[0])
