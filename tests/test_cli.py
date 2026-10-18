@@ -6,16 +6,19 @@ import json
 import shutil
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 import yaml
 from typer.testing import CliRunner
 
 from etfh.cli import app
-from etfh.collect.registry import CollectError
+from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
+from etfh.registry import Source, TermsNotAllowedError, load_sources
 from etfh.types import RawFile
 from tests._build_helpers import CONFIG_DIR, FIXTURES, RAW_ROOT
 
@@ -205,6 +208,147 @@ def test_parse_writes_parsed_parquet(tmp_path: Path) -> None:
     frame = pl.read_parquet(tmp_path / "parsed" / "parsed.parquet")
     assert frame.height == 331
     assert frame.columns[0] == "fund_ticker"
+
+
+class DefaultConfigCollector:
+    """A collector that falls back to its imported (default) source when unbound.
+
+    Before wave 03 the CLI passed no source to the collector, so a collector
+    like this one fetched with whatever ``config/sources.yaml`` sat in the
+    working directory -- the ``--config`` in use was ignored. The registry now
+    binds the CLI's ``Source`` into a copy, so the collector gates its request
+    with it.
+    """
+
+    source_id = "fake_daily"
+    source: Source | None = None
+
+    def __init__(self, default_source: Source) -> None:
+        self.default_source = default_source
+        self.calls: list[date] = []
+
+    def fetch(self, fund: Any, day: date, client: PoliteClient, store: Any) -> list[RawFile]:
+        self.calls.append(day)
+        source = self.source if self.source is not None else self.default_source
+        client.get("https://example.test/FAKE.csv", source=source)
+        return []
+
+
+def _blocked_config(tmp_path: Path) -> Path:
+    allowed = _write_config(tmp_path / "allowed", _SOURCES_YAML, _FUNDS_CSV)
+    blocked = tmp_path / "blocked"
+    blocked.mkdir(exist_ok=True)
+    shutil.copy(allowed / "funds.csv", blocked / "funds.csv")
+    data = yaml.safe_load((allowed / "sources.yaml").read_text(encoding="utf-8"))
+    for entry in data["sources"]:
+        if entry["id"] == "fake_daily":
+            entry["terms"]["decision"] = "not_allowed"
+    (blocked / "sources.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return blocked
+
+
+def test_bound_collector_gates_requests_with_the_looked_up_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_clock: Any
+) -> None:
+    allowed = _write_config(tmp_path / "allowed", _SOURCES_YAML, _FUNDS_CSV)
+    allowed_source = load_sources(allowed / "sources.yaml")["fake_daily"]
+    collector = DefaultConfigCollector(allowed_source)
+    monkeypatch.setattr("etfh.collect.registry.all_collectors", lambda: [collector])
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(200, content=b"TICKER,PORTFOLIO_MWEIGHT\nFAKE,1.0\n")
+
+    client = PoliteClient(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock=fake_clock.time,
+        sleep=fake_clock.sleep,
+    )
+    store = SimpleNamespace(write=lambda *args, **kwargs: None)
+    not_allowed = load_sources(_blocked_config(tmp_path) / "sources.yaml")["fake_daily"]
+    bound = collector_for(not_allowed)
+    assert bound is not None
+    with pytest.raises(TermsNotAllowedError):
+        bound.fetch(SimpleNamespace(ticker="FAKE"), date(2026, 11, 2), client, store)
+    assert requests == []
+    assert collector.calls == [date(2026, 11, 2)]  # fetched, refused before any request
+    bound_allowed = collector_for(allowed_source)
+    assert bound_allowed is not None
+    bound_allowed.fetch(SimpleNamespace(ticker="FAKE"), date(2026, 11, 2), client, store)
+    assert requests == ["/robots.txt", "/FAKE.csv"]
+
+
+class _RecordingClient:
+    """A PoliteClient stand-in that records (and refuses to make) requests."""
+
+    instances: list[_RecordingClient] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.requests: list[str] = []
+        self.instances.append(self)
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        self.requests.append(url)
+        raise AssertionError(f"unexpected HTTP request to {url}")
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> _RecordingClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+
+def test_collect_makes_no_requests_when_the_config_source_is_not_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocked = _blocked_config(tmp_path)
+    allowed_source = load_sources(blocked / "sources.yaml")["fake_blocked"]
+    collector = DefaultConfigCollector(allowed_source)
+    monkeypatch.setattr("etfh.collect.registry.all_collectors", lambda: [collector])
+    monkeypatch.setattr("etfh.cli.PoliteClient", _RecordingClient)
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    _RecordingClient.instances = []
+    result = runner.invoke(
+        app,
+        [
+            "collect",
+            "--date",
+            "2026-11-02",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--config",
+            str(blocked),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "skipped: terms source=fake_daily fund=FAKE" in result.output
+    assert collector.calls == []
+    assert all(instance.requests == [] for instance in _RecordingClient.instances)
+
+
+def test_cli_reads_the_database_through_the_thread_aware_connect(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import etfh.cli as cli_module
+
+    seen: list[bool] = []
+    real_connect = cli_module.connect_duckdb
+
+    def spy(path: Any, *, read_only: bool = False) -> Any:
+        seen.append(read_only)
+        return real_connect(path, read_only=read_only)
+
+    monkeypatch.setattr(cli_module, "connect_duckdb", spy)
+    result = runner.invoke(app, ["qa", "--db", str(fixture_build / "etfh.duckdb")])
+    assert result.exit_code == 0, result.output
+    assert seen == [True]
 
 
 def test_bad_date_exits_two_with_a_message(fixture_build: Path) -> None:
