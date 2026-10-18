@@ -9,7 +9,7 @@ severity ``error``.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -254,26 +254,99 @@ def _check_qpd_stated_total(
     ]
 
 
+def _identifier_form(row: Mapping[str, object]) -> str:
+    """The identifier evidence through which a row reached its ``security_id``.
+
+    Used by the D51 duplicate rule: a repeated id whose rows arrived through
+    the same identifier form is a repeated line (``info duplicate_lines``); a
+    repeated id reached through different forms (ISIN vs CUSIP vs ticker, a
+    double listing) is a genuine duplicate. Overridden or FIGI ids fall back
+    to the strongest identifier the row itself provides.
+    """
+    security_id = str(row["security_id"])
+    isin = row.get("isin")
+    cusip = row.get("cusip")
+    ticker = row.get("security_ticker")
+    exchange = row.get("exchange")
+    if security_id.startswith("CASH:"):
+        return "CASH"
+    if security_id.startswith("DERIV:"):
+        return "DERIV"
+    if isin is not None and security_id == f"ISIN:{isin}":
+        return "ISIN"
+    if cusip is not None and isin is None and security_id.startswith(("ISIN:", "CUSIP:")):
+        return "CUSIP"
+    if ticker is not None and exchange is not None and security_id == f"TKR:{exchange}:{ticker}":
+        return "TKR"
+    if isin is not None:
+        return "ISIN"
+    if cusip is not None:
+        return "CUSIP"
+    if ticker is not None and exchange is not None:
+        return "TKR"
+    return "OTHER"
+
+
 def _check_duplicate_security(parsed: ParsedFile) -> list[QaFinding]:
-    """No security id may appear twice; CASH rows of different currencies have different ids."""
+    """Duplicate lines within one file follow D51.
+
+    For every non-null ``security_id`` that appears on several rows:
+
+    - ``error duplicate_security`` when the rows reached the id through
+      different identifier forms or when two rows are identical in every
+      parsed field (the file is excluded);
+    - ``info duplicate_lines`` otherwise: the same identifier form on several
+      lines with different quantities; the rows are kept separate, because
+      analytics sums by ``security_id``.
+
+    Cash rows of the same currency follow the same rule; rows of different
+    currencies have different ids and never collide.
+    """
     frame = parsed.frame
-    if frame.schema.get("security_id") != pl.String:
+    if frame.schema.get("security_id") != pl.String or frame.is_empty():
         return []
-    positions: dict[str, list[int]] = {}
-    for index, security_id in enumerate(frame["security_id"].to_list()):
+    compare_columns = [name for name in frame.columns if name != "security_id"]
+    identical_flags = frame.select(compare_columns).is_duplicated().to_list()
+    rows_by_id: dict[str, list[int]] = {}
+    forms_by_id: dict[str, set[str]] = {}
+    for index, row in enumerate(frame.iter_rows(named=True)):
+        security_id = row["security_id"]
         if security_id is None:
             continue
-        positions.setdefault(security_id, []).append(index)
+        rows_by_id.setdefault(str(security_id), []).append(index)
+        forms_by_id.setdefault(str(security_id), set()).add(_identifier_form(row))
     findings: list[QaFinding] = []
-    for security_id in sorted(positions):
-        rows = positions[security_id]
-        if len(rows) > 1:
-            rendered_rows = ", ".join(str(row) for row in rows)
+    for security_id in sorted(rows_by_id):
+        rows = rows_by_id[security_id]
+        if len(rows) < 2:
+            continue
+        rendered_rows = ", ".join(str(row) for row in rows)
+        prefix = f"security_id={security_id} appears {len(rows)} times (rows {rendered_rows})"
+        forms = sorted(forms_by_id[security_id])
+        identical_rows = [row for row in rows if identical_flags[row]]
+        if len(forms) > 1:
             findings.append(
                 QaFinding(
                     "duplicate_security",
                     "error",
-                    f"security_id={security_id} appears {len(rows)} times (rows {rendered_rows})",
+                    f"{prefix}; different identifier forms: {', '.join(forms)}",
+                )
+            )
+        elif identical_rows:
+            rendered_identical = ", ".join(str(row) for row in identical_rows)
+            findings.append(
+                QaFinding(
+                    "duplicate_security",
+                    "error",
+                    f"{prefix}; identical row(s): {rendered_identical}",
+                )
+            )
+        else:
+            findings.append(
+                QaFinding(
+                    "duplicate_lines",
+                    "info",
+                    f"{prefix}; same identifier form ({forms[0]}), rows kept separate",
                 )
             )
     return findings
