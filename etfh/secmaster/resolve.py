@@ -310,9 +310,9 @@ def _derivative_key(fund_ticker: str, ticker: str | None, security_name: str) ->
 
     The normalized instrument ticker wins when the row has one (it is the
     issuer's own instrument identifier); otherwise the normalized full name is
-    used, which keeps option strike/expiry tokens. Collisions between distinct
-    rows in one file are resolved by :meth:`SecurityMaster.assign` with ordinal
-    suffixes in file order.
+    used, which keeps option strike/expiry tokens. Rows whose base key still
+    collides with an earlier row of the same file are resolved by
+    :meth:`SecurityMaster.assign` with ordinal suffixes in file order.
     """
     if ticker is not None:
         return f"DERIV:{fund_ticker}:{ticker}"
