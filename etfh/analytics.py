@@ -1,21 +1,24 @@
 """As-of-aware analytics over the tables written by :mod:`etfh.build`.
 
 Every function takes an open DuckDB connection to a built database and an
-``asof`` date, and uses only file versions whose ``known_at`` is at or before
-``cutoff_utc(asof)`` (D30, D7). There is no lookahead: the version is selected
-from the rows already filtered by ``known_at``.
+``asof`` date, and uses only file versions whose ``known_at`` is strictly
+before ``cutoff_utc(asof)`` (D30, D7, D53). There is no lookahead: the version
+is selected from the rows already filtered by ``known_at``.
 
-Version selection per fund (D42):
+Version selection per fund (D42, D53):
 
-1. only versions known by the cutoff compete;
-2. complete files (weights summing to 1 within ``_COMPLETE_TOLERANCE``) win
-   over partial files -- daily holdings are complete, quarterly disclosures are
-   top-holdings lists whose weights do not sum to 1;
+1. only versions known before the cutoff compete;
+2. the source kind recorded in the build's ``sources`` table decides priority:
+   ``daily_holdings`` and synthetic daily files win over
+   ``quarterly_disclosure`` (and synthetic PDFs), so a fund's daily holdings
+   are used whenever any daily version is known;
 3. among the winners, the latest ``as_of_date``, then the highest
    ``file_version``, then the lowest ``source_id``.
 
-A fund whose selected version is partial is reported with ``partial=True``, and
-the dashboard labels it "top holdings only".
+A fund whose selected version is a quarterly disclosure, or a daily file the
+build flagged with a ``partial_list`` info event, is reported with
+``partial=True``; the dashboard labels it "top holdings only". The flag never
+comes from a weight-sum heuristic.
 
 Non-security lines (``CASH:``, ``DERIV:``) and unmatched rows (null
 ``security_id``) never enter overlap, and only real security rows enter the
@@ -34,6 +37,7 @@ import duckdb
 import polars as pl
 
 from etfh.asof import cutoff_utc
+from etfh.types import FileFormat, SourceKind
 
 __all__ = [
     "Concentration",
@@ -48,7 +52,6 @@ __all__ = [
     "overlap_matrix",
 ]
 
-_COMPLETE_TOLERANCE = 0.02
 _NON_SECURITY_PREFIXES = ("CASH:", "DERIV:")
 
 
@@ -257,25 +260,47 @@ def _select_version(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> _S
     cutoff = cutoff_utc(asof)
     versions = con.execute(
         """
-        SELECT as_of_date, file_version, source_id, SUM(weight) AS weight_sum
-        FROM holdings
-        WHERE fund_ticker = ? AND known_at <= ?
-        GROUP BY 1, 2, 3
-        ORDER BY as_of_date DESC, file_version DESC, source_id ASC
+        SELECT h.as_of_date, h.file_version, h.source_id, h.raw_file_sha256,
+               s.kind AS kind, s.format AS format
+        FROM holdings h
+        LEFT JOIN sources s ON s.source_id = h.source_id
+        WHERE h.fund_ticker = ? AND h.known_at < ?
+        GROUP BY 1, 2, 3, 4, 5, 6
         """,
         [fund, cutoff],
     ).pl()
     if versions.is_empty():
         return None
-    complete = versions.filter((pl.col("weight_sum") - 1).abs() <= _COMPLETE_TOLERANCE)
-    pool = complete if not complete.is_empty() else versions
-    row = pool.row(0, named=True)
+    ranked = versions.with_columns(_source_priority_expr().alias("_priority")).sort(
+        ["_priority", "as_of_date", "file_version", "source_id"],
+        descending=[False, True, True, False],
+    )
+    row = ranked.row(0, named=True)
+    partial = bool(row["_priority"] == 1) or row["raw_file_sha256"] in _partial_list_shas(con)
     return _Selection(
         as_of_date=row["as_of_date"],
         file_version=row["file_version"],
         source_id=row["source_id"],
-        partial=complete.is_empty(),
+        partial=partial,
     )
+
+
+def _source_priority_expr() -> pl.Expr:
+    """0 for daily holdings, 1 for quarterly disclosures and synthetic PDFs (D53)."""
+    quarterly = pl.col("kind") == SourceKind.quarterly_disclosure.value
+    synthetic_pdf = (pl.col("kind") == SourceKind.synthetic.value) & (
+        pl.col("format") == FileFormat.pdf.value
+    )
+    return pl.when(quarterly | synthetic_pdf).then(1).otherwise(0)
+
+
+def _partial_list_shas(con: duckdb.DuckDBPyConnection) -> frozenset[str]:
+    """SHAs the build flagged with a ``partial_list`` info event (D52)."""
+    frame = con.execute(
+        'SELECT DISTINCT raw_file_sha256 FROM qa_events WHERE "check" = ?',
+        ["partial_list"],
+    ).pl()
+    return frozenset(str(sha) for sha in frame["raw_file_sha256"].to_list())
 
 
 def _selected_rows(
@@ -310,7 +335,7 @@ def _securities(
             & ~pl.col("security_id").str.starts_with("DERIV:")
         )
         .group_by("security_id")
-        .agg(pl.col("weight").sum(), pl.col("security_name").first())
+        .agg(pl.col("weight").sum(), pl.col("security_name").sort().first())
         .select("security_id", "weight", "security_name")
     )
     return selection, securities
