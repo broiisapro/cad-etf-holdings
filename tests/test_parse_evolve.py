@@ -118,6 +118,28 @@ def test_missing_as_of_hint_raises() -> None:
         EvolveParser().parse(_raw(as_of=None))
 
 
+def test_unit_contradiction_note_only_when_the_other_unit_fits(tmp_path: Path) -> None:
+    header = "TICKER,PORTFOLIO_MWEIGHT,POSITION,SECURITY_NAME,GICS_SECTOR_NAME,COUNTRY\n"
+    percent_rows = (
+        '"NORL LN EQUITY",60.0,1,"Northolt Instruments PLC",Technology,"Britain"\n'
+        '"XQVI US EQUITY",40.0,1,"Xenon Quarry Ventures Inc",Technology,"United States"\n'
+    )
+    path = tmp_path / "percent.csv"
+    path.write_text(header + percent_rows, encoding="utf-8")
+    parsed = EvolveParser().parse(_raw(path))
+    notes = [note for note in parsed.notes if note.startswith("unit_check=")]
+    assert len(notes) == 1
+    assert "total matches unit percent" in notes[0]
+
+    short = tmp_path / "short.csv"
+    short.write_text(
+        header + '"NORL LN EQUITY",0.5,1,"Northolt Instruments PLC",Technology,"Britain"\n',
+        encoding="utf-8",
+    )
+    parsed_short = EvolveParser().parse(_raw(short))
+    assert not any(note.startswith("unit_check=") for note in parsed_short.notes)
+
+
 def test_discovered_by_the_parser_registry() -> None:
     source = load_sources(CONFIG_DIR / "sources.yaml")["evolve_daily"]
     parser = find_parser(_raw(), source)
