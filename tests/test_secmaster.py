@@ -212,7 +212,7 @@ def test_cash_rows_get_currency_ids() -> None:
             },
         ]
     )
-    assert master.assign(frame)["security_id"].to_list() == ["CASH:CAD", "CASH:USD", None]
+    assert master.assign(frame)["security_id"].to_list() == ["CASH:CAD", "CASH:USD", "CASH:XXX"]
 
 
 def test_fx_and_derivative_rows_get_deriv_ids() -> None:
@@ -261,7 +261,151 @@ def test_derivative_rows_never_become_securities() -> None:
             }
         ]
     )
-    assert master.assign(frame)["security_id"].to_list() == ["DERIV:SYNX:TSX 60 INDEX FUTURE"]
+    assert master.assign(frame)["security_id"].to_list() == ["DERIV:SYNX:AAPL"]
+
+
+def test_cash_rows_without_currency_get_the_iso_no_currency_code() -> None:
+    master = SecurityMaster()
+    frame = holdings_frame(
+        [
+            {
+                "fund_ticker": "SYNA",
+                "security_name": "Cash and Cash Equivalents",
+                "asset_class": "cash",
+            },
+            {
+                "fund_ticker": "SYNA",
+                "security_name": "Cash",
+                "asset_class": "Cash",
+                "currency": "   ",
+            },
+        ]
+    )
+    assert master.assign(frame)["security_id"].to_list() == ["CASH:XXX", "CASH:XXX"]
+
+
+def test_derivative_ids_prefer_the_instrument_ticker_over_the_name() -> None:
+    master = SecurityMaster()
+    frame = holdings_frame(
+        [
+            {
+                "fund_ticker": "SYNX",
+                "security_name": "Northwind Materials Inc Call Option",
+                "security_ticker": "NWMX 255 12/18/26",
+                "asset_class": "derivative",
+                "currency": "USD",
+            },
+            {
+                "fund_ticker": "SYNX",
+                "security_name": "Northwind Materials Inc Call Option",
+                "security_ticker": "NWMX 260 12/18/26",
+                "asset_class": "derivative",
+                "currency": "USD",
+            },
+            {
+                "fund_ticker": "SYNX",
+                "security_name": "Northwind Materials Inc Call Option",
+                "asset_class": "derivative",
+                "currency": "USD",
+            },
+        ]
+    )
+    assert master.assign(frame)["security_id"].to_list() == [
+        "DERIV:SYNX:NWMX 255 12/18/26",
+        "DERIV:SYNX:NWMX 260 12/18/26",
+        "DERIV:SYNX:NORTHWIND MATERIALS INC CALL OPTION",
+    ]
+
+
+def test_two_same_name_option_rows_without_tickers_get_unique_ids() -> None:
+    master = SecurityMaster()
+    frame = holdings_frame(
+        [
+            {
+                "fund_ticker": "ESPX",
+                "security_name": "Northwind Materials Inc Call Option",
+                "asset_class": "derivative",
+                "currency": "USD",
+            },
+            {
+                "fund_ticker": "ESPX",
+                "security_name": "Northwind Materials Inc Call Option",
+                "asset_class": "derivative",
+                "currency": "USD",
+            },
+        ]
+    )
+    assert master.assign(frame)["security_id"].to_list() == [
+        "DERIV:ESPX:NORTHWIND MATERIALS INC CALL OPTION",
+        "DERIV:ESPX:NORTHWIND MATERIALS INC CALL OPTION#2",
+    ]
+
+
+def test_derivative_collision_suffixes_follow_file_order() -> None:
+    master = SecurityMaster()
+
+    def row(name: str) -> dict[str, object]:
+        return {
+            "fund_ticker": "ESPX",
+            "security_name": name,
+            "asset_class": "derivative",
+            "currency": "USD",
+        }
+
+    frame = holdings_frame(
+        [
+            row("Northwind Materials Inc Call Option"),
+            row("Foxglove Networks Inc Put Option"),
+            row("Northwind Materials Inc Call Option"),
+        ]
+    )
+    assert master.assign(frame)["security_id"].to_list() == [
+        "DERIV:ESPX:NORTHWIND MATERIALS INC CALL OPTION",
+        "DERIV:ESPX:FOXGLOVE NETWORKS INC PUT OPTION",
+        "DERIV:ESPX:NORTHWIND MATERIALS INC CALL OPTION#2",
+    ]
+
+
+def test_derivative_collisions_are_scoped_to_one_file() -> None:
+    master = SecurityMaster()
+    rows = [
+        {
+            "fund_ticker": "ESPX",
+            "security_name": "Northwind Materials Inc Call Option",
+            "asset_class": "derivative",
+            "currency": "USD",
+        }
+    ]
+    first = master.assign(holdings_frame(rows))["security_id"].to_list()
+    second = master.assign(holdings_frame(rows))["security_id"].to_list()
+    assert first == ["DERIV:ESPX:NORTHWIND MATERIALS INC CALL OPTION"]
+    assert second == first
+
+
+def test_fx_and_derivative_ids_are_scoped_per_fund() -> None:
+    master = SecurityMaster()
+    frame = holdings_frame(
+        [
+            {
+                "fund_ticker": "SYNX",
+                "security_name": "CAD/USD Forward",
+                "security_ticker": "CADUSD",
+                "asset_class": "fx",
+                "currency": "CAD",
+            },
+            {
+                "fund_ticker": "SYNA",
+                "security_name": "CAD/USD Forward",
+                "security_ticker": "CADUSD",
+                "asset_class": "fx",
+                "currency": "CAD",
+            },
+        ]
+    )
+    assert master.assign(frame)["security_id"].to_list() == [
+        "DERIV:SYNX:CADUSD",
+        "DERIV:SYNA:CADUSD",
+    ]
 
 
 def test_committed_overrides_file_is_header_only() -> None:
