@@ -62,6 +62,21 @@ def test_parses_fixed_income_workbook() -> None:
     assert frame["sector"].to_list()[0] == "GOVERNMENT BONDS"
 
 
+def test_duplicate_isin_lines_are_kept_separate() -> None:
+    parsed = BmoParser().parse(_raw("duplicate_lines.xlsx", fund_ticker="DULK"))
+    frame = parsed.frame
+    ParsedHoldings.validate(frame)
+    assert frame.height == 4
+    assert float(frame["weight"].sum()) == pytest.approx(1.0, abs=1e-9)
+    duplicates = frame.filter(pl.col("isin") == "RU0000000001")
+    assert duplicates.height == 2
+    assert duplicates["security_name"].unique().to_list() == ["Quarrystone Metals PAO"]
+    assert set(duplicates["currency"].to_list()) == {"RUB", "USD"}
+    assert duplicates["weight"].to_list() == pytest.approx([0.099, 0.001], abs=1e-12)
+    assert duplicates["shares"].to_list() == [5000.0, 1500.0]
+    assert duplicates["market_value"].to_list() == pytest.approx([100.0, 50.0])
+
+
 def test_header_block_variants_are_found_by_name(tmp_path: Path) -> None:
     path = tmp_path / "preamble.xlsx"
     workbook = Workbook()

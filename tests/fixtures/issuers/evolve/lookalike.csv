@@ -2,5 +2,7 @@ TICKER,PORTFOLIO_MWEIGHT,POSITION,SECURITY_NAME,GICS_SECTOR_NAME,GICS_SECTOR_NAM
 "NORL LN EQUITY",0.400,12000,"Northolt Instruments PLC",Technology,Technologie,"Britain",Bretagne,12.3400,148080.00,,
 "XQVI US EQUITY",3.50E-01,8000,"Xenon Quarry Ventures Inc",Technology,Technologie,"United States",États-Unis,25.1000,200800.00,,
 "BRKS CN EQUITY",0.20,4000,"Brookstone Railway Systems Ltd",Industrials,Industrielles,"Canada",Canada,50.0000,200000.00,,
-"CASH CAD",0.051234,0,"Cash and Cash Equivalents",,,,,,51234.00,,
+"CASH CAD",0.052434,0,"Cash and Cash Equivalents",,,,,,51234.00,,
 "NORL LN 10/16/26 C125 EQUITY",-0.001234,-1,"Northolt Instruments PLC - CALL Option",Technology,Technologie,"Britain",Bretagne,1.2300,-1234.00,,
+"XQVI US 10/16/26 C30 EQUITY",-0.000500,-2,"Xenon Quarry Ventures Inc - CALL Option",Technology,Technologie,"United States",États-Unis,0.2500,-500.00,,
+"XQVA US 10/16/26 C30 EQUITY",-0.000700,-3,"Xenon Quarry Ventures Inc - CALL Option",Technology,Technologie,"United States",États-Unis,0.2300,-700.00,,

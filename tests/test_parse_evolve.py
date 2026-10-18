@@ -34,23 +34,34 @@ def test_parses_lookalike_csv() -> None:
     assert parsed.published_at is None
     assert parsed.notes[0] == "declared_unit=fraction"
     assert not any(note.startswith("unit_check=") for note in parsed.notes)
+    assert "exchange_codes=CN,LN,US" in parsed.notes
     frame = parsed.frame
     ParsedHoldings.validate(frame)
-    assert frame.height == 5
+    assert frame.height == 7
     assert frame["weight"].to_list() == pytest.approx(
-        [0.40, 0.35, 0.20, 0.051234, -0.001234], abs=1e-12
+        [0.40, 0.35, 0.20, 0.052434, -0.001234, -0.000500, -0.000700], abs=1e-12
     )
     assert float(frame["weight"].sum()) == pytest.approx(1.0, abs=1e-9)
     names = frame["security_name"].to_list()
     assert names[0] == "Northolt Instruments PLC"
 
 
-def test_exchange_labels_use_the_mic_table() -> None:
+def test_exchange_codes_are_passed_through_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    import etfh.parse.evolve as evolve
+
+    seen: list[str | None] = []
+
+    def recorder(label: str | None) -> str | None:
+        seen.append(label)
+        return f"MIC:{label}"
+
+    monkeypatch.setattr(evolve, "normalize_exchange", recorder)
     frame = EvolveParser().parse(_raw()).frame
     by_name = {row["security_name"]: row["exchange"] for row in frame.to_dicts()}
-    assert by_name["Northolt Instruments PLC"] == "XLON"
-    assert by_name["Xenon Quarry Ventures Inc"] is None
-    assert by_name["Brookstone Railway Systems Ltd"] is None
+    assert by_name["Northolt Instruments PLC"] == "MIC:LN"
+    assert by_name["Xenon Quarry Ventures Inc"] == "MIC:US"
+    assert by_name["Brookstone Railway Systems Ltd"] == "MIC:CN"
+    assert sorted(set(seen)) == ["CN", "LN", "US"]
 
 
 def test_cash_and_derivative_rows() -> None:
@@ -62,11 +73,27 @@ def test_cash_and_derivative_rows() -> None:
     assert cash["country"][0] == "Unknown"
     assert cash["security_ticker"][0] == "CASH"
     derivative = frame.filter(pl.col("asset_class") == "derivative")
-    assert derivative.height == 1
-    assert derivative["security_ticker"][0] is None
-    assert derivative["weight"][0] < 0
-    assert derivative["shares"][0] == -1.0
-    assert derivative["market_value"][0] == -1234.0
+    assert derivative.height == 3
+    assert all(weight < 0 for weight in derivative["weight"].to_list())
+    assert derivative["shares"].to_list() == [-1.0, -2.0, -3.0]
+    assert derivative["market_value"].to_list() == [-1234.0, -500.0, -700.0]
+
+
+def test_derivative_tickers_keep_the_option_descriptor() -> None:
+    frame = EvolveParser().parse(_raw()).frame
+    derivative = frame.filter(pl.col("asset_class") == "derivative")
+    tickers = set(derivative["security_ticker"].to_list())
+    assert tickers == {
+        "NORL LN 10/16/26 C125",
+        "XQVI US 10/16/26 C30",
+        "XQVA US 10/16/26 C30",
+    }
+    # Two option lines share the security name; the descriptors keep them apart.
+    same_name = derivative.filter(
+        pl.col("security_name") == "Xenon Quarry Ventures Inc - CALL Option"
+    )
+    assert same_name.height == 2
+    assert same_name["security_ticker"].n_unique() == 2
 
 
 def test_scientific_notation_and_sector_country() -> None:
@@ -82,7 +109,7 @@ def test_latin1_fallback(tmp_path: Path) -> None:
     path.write_bytes(FIXTURE.read_bytes().decode("utf-8").encode("latin-1"))
     assert b"\xc9tats-Unis" in path.read_bytes()
     parsed = EvolveParser().parse(_raw(path))
-    assert parsed.frame.height == 5
+    assert parsed.frame.height == 7
     assert parsed.frame["security_name"][0] == "Northolt Instruments PLC"
 
 
