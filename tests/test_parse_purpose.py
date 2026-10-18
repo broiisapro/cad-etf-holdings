@@ -177,9 +177,11 @@ def test_short_list_without_breakdown_evidence_is_not_partial(tmp_path: Path) ->
     assert isinstance(portfolio, dict)
     portfolio.pop("Level1")
     holdings = portfolio["Level4"]["holdings"]  # type: ignore[index]
+    del holdings[2]
     del holdings[-1]
     path = _write(tmp_path, payload)
     parsed = PurposeParser().parse(_raw(path))
+    assert float(parsed.frame["weight"].sum()) == pytest.approx(0.70, abs=1e-12)
     assert "partial_list=true" not in parsed.notes
     assert not any(note.startswith("unit_check=") for note in parsed.notes)
 
