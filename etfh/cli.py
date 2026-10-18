@@ -13,6 +13,10 @@ Commands:
   prints the same shape as ``tests/fixtures/expected_overlap.json`` with
   four-decimal weight strings.
 - ``changes --fund F --from D1 --to D2 --db PATH`` prints recorded changes.
+- ``spotcheck --raw DIR --db PATH [--n 5] [--seed 0] [--issuer NAME]`` prints
+  sampled raw values next to normalized weights for the latest file per issuer.
+- ``export --db PATH --out DIR [--asof D] [--funds F1,F2,...]`` writes derived
+  aggregates only (FR-1.12).
 """
 
 from __future__ import annotations
@@ -35,9 +39,11 @@ from etfh.analytics import overlap as compute_overlap
 from etfh.build import build as run_build
 from etfh.build import connect as connect_duckdb
 from etfh.collect.registry import CollectError, collector_for
+from etfh.export import export_aggregates
 from etfh.http import PoliteClient
 from etfh.parse.registry import find_parser
 from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
+from etfh.spotcheck import spotcheck as run_spotcheck
 from etfh.storage import RawStore
 from etfh.types import Decision, SourceKind
 
@@ -226,6 +232,51 @@ def changes(
             f"  {row['from_as_of'].isoformat()} -> {row['to_as_of'].isoformat()}  "
             f"{row['change_type']}  {security}  {before} -> {after}  delta={delta}"
         )
+
+
+@app.command()
+def spotcheck(
+    raw: Annotated[Path, typer.Option("--raw", help="raw store directory")] = Path("raw"),
+    db: Annotated[Path, typer.Option("--db", help="built DuckDB file")] = Path("build/etfh.duckdb"),
+    n: Annotated[int, typer.Option("--n", help="holdings to sample per issuer")] = 5,
+    seed: Annotated[int, typer.Option("--seed", help="deterministic sample seed")] = 0,
+    issuer: Annotated[str | None, typer.Option("--issuer", help="check only this issuer")] = None,
+    config: Annotated[Path, typer.Option("--config", help="config directory")] = Path("config"),
+) -> None:
+    """Sample holdings against their raw file values for the latest file per issuer."""
+    if not Path(db).is_file():
+        typer.echo(f"error: database not found: {db}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        report = run_spotcheck(raw, db, n=n, seed=seed, issuer=issuer, config_dir=config)
+    except ValueError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(report, nl=False)
+
+
+@app.command()
+def export(
+    db: Annotated[Path, typer.Option("--db", help="built DuckDB file")] = Path("build/etfh.duckdb"),
+    out: Annotated[Path, typer.Option("--out", help="output directory")] = Path("exports"),
+    asof: Annotated[str, typer.Option("--asof", help="YYYY-MM-DD or 'today'")] = "today",
+    funds: Annotated[
+        str, typer.Option("--funds", help="comma-separated fund tickers (default: all)")
+    ] = "",
+) -> None:
+    """Write derived aggregates (overlap, concentration, sector breakdown)."""
+    asof_date = _parse_date(asof, "--asof")
+    fund_list = [part.strip() for part in funds.split(",") if part.strip()] or None
+    connection = _connect(db)
+    try:
+        paths = export_aggregates(connection, out, asof=asof_date, funds=fund_list)
+    except FundNotFoundError as error:
+        typer.echo(f"error: unknown fund {error.fund!r} in {db}", err=True)
+        raise typer.Exit(code=2) from None
+    finally:
+        connection.close()
+    for path in paths:
+        typer.echo(f"wrote {path}")
 
 
 def _collect_pair(
