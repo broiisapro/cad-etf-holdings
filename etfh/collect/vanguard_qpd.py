@@ -1,10 +1,9 @@
 """Vanguard Canada quarterly portfolio disclosure collector.
 
 Vanguard publishes one disclosure PDF per fund at a predictable URL. The host
-serves a non-404 4xx for ``/robots.txt``, which D37 treats as disallow-all, so
-:class:`PoliteClient` refuses these downloads by design; the collector reports
-that refusal as a :class:`~etfh.collect.registry.CollectError` instead of
-working around it.
+answers a missing ``/robots.txt`` with 403, which RFC 9309 (D46) treats as
+"no restrictions", so the download is reachable; every request still goes
+through :class:`PoliteClient` (terms gate, limiter, robots, retries).
 """
 
 from __future__ import annotations
@@ -16,7 +15,8 @@ from pathlib import Path
 from etfh.collect.registry import CollectError
 from etfh.http import HTTPRetryError, PoliteClient, RobotsDisallowedError
 from etfh.registry import Fund, Source, load_sources, require_collectable
-from etfh.types import RawFile, RawStore
+from etfh.storage import RawStore
+from etfh.types import RawFile
 
 __all__ = ["COLLECTORS", "VanguardQpdCollector"]
 
@@ -29,18 +29,44 @@ def _configured_source(source_id: str) -> Source:
     return load_sources(config_dir / "sources.yaml")[source_id]
 
 
+def _conditional_for_url(
+    store: RawStore, source_id: str, fund_ticker: str, url: str
+) -> tuple[str | None, str | None]:
+    """ETag/Last-Modified only when the newest stored version has this URL."""
+    raws = [
+        raw
+        for raw in store.iter_raw()
+        if raw.source_id == source_id and raw.fund_ticker == fund_ticker
+    ]
+    if not raws:
+        return None, None
+    latest = max(raws, key=lambda raw: raw.fetched_at)
+    if latest.url != url:
+        return None, None
+    meta = store.read_meta(latest.path.parent / f"{latest.path.stem}.meta.json")
+    etag = meta.get("etag")
+    last_modified = meta.get("last_modified")
+    return (
+        str(etag) if etag is not None else None,
+        str(last_modified) if last_modified is not None else None,
+    )
+
+
 class VanguardQpdCollector:
     """Fetch a fund's quarterly disclosure PDF from Vanguard's document host."""
 
     source_id: str = _SOURCE_ID
+    source: Source | None = None
 
     def __init__(self, source: Source | None = None) -> None:
-        self._source = source
+        self.source = source
 
-    def source(self) -> Source:
-        if self._source is None:
-            self._source = _configured_source(self.source_id)
-        return self._source
+    def _resolve_source(self, fund: Fund) -> Source:
+        if self.source is not None:
+            return self.source
+        source = _configured_source(self.source_id)
+        self.source = source
+        return source
 
     def disclosure_url(self, ticker: str) -> str:
         return _BASE_URL.format(ticker=ticker.strip().upper())
@@ -52,11 +78,12 @@ class VanguardQpdCollector:
         client: PoliteClient,
         store: RawStore,
     ) -> list[RawFile]:
-        source = self.source()
+        source = self._resolve_source(fund)
         require_collectable(source)
         url = self.disclosure_url(fund.ticker)
+        etag, last_modified = _conditional_for_url(store, self.source_id, fund.ticker, url)
         try:
-            response = client.get(url, source=source)
+            response = client.get(url, source=source, etag=etag, last_modified=last_modified)
         except RobotsDisallowedError as exc:
             raise CollectError(self.source_id, fund, f"robots.txt disallows {url}") from exc
         except HTTPRetryError as exc:
