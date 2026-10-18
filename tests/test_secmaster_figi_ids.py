@@ -14,8 +14,9 @@ import httpx
 import polars as pl
 import pytest
 
+from etfh.build import build
 from etfh.secmaster import FigiLookup, Override, SecurityMaster
-from tests._secmaster_helpers import holdings_frame
+from tests._secmaster_helpers import RAW_SYNTHETIC, holdings_frame
 from tests.conftest import FakeClock
 
 JobKey = tuple[str, str, str | None, str | None]
@@ -439,3 +440,17 @@ def test_live_openfigi_maps_canadian_isins_and_tsx_tickers(tmp_path: Path) -> No
         by_ticker = lookup.composite_figi("TICKER", ticker, "XTSE")
         assert by_isin is not None, (isin, ticker)
         assert by_ticker == by_isin, (isin, ticker, by_isin, by_ticker)
+
+
+def test_build_with_an_explicit_figi_none_master_matches_the_default_build(
+    tmp_path: Path,
+) -> None:
+    """Passing ``SecurityMaster()`` must not change the build by one byte."""
+    default_out = tmp_path / "default"
+    explicit_out = tmp_path / "explicit"
+    build(RAW_SYNTHETIC, default_out)
+    build(RAW_SYNTHETIC, explicit_out, security_master=SecurityMaster())
+    for name in ("holdings", "file_versions", "qa_events", "holdings_changes"):
+        default_bytes = (default_out / "parquet" / f"{name}.parquet").read_bytes()
+        explicit_bytes = (explicit_out / "parquet" / f"{name}.parquet").read_bytes()
+        assert default_bytes == explicit_bytes, name
