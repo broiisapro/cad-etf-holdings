@@ -99,7 +99,12 @@ def test_purpose_qpd_live_smoke(tmp_path: Path) -> None:
             assert "robots" in exc.reason
             return
     parsed = QpdPdfParser().parse(raw_files[0])
-    assert abs(float(parsed.frame["weight"].sum()) - _stated_total(parsed.notes)) <= 0.005
+    # Purpose's Top 25 list has no stated total; the file is partial and the
+    # parsed rows just have to be 25 non-empty positions.
+    assert "partial_list=true" in parsed.notes
+    assert not any(note.startswith("stated_total_fraction=") for note in parsed.notes)
+    assert parsed.frame.height == 25
+    assert float(parsed.frame["weight"].sum()) > 0.0
 
 
 @pytest.mark.network
