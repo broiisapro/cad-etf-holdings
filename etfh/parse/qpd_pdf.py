@@ -155,6 +155,10 @@ class QpdRules:
     sector_grouping: bool = True
     column_gap: float = 10.0
     two_column: bool = False
+    column_scope: str = "both"
+    column_split: float = 0.0
+    x_tolerance: float = 3.0
+    orphan_weight_join: bool = False
     section_start_patterns: tuple[str, ...] = ()
     section_end_patterns: tuple[str, ...] = ()
     ignored_segment_patterns: tuple[str, ...] = ()
@@ -168,10 +172,18 @@ DEFAULT_RULES = QpdRules()
 
 QPD_RULES: dict[str, QpdRules] = {}
 
+# Vanguard Canada's disclosure is a two-column page: sector allocation on the
+# left, the Top 25 Holdings on the right. The document's font kerning makes
+# pdfplumber merge adjacent words at the default tolerance, so the rules lower
+# it to 1. The sum of the listed holdings is printed unlabelled at the bottom
+# of the right column, just above "Total net asset value".
 VANGUARD_RULES = replace(
     DEFAULT_RULES,
     name="vanguard_ca",
+    x_tolerance=1.0,
+    column_scope="right",
     total_patterns=(
+        r"([<>]?\s*-?\d[\d.,]*)\s*\n\s*total\s+net\s+asset\s+value",
         r"total\s+investments?\s*:?\s*([<>]?\s*-?\d[\d\s.,]*\s*%)",
         *DEFAULT_RULES.total_patterns,
     ),
@@ -215,8 +227,51 @@ BMO_RULES = replace(
     ),
 )
 
-PURPOSE_RULES = replace(DEFAULT_RULES, name="purpose")
-EVOLVE_RULES = replace(DEFAULT_RULES, name="evolve")
+# Purpose puts the Top 25 Holdings down the right column and the sector and
+# asset mixes down the left. The listed holdings have no stated total, so the
+# table is scoped to "TOP 25 HOLDINGS" and treated as a partial list. Long
+# bond names wrap and can push the weight onto its own line, hence the orphan
+# weight join and the skip patterns for the header and footer fragments.
+PURPOSE_RULES = replace(
+    DEFAULT_RULES,
+    name="purpose",
+    column_scope="right",
+    orphan_weight_join=True,
+    sector_grouping=False,
+    section_start_patterns=(r"^top\s*25\s+holdings\b",),
+    partial_section_pattern=r"^top\s*25\s+holdings\b",
+    stated_total_applies_to_partial=False,
+    skip_patterns=(
+        r"^asset\s+value$",
+        r"^top\s+holdings\s+table\s+includes\b",
+        r"^transactions\s+of\s+the\s+investment\b",
+        r"^it\s+may\s+also\s+be\s+obtained\b",
+        r"^and\s+cash\s+equivalents\b",
+        r"^information\s+is\s+available\b",
+        r"^quarterly\s+portfolio\s+disclosure$",
+        *DEFAULT_RULES.skip_patterns,
+    ),
+)
+
+# Evolve prints the Top 25 Positions on the left and a small sector mix on
+# the right; the listed holdings' total ("Total 97.46%") is only printed at
+# the foot of the left column, so the total pattern anchors at a line start
+# and the extraction is scoped to the left column.
+EVOLVE_RULES = replace(
+    DEFAULT_RULES,
+    name="evolve",
+    column_scope="left",
+    column_split=348.0,
+    skip_patterns=(
+        r"^value$",
+        r"^top\s+25\s+positions\b",
+        *DEFAULT_RULES.skip_patterns,
+    ),
+    total_patterns=(
+        r"(?m)^total\s*:?\s*([<>]?\s*-?\d[\d.,]*\s*%)",
+        *DEFAULT_RULES.total_patterns,
+    ),
+)
 
 QPD_RULES["vanguard_ca_qpd"] = VANGUARD_RULES
 QPD_RULES["globalx_ca_qpd"] = GLOBALX_RULES
@@ -510,6 +565,11 @@ def _segments_from_words(words: Sequence[dict[str, Any]], gap: float) -> list[st
 
 def _group_page_lines(page: Any, gap: float) -> list[list[str]]:
     words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+    return _group_words(words, gap)
+
+
+def _group_words(words: Sequence[dict[str, Any]], gap: float) -> list[list[str]]:
+    """Group positioned words into lines and split each line into segments."""
     lines: dict[float, list[dict[str, Any]]] = {}
     for word in words:
         top = round(float(word["top"]), 1)
@@ -521,22 +581,60 @@ def _group_page_lines(page: Any, gap: float) -> list[list[str]]:
 
 
 def _lines_from_page(page: Any, rules: QpdRules) -> list[list[str]]:
+    words = page.extract_words(
+        use_text_flow=False,
+        keep_blank_chars=False,
+        x_tolerance=rules.x_tolerance,
+    )
+    if rules.column_scope in {"left", "right"}:
+        split = rules.column_split if rules.column_split > 0 else float(page.width) / 2.0
+        want_right = rules.column_scope == "right"
+        selected = [word for word in words if (float(word["x0"]) >= split) is want_right]
+        return _group_words(selected, rules.column_gap)
     if not rules.two_column:
-        return _group_page_lines(page, rules.column_gap)
-    words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+        return _group_words(words, rules.column_gap)
     if not words:
         return []
     midpoint = float(page.width) / 2.0
     grouped: list[list[str]] = []
     for side in (False, True):
         selected = [word for word in words if (float(word["x0"]) >= midpoint) is side]
-        lines: dict[float, list[dict[str, Any]]] = {}
-        for word in selected:
-            top = round(float(word["top"]), 1)
-            lines.setdefault(top, []).append(word)
-        for top in sorted(lines):
-            grouped.append(_segments_from_words(lines[top], rules.column_gap))
+        grouped.extend(_group_words(selected, rules.column_gap))
     return grouped
+
+
+def _ends_with_weight(segments: Sequence[str], rules: QpdRules) -> bool:
+    cleaned = [_clean(segment) for segment in segments if _clean(segment)]
+    if not cleaned:
+        return False
+    last = cleaned[-1]
+    if _weight_value(last) is not None:
+        return True
+    _, trailing = _split_trailing_weight(last)
+    return trailing is not None
+
+
+def _join_orphan_weights(lines: Sequence[Sequence[str]], rules: QpdRules) -> list[list[str]]:
+    """Attach a weight printed alone on its own line to the name above it.
+
+    Some issuers wrap a long security name so that the weight lands on its own
+    line between the name and its continuation (Purpose bond funds). Merging
+    that line back keeps the row and its weight instead of dropping both.
+    """
+    merged: list[list[str]] = []
+    for segments in lines:
+        cleaned = [_clean(segment) for segment in segments if _clean(segment)]
+        if (
+            rules.orphan_weight_join
+            and len(cleaned) == 1
+            and _weight_value(cleaned[0]) is not None
+            and merged
+            and not _ends_with_weight(merged[-1], rules)
+        ):
+            merged[-1] = [*merged[-1], cleaned[0]]
+            continue
+        merged.append(cleaned)
+    return merged
 
 
 def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extraction:
@@ -544,6 +642,8 @@ def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extrac
     sector: str | None = None
     partial_section = False
     active = not rules.section_start_patterns
+    if rules.orphan_weight_join:
+        lines = _join_orphan_weights(lines, rules)
     for index, segments in enumerate(lines):
         text = _clean(" ".join(segments))
         if not text:
@@ -599,7 +699,7 @@ def _pdfplumber_rows(path: Any, rules: QpdRules) -> tuple[list[_Row], str, bool]
     partial = False
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text() or ""
+            page_text = page.extract_text(x_tolerance=rules.x_tolerance) or ""
             texts.append(page_text)
             extraction = _rows_from_lines(_lines_from_page(page, rules), rules)
             rows.extend(extraction.rows)
