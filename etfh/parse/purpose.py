@@ -6,11 +6,23 @@ The public fund endpoint returns a large fund document. The portfolio date is
 ``"5.63%"``). The list may end with a ``Total`` row, which is not a holding.
 The format carries no tickers, identifiers, exchanges, currencies or share
 counts, so those columns stay null.
+
+The holdings list is a securities list: option lines ("... Call 94 11/06/26"),
+warrants, futures, forwards and swaps are classified as ``derivative``, FX
+forwards as ``fx``, and cash accounts as ``cash``. Several funds never reach
+100% because the source publishes the cash/other-asset share only in the
+``Level1``–``Level3`` exposure breakdowns, not as a holding row (some funds list
+a top-N subset). When the source itself reports a complete 100% exposure
+breakdown but its holdings list totals less, the file is marked
+``partial_list=true`` (D52) so validation does not force a sum the source never
+published. A shortfall without that evidence stays unmarked: a parsing gap must
+never hide behind the note.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -58,6 +70,18 @@ _ASSET_CLASSES = {
 }
 _TOTAL_NAMES = {"total", "totals", "total holdings", "total of holdings"}
 
+# Option lines end with "Call <strike> <expiry>", e.g. "Apple Inc Put 320
+# 10/23/26". The anchored pattern keeps ordinary names that merely contain
+# "Call"/"Put" (company names) out of the derivative class.
+_OPTION_LINE = re.compile(r"\b(?:call|put)\s+[\d.]+\s+\d{1,2}/\d{1,2}/\d{2,4}\s*$", re.IGNORECASE)
+_DERIVATIVE_WORD = re.compile(
+    r"\b(?:option|futures?|forwards?|swaps?|warrants?|rights?)\b", re.IGNORECASE
+)
+_FX_WORD = re.compile(r"\b(?:fx|foreign exchange)\b", re.IGNORECASE)
+# Percentages are printed to two decimals, so a complete list can round to
+# within a few hundredths of 100. A shortfall beyond this is real.
+_COMPLETE_TOLERANCE = 0.05
+
 
 def _date_value(value: Any) -> date | None:
     if isinstance(value, date):
@@ -77,6 +101,25 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
+def _label_asset_class(label: str) -> str:
+    """Map a source asset-class label to the schema's asset classes."""
+    lowered = label.strip().lower()
+    mapped = _ASSET_CLASSES.get(lowered)
+    if mapped is not None:
+        return mapped
+    if "fixed income" in lowered or "bond" in lowered:
+        return "fixed_income"
+    if "equit" in lowered:
+        return "equity"
+    if "cash" in lowered:
+        return "cash"
+    if "commodit" in lowered:
+        return "commodity"
+    if "balanced" in lowered:
+        return "balanced"
+    return "other"
+
+
 def _fund_asset_class(payload: dict[str, Any]) -> str:
     classes = payload.get("assetClass")
     if not isinstance(classes, list):
@@ -89,8 +132,50 @@ def _fund_asset_class(payload: dict[str, Any]) -> str:
             continue
         label = _text(fields.get("className")) or _text(fields.get("displayName"))
         if label is not None:
-            return _ASSET_CLASSES.get(label.lower(), "other")
+            return _label_asset_class(label)
     return "other"
+
+
+def _row_asset_class(name: str, fund_class: str) -> str:
+    """Classify one holding line: derivative, fx or cash, else the fund class."""
+    lowered = name.lower()
+    if "cash" in lowered:
+        return "cash"
+    if _FX_WORD.search(name):
+        return "fx"
+    if _OPTION_LINE.search(name) or _DERIVATIVE_WORD.search(name):
+        return "derivative"
+    return fund_class
+
+
+def _has_full_exposure_breakdown(payload: dict[str, Any]) -> bool:
+    """True when the document reports an exposure breakdown that totals 100%.
+
+    Purpose publishes ``Level1``–``Level3`` breakdowns (by asset class, credit
+    profile, geography, sector) whose values sum to ~100%. One such complete
+    breakdown proves the source knows the whole portfolio while its holdings
+    list totals less: the missing share is cash/other assets it does not list
+    as a holding row.
+    """
+    portfolio = payload.get("portfolio")
+    if not isinstance(portfolio, dict):
+        return False
+    for level in ("Level1", "Level2", "Level3"):
+        node = portfolio.get(level)
+        if not isinstance(node, dict):
+            continue
+        for breakdown in node.values():
+            if not isinstance(breakdown, dict) or len(breakdown) < 2:
+                continue
+            values = list(breakdown.values())
+            numeric = all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) for value in values
+            )
+            if not numeric:
+                continue
+            if abs(sum(values) - 100.0) <= 1.0:
+                return True
+    return False
 
 
 def _holding_rows(payload: dict[str, Any]) -> list[Any]:
@@ -129,6 +214,7 @@ class PurposeParser:
         fund_class = _fund_asset_class(payload)
         holdings = _holding_rows(payload)
         rows: list[dict[str, Any]] = []
+        unparsed_weights = 0
         for holding in holdings:
             if not isinstance(holding, dict):
                 continue
@@ -137,12 +223,13 @@ class PurposeParser:
                 continue
             weight = parse_number(_text(holding.get("weight")))
             if weight is None:
+                # A named row without a parseable weight may be a parsing gap;
+                # it must not be silently hidden behind partial_list (D52).
+                unparsed_weights += 1
                 continue
             sector = _text(holding.get("sector"))
             country = _text(holding.get("geo")) or _text(holding.get("country"))
-            asset_class = fund_class
-            if fund_class == "cash" or "cash" in name.lower():
-                asset_class = "cash"
+            asset_class = "cash" if fund_class == "cash" else _row_asset_class(name, fund_class)
             rows.append(
                 {
                     "security_name": name,
@@ -165,8 +252,17 @@ class PurposeParser:
         weights = [row["weight"] for row in rows]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
         notes = [f"declared_unit={declared.value}"]
-        if not unit_check.consistent:
+        if unit_check.suggested is not None:
+            # The total matches the other unit: a real unit contradiction.
             notes.append(f"unit_check={unit_check.detail()}")
+        elif (
+            unparsed_weights == 0
+            and unit_check.total < 100.0 - _COMPLETE_TOLERANCE
+            and _has_full_exposure_breakdown(payload)
+        ):
+            # The source reports a complete 100% breakdown but lists only part
+            # of the portfolio as holdings (cash/other assets or a top-N list).
+            notes.append("partial_list=true")
         count = len(rows)
         frame = pl.DataFrame(
             {
