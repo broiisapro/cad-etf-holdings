@@ -96,6 +96,18 @@ def test_derivative_tickers_keep_the_option_descriptor() -> None:
     assert same_name["security_ticker"].n_unique() == 2
 
 
+def test_company_names_are_not_misread_as_derivatives(tmp_path: Path) -> None:
+    path = tmp_path / "names.csv"
+    path.write_text(
+        "TICKER,PORTFOLIO_MWEIGHT,POSITION,SECURITY_NAME,GICS_SECTOR_NAME,COUNTRY\n"
+        '"BRGT US EQUITY",0.5,1,"Brightstone Rail Systems Inc",Industrials,"United States"\n'
+        '"WRTC US EQUITY",0.5,1,"Warranty Corp",Industrials,"United States"\n',
+        encoding="utf-8",
+    )
+    frame = EvolveParser().parse(_raw(path)).frame
+    assert set(frame["asset_class"].to_list()) == {"equity"}
+
+
 def test_scientific_notation_and_sector_country() -> None:
     frame = EvolveParser().parse(_raw()).frame
     xqvi = frame.filter(pl.col("security_name") == "Xenon Quarry Ventures Inc")

@@ -61,7 +61,9 @@ _COLUMNS = [
     "raw_file_sha256",
 ]
 
-_DERIVATIVE_WORDS = ("option", "future", "forward", "swap", "warrant", "right")
+# Whole words only: "Warranty Corp" and "Brightstone" are companies, not
+# derivatives.
+_DERIVATIVE_WORD = re.compile(r"\b(?:option|futures?|forwards?|swaps?|warrants?)\b", re.IGNORECASE)
 # Bloomberg derivative tickers carry "<expiry> C|P<strike>" after the symbol,
 # e.g. "GOOG US 10/16/26 C360". Some files name the row without the word
 # "Option", so the ticker shape is checked as well.
@@ -119,7 +121,7 @@ def _asset_class(name: str, ticker: str) -> str:
     lowered = name.lower()
     if "cash" in lowered or ticker.lower().startswith("cash"):
         return "cash"
-    if any(word in lowered for word in _DERIVATIVE_WORDS) or _OPTION_TICKER.search(ticker):
+    if _DERIVATIVE_WORD.search(name) or _OPTION_TICKER.search(ticker):
         return "derivative"
     return "equity"
 
