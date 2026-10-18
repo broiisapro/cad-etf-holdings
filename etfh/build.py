@@ -384,6 +384,23 @@ def build(
                 "status": "excluded" if excluded else "included",
             }
         )
+        partial_note = next(
+            (note for note in candidate.parsed.notes if note.startswith("partial_list=")),
+            None,
+        )
+        if partial_note is not None:
+            qa_rows.append(
+                {
+                    "raw_file_sha256": version.raw.sha256,
+                    "source_id": version.source_id,
+                    "fund_ticker": version.fund_ticker,
+                    "as_of_date": version.as_of_date,
+                    "check": "partial_list",
+                    "severity": "info",
+                    "detail": partial_note,
+                    "excluded": excluded,
+                }
+            )
         for qa_finding in findings:
             qa_rows.append(
                 {
