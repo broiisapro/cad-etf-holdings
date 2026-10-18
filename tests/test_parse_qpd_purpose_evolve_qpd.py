@@ -45,11 +45,20 @@ def test_purpose_lookalike_parses(tmp_path: Path) -> None:
     )
     ParsedHoldings.validate(parsed.frame)
     assert parsed.as_of_date == date(2026, 6, 30)
-    assert parsed.frame.height == 6
-    assert _stated_total(parsed.notes) == pytest.approx(0.4321)
-    assert round(float(parsed.frame["weight"].sum()), 4) == 0.4321
-    sectors = set(parsed.frame["sector"].to_list())
-    assert sectors == {"Canadian Equity", "U.S. Equity"}
+    assert parsed.notes == ["declared_unit=percent", "partial_list=true"]
+    names = parsed.frame["security_name"].to_list()
+    weights = dict(zip(names, parsed.frame["weight"].to_list(), strict=True))
+    # The right-column Top 25 list parses; the left-column SECTOR MIX and
+    # ASSET MIX tables and the footer do not leak in.
+    assert parsed.frame.height == 5
+    assert "Financials" not in names
+    assert "Canadian Equities" not in names
+    assert all(sector == "Unknown" for sector in parsed.frame["sector"].to_list())
+    # The wrapped bond name's weight was printed on its own line but is kept.
+    wrapped = [name for name in names if name.startswith("Fjord Shipping")]
+    assert len(wrapped) == 1
+    assert weights[wrapped[0]] == pytest.approx(0.032)
+    assert round(float(parsed.frame["weight"].sum()), 4) == 0.221
 
 
 def test_evolve_lookalike_parses(tmp_path: Path) -> None:
@@ -63,7 +72,11 @@ def test_evolve_lookalike_parses(tmp_path: Path) -> None:
     )
     ParsedHoldings.validate(parsed.frame)
     assert parsed.as_of_date == date(2026, 6, 30)
+    names = parsed.frame["security_name"].to_list()
+    # Top 25 Positions (left column) only: the sector mix and its 100.00%
+    # total on the right are excluded, and the left column's own total wins.
     assert parsed.frame.height == 5
+    assert "Information Technology" not in names
     assert _stated_total(parsed.notes) == pytest.approx(0.468)
     assert round(float(parsed.frame["weight"].sum()), 4) == 0.468
 

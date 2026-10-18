@@ -15,33 +15,20 @@ from etfh.parse.qpd_pdf import QPD_RULES, QpdPdfParser
 from etfh.registry import load_sources
 from etfh.schema import ParsedHoldings
 from etfh.storage import RawStore
-from tests._qpd_helpers import qpd_fund, raw_file_for_pdf, write_qpd_pdf
+from tests._qpd_helpers import qpd_fund, raw_file_for_pdf, write_vanguard_lookalike
 
 
 def _lookalike(tmp_path: Path) -> Path:
-    return write_qpd_pdf(
-        tmp_path / "vanguard.pdf",
-        as_of="June 30, 2026",
-        fund_name="Northline Balanced ETF",
-        published=None,
-        header="Security % of Net Assets",
-        rows=[
-            "Canadian Equity",
-            ("Maplecrest Properties", "18.40"),
-            ("Northgate Bank", "12.10"),
-            "U.S. Equity",
-            ("Uplands Chemicals Inc.", "24.50"),
-            ("Pineview Software Corp.", "19.90"),
-            "Fixed Income",
-            ("Fairhaven Bond Fund", "20.00"),
-            ("Cash and Cash Equivalents", "4.00"),
-        ],
-        total="Total Investments 98.90%",
-    )
+    return write_vanguard_lookalike(tmp_path / "vanguard.pdf")
 
 
 def test_vanguard_rules_are_registered() -> None:
-    assert QPD_RULES["vanguard_ca_qpd"].name == "vanguard_ca"
+    rules = QPD_RULES["vanguard_ca_qpd"]
+    assert rules.name == "vanguard_ca"
+    # The real document's tight kerning merges words at the default
+    # tolerance; the rules lower it.
+    assert rules.x_tolerance == 1.0
+    assert rules.column_scope == "right"
 
 
 def test_vanguard_lookalike_parses_to_stated_total(tmp_path: Path) -> None:
@@ -56,19 +43,16 @@ def test_vanguard_lookalike_parses_to_stated_total(tmp_path: Path) -> None:
             if note.startswith("stated_total_fraction=")
         )
     )
-    assert stated == pytest.approx(0.989)
-    assert round(float(parsed.frame["weight"].sum()), 4) == 0.989
+    # The right-column Top 25 list parses; the left-column sector allocation
+    # (whose total is 100.0) and the top-of-page titles do not leak in.
+    assert stated == pytest.approx(0.50)
+    assert parsed.frame.height == 6
+    assert round(float(parsed.frame["weight"].sum()), 4) == 0.50
     assert parsed.as_of_date == date(2026, 6, 30)
-    sectors = dict(
-        zip(
-            parsed.frame["security_name"].to_list(),
-            parsed.frame["sector"].to_list(),
-            strict=True,
-        )
-    )
-    assert sectors["Maplecrest Properties"] == "Canadian Equity"
-    assert sectors["Pineview Software Corp."] == "U.S. Equity"
-    assert sectors["Fairhaven Bond Fund"] == "Fixed Income"
+    names = parsed.frame["security_name"].to_list()
+    assert "Financials" not in names
+    assert "Other assets and liabilities (net)" not in names
+    assert parsed.frame["sector"].unique().to_list() == ["Unknown"]
 
 
 @pytest.mark.network
