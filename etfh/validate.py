@@ -38,6 +38,8 @@ Severity = Literal["error", "warning", "info"]
 _TORONTO = ZoneInfo("America/Toronto")
 _NON_SECURITY_ASSET_CLASSES = ("cash", "fx", "derivative")
 _NON_SECURITY_ID_PREFIXES = ("CASH:", "DERIV:")
+_UNIT_CHECK_PREFIX = "unit_check="
+_UNIT_SUGGESTION_MARKER = "; total matches unit "
 
 
 class ValidationConfig(BaseModel):
@@ -295,13 +297,22 @@ def _check_future_as_of(parsed: ParsedFile, *, config: ValidationConfig) -> list
 
 
 def _check_unit_contradiction(parsed: ParsedFile) -> list[QaFinding]:
-    """The parser reported that the declared weight unit contradicts the total."""
-    prefix = "unit_check="
-    return [
-        QaFinding("unit_contradiction", "error", note[len(prefix) :])
-        for note in parsed.notes
-        if note.startswith(prefix)
-    ]
+    """A unit contradiction is an error only when the other unit actually fits.
+
+    Parsers record ``unit_check=<UnitCheck.detail()>``; that text appends
+    ``"; total matches unit <other>"`` exactly when the other unit fits the
+    observed total. A total that fits neither unit is a plain weight-sum
+    problem, already reported by ``weight_sum``, so it is not repeated here
+    (wave-02 review #9).
+    """
+    findings: list[QaFinding] = []
+    for note in parsed.notes:
+        if not note.startswith(_UNIT_CHECK_PREFIX):
+            continue
+        detail = note[len(_UNIT_CHECK_PREFIX) :]
+        if _UNIT_SUGGESTION_MARKER in detail:
+            findings.append(QaFinding("unit_contradiction", "error", detail))
+    return findings
 
 
 def _check_negative_weight(parsed: ParsedFile) -> list[QaFinding]:
