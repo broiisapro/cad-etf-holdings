@@ -1,0 +1,85 @@
+{
+  "code": "PURB",
+  "name": "Purpose Lookalike Global Bond Fund",
+  "urlName": "purpose-lookalike-global-bond-fund",
+  "fundCode": "PURB",
+  "assetClass": [
+    {
+      "fields": {
+        "slug": "fixed-income",
+        "className": "Active Fixed Income",
+        "displayName": "Active Fixed Income"
+      }
+    }
+  ],
+  "portfolio": {
+    "dt": "2026-09-30",
+    "exposure": {},
+    "Level1": {
+      "asset_class": {
+        "Corporate Credit - IG": 35.87,
+        "Cash and Other": 28.95,
+        "Corporate Credit - HY": 15.48,
+        "Government": 7.35,
+        "CLO": 5.17,
+        "MBS": 3.84,
+        "ABS": 2.82,
+        "Term Loan": 0.36,
+        "Preferred Debt": 0.16
+      }
+    },
+    "Level3": {
+      "geo": {
+        "United States": 79.97,
+        "Emerging Markets": 12.08,
+        "Canada": 4.94,
+        "International": 3.01
+      }
+    },
+    "Level4": {
+      "holdings": [
+        {
+          "name": "Harbourline Treasury Note 3.500% 06/30/2033",
+          "weight": "2.40%"
+        },
+        {
+          "name": "Quarrystone Government Bond 4.250% 12/01/2031",
+          "weight": "1.72%"
+        },
+        {
+          "name": "Northvale Banking Corp. 5.125% 09/15/2029",
+          "weight": "1.31%"
+        },
+        {
+          "name": "Cedar Hollow Property Trust 4.800% 03/01/2030",
+          "weight": "1.08%"
+        },
+        {
+          "name": "Pinehurst Utilities Inc. 4.050% 05/20/2035",
+          "weight": "0.86%"
+        },
+        {
+          "name": "Sterling Creek Rail Ltd. 4.375% 11/10/2032",
+          "weight": "0.61%"
+        },
+        {
+          "name": "Maple Ridge Telecom 5.500% 07/04/2034",
+          "weight": "0.42%"
+        },
+        {
+          "name": "Fernbrook Pipeline Co. 3.950% 02/28/2031",
+          "weight": "0.35%"
+        },
+        {
+          "name": "Alder Bay Seaport 4.625% 08/12/2033",
+          "weight": "0.22%"
+        },
+        {
+          "name": "Westgate Energy Corp. 6.000% 10/05/2030",
+          "weight": "0.18%"
+        }
+      ]
+    },
+    "holdings_data": null
+  }
+}
