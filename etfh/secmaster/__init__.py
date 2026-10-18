@@ -9,6 +9,7 @@ OpenFIGI lookup (issue #24) are all in.
 from __future__ import annotations
 
 from etfh.secmaster.identifiers import (
+    composite_code,
     cusip_is_valid,
     cusip_to_isin,
     isin_is_valid,
@@ -24,6 +25,7 @@ __all__ = [
     "FigiLookup",
     "Override",
     "SecurityMaster",
+    "composite_code",
     "cusip_is_valid",
     "cusip_to_isin",
     "fuzzy_proposals",
