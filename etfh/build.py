@@ -44,7 +44,7 @@ Every table is sorted on a documented key before writing (D15):
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
@@ -70,6 +70,7 @@ from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
 from etfh.validate import ValidationConfig, is_excluded, validate_file
 
 if TYPE_CHECKING:
+    from etfh.secmaster.openfigi import FigiLookup
     from etfh.secmaster.resolve import SecurityMaster
     from etfh.validate import QaFinding
 
@@ -188,6 +189,7 @@ class BuildResult:
     n_changes: int
     n_qa_events: int
     n_unmatched: int
+    n_figi: int = 0
 
 
 @dataclass
@@ -230,13 +232,16 @@ def build(
     config_dir: Path = Path("config"),
     security_master: SecurityMaster | None = None,
     validator: Callable[..., list[QaFinding]] | None = None,
+    figi: FigiLookup | None = None,
 ) -> BuildResult:
     """Rebuild DuckDB, Parquet exports and reports from ``raw_root``.
 
     ``security_master`` and ``validator`` are injection points: when omitted,
     the real :class:`~etfh.secmaster.resolve.SecurityMaster` and
     :func:`etfh.validate.validate_file` are imported lazily. Tests pass fakes
-    that follow the same contracts.
+    that follow the same contracts. ``figi`` is the optional
+    :class:`~etfh.secmaster.openfigi.FigiLookup` used when the build creates
+    the security master itself (D47); an injected ``security_master`` wins.
     """
     raw_root = Path(raw_root)
     out_dir = Path(out_dir)
@@ -244,7 +249,7 @@ def build(
     funds = load_funds(config_dir / "funds.csv", sources)
     funds_by_ticker = {fund.ticker: fund for fund in funds}
     if security_master is None:
-        security_master = _default_security_master(config_dir)
+        security_master = _default_security_master(config_dir, figi=figi)
     validation_config = ValidationConfig.load(config_dir / "validation.yaml")
     if validator is None:
         validator = validate_file
@@ -306,6 +311,9 @@ def build(
             previous.known_at = min(previous.known_at, known_at)
             previous.fetched_at = min(previous.fetched_at, raw.fetched_at)
             previous.path = min(previous.path, str(raw.path))
+
+    if figi is not None:
+        _prefetch_figi(security_master, records.values())
 
     versions: list[_Version] = []
     grouped: dict[tuple[str, str, date], list[_Record]] = {}
@@ -439,6 +447,7 @@ def build(
     )
     priority = {source_id: _source_priority(source) for source_id, source in sources.items()}
     holdings_changes = _compute_changes(holdings, priority)
+    n_figi = holdings.filter(pl.col("security_id").str.starts_with("FIGI:")).height
 
     frames = {
         "file_versions": file_versions,
@@ -459,7 +468,18 @@ def build(
         n_changes=holdings_changes.height,
         n_qa_events=qa_events.height,
         n_unmatched=unmatched.height,
+        n_figi=n_figi,
     )
+
+
+def _prefetch_figi(security_master: SecurityMaster, records: Iterable[_Record]) -> None:
+    """Batch the FIGI lookups for every parsed file in one pass (D47)."""
+    prefetch = getattr(security_master, "prefetch", None)
+    if not callable(prefetch):
+        return
+    frames = [record.candidate.parsed.frame for record in records if record.candidate is not None]
+    if frames:
+        prefetch(frames)
 
 
 def _fallback_as_of(raw: RawFile) -> date:
@@ -692,10 +712,10 @@ def _load_sources(path: Path) -> dict[str, Source]:
     return _cached_sources(str(path), stat.st_mtime_ns, stat.st_size)
 
 
-def _default_security_master(config_dir: Path) -> SecurityMaster:
+def _default_security_master(config_dir: Path, *, figi: FigiLookup | None = None) -> SecurityMaster:
     from etfh.secmaster.overrides import load_overrides
     from etfh.secmaster.resolve import SecurityMaster
 
     overrides_path = config_dir / "security_overrides.csv"
     overrides = load_overrides(overrides_path) if overrides_path.exists() else []
-    return SecurityMaster(overrides=overrides)
+    return SecurityMaster(overrides=overrides, figi=figi)
