@@ -31,9 +31,8 @@ class PurposeCollector:
 
     The registry binds the source the CLI passes (``--config DIR``) by setting
     ``source`` on a fresh copy; only when it is ``None`` does the collector
-    fall back to the default config. Every request goes through
-    ``client.get(url, source=self.source)``, so the terms gate always checks
-    the config the CLI selected.
+    fall back to the default config. Every request is gated with that
+    source, so the terms gate always checks the config the CLI selected.
     """
 
     source_id = "purpose_daily"
