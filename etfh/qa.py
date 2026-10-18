@@ -34,7 +34,6 @@ __all__ = [
     "unmatched_shares",
 ]
 
-_NON_SECURITY_ASSET_CLASSES = ("cash", "fx", "derivative")
 _DAILY_KIND = "daily_holdings"
 _MAX_WORST_FUNDS = 10
 
@@ -63,7 +62,7 @@ class InconsistentFile:
 
 @dataclass(frozen=True, slots=True)
 class UnmatchedShare:
-    """One included file version's share of unmatched non-cash weight."""
+    """One fund/as-of/source pair's share of unmatched non-cash weight."""
 
     fund_ticker: str
     as_of_date: date
