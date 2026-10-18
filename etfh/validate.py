@@ -193,7 +193,12 @@ def _check_weight_sum(
     fund_asset_class: AssetClass,
     config: ValidationConfig,
 ) -> list[QaFinding]:
-    """Daily files must sum to 1 within the fund's asset-class tolerance (D38)."""
+    """Daily files must sum to 1 within the fund's asset-class tolerance (D38).
+
+    A file whose parser records ``partial_list=true`` publishes only part of
+    the portfolio with evidence from the source; its weight sum becomes a
+    warning instead of an error (D52) and the file stays included.
+    """
     if _is_quarterly(source) or _weight_dtype(parsed.frame) is None:
         return []
     tolerance = config.weight_sum_tolerance[fund_asset_class]
@@ -201,14 +206,14 @@ def _check_weight_sum(
     delta = abs(total - 1.0)
     if delta <= tolerance:
         return []
-    return [
-        QaFinding(
-            "weight_sum",
-            "error",
-            f"sum={total:.4f} expected=1±{tolerance:g} "
-            f"(asset_class={fund_asset_class.value}, delta={delta:.4f})",
-        )
-    ]
+    partial = _note_value(parsed.notes, "partial_list") == "true"
+    detail = (
+        f"sum={total:.4f} expected=1±{tolerance:g} "
+        f"(asset_class={fund_asset_class.value}, delta={delta:.4f})"
+    )
+    if partial:
+        detail += "; partial_list=true: the source publishes part of the portfolio"
+    return [QaFinding("weight_sum", "warning" if partial else "error", detail)]
 
 
 def _check_qpd_stated_total(
