@@ -62,6 +62,21 @@ def test_parses_fixed_income_workbook() -> None:
     assert frame["sector"].to_list()[0] == "GOVERNMENT BONDS"
 
 
+def test_duplicate_isin_lines_are_kept_separate() -> None:
+    parsed = BmoParser().parse(_raw("duplicate_lines.xlsx", fund_ticker="DULK"))
+    frame = parsed.frame
+    ParsedHoldings.validate(frame)
+    assert frame.height == 4
+    assert float(frame["weight"].sum()) == pytest.approx(1.0, abs=1e-9)
+    duplicates = frame.filter(pl.col("isin") == "RU0000000001")
+    assert duplicates.height == 2
+    assert duplicates["security_name"].unique().to_list() == ["Quarrystone Metals PAO"]
+    assert set(duplicates["currency"].to_list()) == {"RUB", "USD"}
+    assert duplicates["weight"].to_list() == pytest.approx([0.099, 0.001], abs=1e-12)
+    assert duplicates["shares"].to_list() == [5000.0, 1500.0]
+    assert duplicates["market_value"].to_list() == pytest.approx([100.0, 50.0])
+
+
 def test_header_block_variants_are_found_by_name(tmp_path: Path) -> None:
     path = tmp_path / "preamble.xlsx"
     workbook = Workbook()
@@ -87,6 +102,22 @@ def test_openpyxl_fallback_parses_the_same_file(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(bmo.pl, "read_excel", boom)
     parsed = BmoParser().parse(_raw("equity.xlsx", fund_ticker="EQLK"))
     assert parsed.frame.height == 5
+
+
+def test_unit_contradiction_note_when_values_are_fractions(tmp_path: Path) -> None:
+    path = tmp_path / "fractions.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Weight (%)", "Name", "ISIN", "Number of Shares", "Asset Class"])
+    sheet.append([0.6, "Northolt Instruments PLC", "CA000000AA00", 10, "Equity"])
+    sheet.append([0.4, "Pinehurst Utilities Inc.", "CA000000BB11", 20, "Equity"])
+    workbook.save(path)
+    parsed = BmoParser().parse(
+        make_raw(path, source_id="bmo_daily", fund_ticker="EQLK", as_of_hint=date(2026, 10, 16))
+    )
+    notes = [note for note in parsed.notes if note.startswith("unit_check=")]
+    assert len(notes) == 1
+    assert "total matches unit fraction" in notes[0]
 
 
 def test_missing_as_of_hint_raises() -> None:

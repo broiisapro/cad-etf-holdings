@@ -16,6 +16,10 @@ parser refuses to guess when it is missing.
 
 Values are read with ``polars.read_excel(engine="calamine")`` without a header
 so any leading rows survive; openpyxl is the fallback reader.
+
+Rows that repeat an ISIN (for example the same security held in two currency
+lines, as real files show) are parsed faithfully as separate rows; whether that
+is a double listing or an acceptable duplicate is validation's decision (D51).
 """
 
 from __future__ import annotations
@@ -170,7 +174,7 @@ class BmoParser:
         weights = [row["weight"] for row in records]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
         notes = [f"declared_unit={declared.value}"]
-        if not unit_check.consistent:
+        if unit_check.suggested is not None:
             notes.append(f"unit_check={unit_check.detail()}")
         count = len(records)
         frame = pl.DataFrame(

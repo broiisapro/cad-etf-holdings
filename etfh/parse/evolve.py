@@ -7,7 +7,15 @@ single header row and no preamble:
 
 ``PORTFOLIO_MWEIGHT`` is a fraction (sometimes rendered in scientific
 notation, e.g. ``3.19E-02``). ``TICKER`` is a Bloomberg-style identifier:
-``<symbol> <market> EQUITY`` plus, for derivatives, an expiry and option code.
+``<symbol> <market> EQUITY`` plus, for derivatives, an expiry and option code
+(``GOOG US 10/16/26 C360 EQUITY``). Derivative rows keep that whole descriptor
+in ``security_ticker`` so two options on the same underlying (e.g. GOOG and
+GOOGL calls both named "Alphabet Inc - CALL Option") stay distinguishable for
+the security master's ``DERIV:`` ids. The raw market codes are passed through
+to ``normalize_exchange`` unchanged (never guessed here) and listed in the
+``exchange_codes=`` note so the mapping table can be extended from real
+evidence.
+
 The file states no portfolio date; the fund page states "Holdings As at
 <date>", which the collector records as the raw file's as-of hint. The parser
 therefore uses ``raw.as_of_hint`` and refuses to guess a date.
@@ -53,7 +61,13 @@ _COLUMNS = [
     "raw_file_sha256",
 ]
 
-_DERIVATIVE_WORDS = ("option", "future", "forward", "swap", "warrant")
+# Whole words only: "Warranty Corp" and "Brightstone" are companies, not
+# derivatives.
+_DERIVATIVE_WORD = re.compile(r"\b(?:option|futures?|forwards?|swaps?|warrants?)\b", re.IGNORECASE)
+# Bloomberg derivative tickers carry "<expiry> C|P<strike>" after the symbol,
+# e.g. "GOOG US 10/16/26 C360". Some files name the row without the word
+# "Option", so the ticker shape is checked as well.
+_OPTION_TICKER = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\s+[CP]\d", re.IGNORECASE)
 _CURRENCIES = {
     "CAD",
     "USD",
@@ -68,14 +82,6 @@ _CURRENCIES = {
     "SEK",
     "NOK",
     "ILS",
-}
-
-# Issuer market code -> canonical label passed to C's MIC table. Composite
-# codes (CN, US) deliberately stay unmapped: TSX vs TSXV and NYSE vs Nasdaq
-# cannot be told apart (D22: never guess). Codes with no entry are passed
-# through as-is so a future table extension is picked up automatically.
-_LABELS: dict[str, str] = {
-    "LN": "LSE",
 }
 
 
@@ -94,31 +100,28 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
-def _split_ticker(value: str) -> tuple[str | None, str | None]:
-    """Split ``<symbol> <market> [expiry option] EQUITY`` into symbol and market."""
+def _split_ticker(value: str) -> tuple[str | None, str | None, str | None]:
+    """Split ``<symbol> <market> [expiry option] EQUITY``.
+
+    Returns the symbol, the market code and the full descriptor (symbol plus
+    any expiry/strike tokens, without the trailing ``EQUITY``).
+    """
     parts = value.split()
     if parts and parts[-1].upper() == "EQUITY":
         parts = parts[:-1]
     if not parts:
-        return None, None
+        return None, None, None
     symbol = parts[0].upper() or None
     market = parts[1].upper() if len(parts) >= 2 else None
-    return symbol, market
-
-
-def _normalize_market(market: str | None) -> str | None:
-    if market is None:
-        return None
-    if market in {"CN", "US"}:
-        return None
-    return normalize_exchange(_LABELS.get(market, market))
+    descriptor = " ".join(parts).upper() or None
+    return symbol, market, descriptor
 
 
 def _asset_class(name: str, ticker: str) -> str:
     lowered = name.lower()
     if "cash" in lowered or ticker.lower().startswith("cash"):
         return "cash"
-    if any(word in lowered for word in _DERIVATIVE_WORDS):
+    if _DERIVATIVE_WORD.search(name) or _OPTION_TICKER.search(ticker):
         return "derivative"
     return "equity"
 
@@ -151,6 +154,7 @@ class EvolveParser:
         if reader.fieldnames is None or "TICKER" not in reader.fieldnames:
             raise ValueError(f"{raw.path}: unexpected Evolve header {reader.fieldnames!r}")
         rows: list[dict[str, Any]] = []
+        exchange_codes: set[str] = set()
         for record in reader:
             raw_ticker = _text(record.get("TICKER")) or ""
             name = _text(record.get("SECURITY_NAME"))
@@ -159,14 +163,17 @@ class EvolveParser:
             weight = parse_number(_text(record.get("PORTFOLIO_MWEIGHT")))
             if weight is None:
                 continue
-            symbol, market = _split_ticker(raw_ticker)
+            symbol, market, descriptor = _split_ticker(raw_ticker)
             asset_class = _asset_class(name, raw_ticker)
             derivative = asset_class == "derivative"
+            if market is not None and asset_class != "cash":
+                exchange_codes.add(market)
             rows.append(
                 {
                     "security_name": name,
-                    "security_ticker": None if derivative else symbol,
-                    "exchange": _normalize_market(market),
+                    "security_ticker": descriptor if derivative else symbol,
+                    # Cash rows carry a currency where equities carry a market.
+                    "exchange": None if asset_class == "cash" else normalize_exchange(market),
                     "isin": _text(record.get("ISIN")),
                     "cusip": _text(record.get("CUSIP")),
                     "asset_class": asset_class,
@@ -186,8 +193,10 @@ class EvolveParser:
         weights = [row["weight"] for row in rows]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
         notes = [f"declared_unit={declared.value}"]
-        if not unit_check.consistent:
+        if unit_check.suggested is not None:
             notes.append(f"unit_check={unit_check.detail()}")
+        if exchange_codes:
+            notes.append(f"exchange_codes={','.join(sorted(exchange_codes))}")
         count = len(rows)
         frame = pl.DataFrame(
             {
