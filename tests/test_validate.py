@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from etfh.registry import Source, load_funds, load_sources
 from etfh.types import AssetClass, ParsedFile, RawFile
+from etfh.units import WeightUnit, check_unit
 from etfh.validate import QaFinding, ValidationConfig, is_excluded, validate_file
 from tests._validate_helpers import load_manifest, parse_fixture, raw_files
 
@@ -353,6 +354,60 @@ class TestQpdStatedTotal:
 
 
 class TestDuplicateSecurity:
+    def test_synd_style_double_listing_is_an_error(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            _row(weight=0.5),
+            _row(weight=0.5, isin=None, cusip="600000AA1"),
+        ]
+        frame = _with_security_id(_frame(rows), ["ISIN:CA600000AA15", "ISIN:CA600000AA15"])
+        findings = validate_file(
+            _parsed(frame),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        errors = [f for f in findings if f.check == "duplicate_security"]
+        assert len(errors) == 1
+        assert errors[0].severity == "error"
+        assert "different identifier forms: CUSIP, ISIN" in errors[0].detail
+
+    def test_same_isin_on_two_lines_is_information_not_an_error(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            _row(weight=0.5, shares=1614.0),
+            _row(weight=0.5, shares=12435.0),
+        ]
+        frame = _with_security_id(_frame(rows), ["ISIN:CA600000AA15", "ISIN:CA600000AA15"])
+        findings = validate_file(
+            _parsed(frame),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        infos = [f for f in findings if f.check == "duplicate_lines"]
+        assert len(infos) == 1
+        assert infos[0].severity == "info"
+        assert "ISIN:CA600000AA15 appears 2 times (rows 0, 1)" in infos[0].detail
+        assert "same identifier form (ISIN), rows kept separate" in infos[0].detail
+        assert not is_excluded(findings)
+
+    def test_two_identical_rows_are_an_error(self, source_factory: Callable[..., Source]) -> None:
+        rows = [_row(weight=0.5, shares=100.0), _row(weight=0.5, shares=100.0)]
+        frame = _with_security_id(_frame(rows), ["ISIN:CA600000AA15", "ISIN:CA600000AA15"])
+        findings = validate_file(
+            _parsed(frame),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        errors = [f for f in findings if f.check == "duplicate_security"]
+        assert len(errors) == 1
+        assert errors[0].severity == "error"
+        assert "identical row(s): 0, 1" in errors[0].detail
+
     def test_two_cash_rows_of_different_currencies_pass(
         self, source_factory: Callable[..., Source]
     ) -> None:
@@ -375,7 +430,7 @@ class TestDuplicateSecurity:
         )
         assert findings == []
 
-    def test_same_cash_currency_twice_is_duplicate(
+    def test_same_cash_currency_twice_is_a_repeated_line(
         self, source_factory: Callable[..., Source]
     ) -> None:
         rows = [
@@ -389,7 +444,26 @@ class TestDuplicateSecurity:
             fund_asset_class=AssetClass.equity,
             config=_CONFIG,
         )
-        assert _error_checks(findings) == {"duplicate_security"}
+        assert _error_checks(findings) == set()
+        infos = [f for f in findings if f.check == "duplicate_lines"]
+        assert len(infos) == 1
+        assert "same identifier form (CASH)" in infos[0].detail
+
+    def test_identical_cash_rows_are_an_error(self, source_factory: Callable[..., Source]) -> None:
+        rows = [
+            _row(security_name="Cash", asset_class="cash", isin=None, weight=0.5),
+            _row(security_name="Cash", asset_class="cash", isin=None, weight=0.5),
+        ]
+        frame = _with_security_id(_frame(rows), ["CASH:CAD", "CASH:CAD"])
+        findings = validate_file(
+            _parsed(frame),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        errors = [f for f in findings if f.check == "duplicate_security"]
+        assert len(errors) == 1
+        assert "identical row(s): 0, 1" in errors[0].detail
 
 
 class TestFutureAsOf:
@@ -448,10 +522,8 @@ class TestNumericAndUnit:
         assert "1 non-finite" in numeric[0].detail
 
     def test_unit_contradiction_note(self, source_factory: Callable[..., Source]) -> None:
-        note = (
-            "declared unit fraction but weights total 100.0000 "
-            "(expected ~1.00 within 1.0%); total matches unit percent"
-        )
+        note = check_unit(pl.Series("weight", [100.0]), WeightUnit.fraction).detail()
+        assert "; total matches unit percent" in note
         parsed = _parsed(
             _single_row_frame(1.0), notes=["declared_unit=fraction", f"unit_check={note}"]
         )
@@ -464,6 +536,61 @@ class TestNumericAndUnit:
         assert _checks(findings) == ["unit_contradiction"]
         assert findings[0].severity == "error"
         assert findings[0].detail == note
+
+    def test_bad_sum_that_fits_neither_unit_is_only_weight_sum(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        note = check_unit(pl.Series("weight", [0.85]), WeightUnit.fraction).detail()
+        assert "; total matches unit" not in note
+        parsed = _parsed(
+            _single_row_frame(0.85), notes=["declared_unit=fraction", f"unit_check={note}"]
+        )
+        findings = validate_file(
+            parsed,
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        assert _checks(findings) == ["weight_sum"]
+        assert findings[0].severity == "error"
+        assert "sum=0.8500" in findings[0].detail
+
+
+class TestPartialList:
+    def test_partial_daily_file_weight_sum_is_a_warning(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        parsed = _parsed(
+            _single_row_frame(0.85),
+            notes=["declared_unit=fraction", "partial_list=true"],
+        )
+        findings = validate_file(
+            parsed,
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        warnings = [f for f in findings if f.check == "weight_sum"]
+        assert len(warnings) == 1
+        assert warnings[0].severity == "warning"
+        assert "sum=0.8500" in warnings[0].detail
+        assert "partial_list=true" in warnings[0].detail
+        assert not is_excluded(findings)
+
+    def test_partial_daily_file_within_tolerance_records_nothing(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        parsed = _parsed(
+            _single_row_frame(1.0),
+            notes=["declared_unit=fraction", "partial_list=true"],
+        )
+        findings = validate_file(
+            parsed,
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        assert findings == []
 
 
 class TestNegativeWeight:

@@ -9,7 +9,7 @@ severity ``error``.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -38,6 +38,8 @@ Severity = Literal["error", "warning", "info"]
 _TORONTO = ZoneInfo("America/Toronto")
 _NON_SECURITY_ASSET_CLASSES = ("cash", "fx", "derivative")
 _NON_SECURITY_ID_PREFIXES = ("CASH:", "DERIV:")
+_UNIT_CHECK_PREFIX = "unit_check="
+_UNIT_SUGGESTION_MARKER = "; total matches unit "
 
 
 class ValidationConfig(BaseModel):
@@ -191,7 +193,12 @@ def _check_weight_sum(
     fund_asset_class: AssetClass,
     config: ValidationConfig,
 ) -> list[QaFinding]:
-    """Daily files must sum to 1 within the fund's asset-class tolerance (D38)."""
+    """Daily files must sum to 1 within the fund's asset-class tolerance (D38).
+
+    A file whose parser records ``partial_list=true`` publishes only part of
+    the portfolio with evidence from the source; its weight sum becomes a
+    warning instead of an error (D52) and the file stays included.
+    """
     if _is_quarterly(source) or _weight_dtype(parsed.frame) is None:
         return []
     tolerance = config.weight_sum_tolerance[fund_asset_class]
@@ -199,14 +206,14 @@ def _check_weight_sum(
     delta = abs(total - 1.0)
     if delta <= tolerance:
         return []
-    return [
-        QaFinding(
-            "weight_sum",
-            "error",
-            f"sum={total:.4f} expected=1±{tolerance:g} "
-            f"(asset_class={fund_asset_class.value}, delta={delta:.4f})",
-        )
-    ]
+    partial = _note_value(parsed.notes, "partial_list") == "true"
+    detail = (
+        f"sum={total:.4f} expected=1±{tolerance:g} "
+        f"(asset_class={fund_asset_class.value}, delta={delta:.4f})"
+    )
+    if partial:
+        detail += "; partial_list=true: the source publishes part of the portfolio"
+    return [QaFinding("weight_sum", "warning" if partial else "error", detail)]
 
 
 def _check_qpd_stated_total(
@@ -252,26 +259,99 @@ def _check_qpd_stated_total(
     ]
 
 
+def _identifier_form(row: Mapping[str, object]) -> str:
+    """The identifier evidence through which a row reached its ``security_id``.
+
+    Used by the D51 duplicate rule: a repeated id whose rows arrived through
+    the same identifier form is a repeated line (``info duplicate_lines``); a
+    repeated id reached through different forms (ISIN vs CUSIP vs ticker, a
+    double listing) is a genuine duplicate. Overridden or FIGI ids fall back
+    to the strongest identifier the row itself provides.
+    """
+    security_id = str(row["security_id"])
+    isin = row.get("isin")
+    cusip = row.get("cusip")
+    ticker = row.get("security_ticker")
+    exchange = row.get("exchange")
+    if security_id.startswith("CASH:"):
+        return "CASH"
+    if security_id.startswith("DERIV:"):
+        return "DERIV"
+    if isin is not None and security_id == f"ISIN:{isin}":
+        return "ISIN"
+    if cusip is not None and isin is None and security_id.startswith(("ISIN:", "CUSIP:")):
+        return "CUSIP"
+    if ticker is not None and exchange is not None and security_id == f"TKR:{exchange}:{ticker}":
+        return "TKR"
+    if isin is not None:
+        return "ISIN"
+    if cusip is not None:
+        return "CUSIP"
+    if ticker is not None and exchange is not None:
+        return "TKR"
+    return "OTHER"
+
+
 def _check_duplicate_security(parsed: ParsedFile) -> list[QaFinding]:
-    """No security id may appear twice; CASH rows of different currencies have different ids."""
+    """Duplicate lines within one file follow D51.
+
+    For every non-null ``security_id`` that appears on several rows:
+
+    - ``error duplicate_security`` when the rows reached the id through
+      different identifier forms or when two rows are identical in every
+      parsed field (the file is excluded);
+    - ``info duplicate_lines`` otherwise: the same identifier form on several
+      lines with different quantities; the rows are kept separate, because
+      analytics sums by ``security_id``.
+
+    Cash rows of the same currency follow the same rule; rows of different
+    currencies have different ids and never collide.
+    """
     frame = parsed.frame
-    if frame.schema.get("security_id") != pl.String:
+    if frame.schema.get("security_id") != pl.String or frame.is_empty():
         return []
-    positions: dict[str, list[int]] = {}
-    for index, security_id in enumerate(frame["security_id"].to_list()):
+    compare_columns = [name for name in frame.columns if name != "security_id"]
+    identical_flags = frame.select(compare_columns).is_duplicated().to_list()
+    rows_by_id: dict[str, list[int]] = {}
+    forms_by_id: dict[str, set[str]] = {}
+    for index, row in enumerate(frame.iter_rows(named=True)):
+        security_id = row["security_id"]
         if security_id is None:
             continue
-        positions.setdefault(security_id, []).append(index)
+        rows_by_id.setdefault(str(security_id), []).append(index)
+        forms_by_id.setdefault(str(security_id), set()).add(_identifier_form(row))
     findings: list[QaFinding] = []
-    for security_id in sorted(positions):
-        rows = positions[security_id]
-        if len(rows) > 1:
-            rendered_rows = ", ".join(str(row) for row in rows)
+    for security_id in sorted(rows_by_id):
+        rows = rows_by_id[security_id]
+        if len(rows) < 2:
+            continue
+        rendered_rows = ", ".join(str(row) for row in rows)
+        prefix = f"security_id={security_id} appears {len(rows)} times (rows {rendered_rows})"
+        forms = sorted(forms_by_id[security_id])
+        identical_rows = [row for row in rows if identical_flags[row]]
+        if len(forms) > 1:
             findings.append(
                 QaFinding(
                     "duplicate_security",
                     "error",
-                    f"security_id={security_id} appears {len(rows)} times (rows {rendered_rows})",
+                    f"{prefix}; different identifier forms: {', '.join(forms)}",
+                )
+            )
+        elif identical_rows:
+            rendered_identical = ", ".join(str(row) for row in identical_rows)
+            findings.append(
+                QaFinding(
+                    "duplicate_security",
+                    "error",
+                    f"{prefix}; identical row(s): {rendered_identical}",
+                )
+            )
+        else:
+            findings.append(
+                QaFinding(
+                    "duplicate_lines",
+                    "info",
+                    f"{prefix}; same identifier form ({forms[0]}), rows kept separate",
                 )
             )
     return findings
@@ -295,13 +375,22 @@ def _check_future_as_of(parsed: ParsedFile, *, config: ValidationConfig) -> list
 
 
 def _check_unit_contradiction(parsed: ParsedFile) -> list[QaFinding]:
-    """The parser reported that the declared weight unit contradicts the total."""
-    prefix = "unit_check="
-    return [
-        QaFinding("unit_contradiction", "error", note[len(prefix) :])
-        for note in parsed.notes
-        if note.startswith(prefix)
-    ]
+    """A unit contradiction is an error only when the other unit actually fits.
+
+    Parsers record ``unit_check=<UnitCheck.detail()>``; that text appends
+    ``"; total matches unit <other>"`` exactly when the other unit fits the
+    observed total. A total that fits neither unit is a plain weight-sum
+    problem, already reported by ``weight_sum``, so it is not repeated here
+    (wave-02 review #9).
+    """
+    findings: list[QaFinding] = []
+    for note in parsed.notes:
+        if not note.startswith(_UNIT_CHECK_PREFIX):
+            continue
+        detail = note[len(_UNIT_CHECK_PREFIX) :]
+        if _UNIT_SUGGESTION_MARKER in detail:
+            findings.append(QaFinding("unit_contradiction", "error", detail))
+    return findings
 
 
 def _check_negative_weight(parsed: ParsedFile) -> list[QaFinding]:
