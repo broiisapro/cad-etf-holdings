@@ -149,6 +149,76 @@ def test_zero_or_negative_n_is_rejected(built: tuple[Path, BuildResult]) -> None
         spotcheck(RAW_ROOT, result.db_path, n=0, config_dir=config)
 
 
+class _FakePdfPage:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def extract_text(self) -> str:
+        return self._text
+
+
+class _FakePdf:
+    def __init__(self, pages: list[_FakePdfPage]) -> None:
+        self.pages = pages
+
+    def __enter__(self) -> _FakePdf:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
+def test_pdf_matching_handles_extracted_text_without_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from etfh.spotcheck import _pdf_values
+    from etfh.types import ParsedFile, RawFile
+
+    text = (
+        "GovernmentofCanada3.25%Dec01/2035 1.6%\n"
+        "GovernmentofCanada2.75%Mar01/2031 1.5\n"
+        "CashandCashEquivalents $ 6,848,305,249 99.97%"
+    )
+    monkeypatch.setattr("pdfplumber.open", lambda path: _FakePdf([_FakePdfPage(text)]))
+    frame = pl.DataFrame(
+        {
+            "security_name": [
+                "Government of Canada 3.25% Dec 01/2035",
+                "Government of Canada 2.75% Mar 01/2031",
+                "Cash and Cash Equivalents",
+            ],
+            "weight": [0.016, 0.015, 0.9997],
+        }
+    )
+    raw = RawFile(
+        source_id="vanguard_ca_qpd",
+        issuer="vanguard_ca",
+        fund_ticker="VAB",
+        as_of_hint=None,
+        fetched_at=datetime(2026, 10, 19, 5, 0, tzinfo=UTC),
+        url="https://example.test/vab.pdf",
+        path=tmp_path / "vab.pdf",
+        sha256="0" * 64,
+        content_type="application/pdf",
+        ext="pdf",
+    )
+    parsed = ParsedFile(
+        raw=raw,
+        as_of_date=raw.fetched_at.date(),
+        published_at=None,
+        frame=frame,
+        notes=["declared_unit=percent", "partial_list=true"],
+    )
+    values = _pdf_values(raw.path, parsed, scale=100.0)
+    assert values == [
+        "GovernmentofCanada3.25%Dec01/2035 1.6%",
+        "GovernmentofCanada2.75%Mar01/2031 1.5",
+        "CashandCashEquivalents $ 6,848,305,249 99.97%",
+    ]
+
+
 def test_raw_csv_rows_are_read_in_file_order(built: tuple[Path, BuildResult]) -> None:
     """The raw cell shown is the file's own cell, not a re-rendered number."""
     config, result = built

@@ -21,9 +21,10 @@ build flagged with a ``partial_list`` info event, is reported with
 comes from a weight-sum heuristic.
 
 Non-security lines (``CASH:``, ``DERIV:``) and unmatched rows (null
-``security_id``) never enter overlap, and only real security rows enter the
-concentration metrics; unmatched rows still count because they are securities
-with an unknown identifier.
+``security_id``) never enter overlap, because an overlap needs a shared
+identity. Concentration counts every security row, including unmatched ones:
+they are securities with an unknown identifier, and leaving them out would
+report a names-only quarterly disclosure as an empty portfolio.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ __all__ = [
 ]
 
 _NON_SECURITY_PREFIXES = ("CASH:", "DERIV:")
+_NON_SECURITY_CLASSES = ("cash", "fx", "derivative")
 
 
 class FundNotFoundError(KeyError):
@@ -157,8 +159,13 @@ def overlap(con: duckdb.DuckDBPyConnection, fund_a: str, fund_b: str, asof: date
 
 
 def concentration(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> Concentration:
-    """Top-10 weight, Herfindahl index and holding count for ``fund``."""
-    selection, securities = _securities(con, fund, asof)
+    """Top-10 weight, Herfindahl index and holding count for ``fund``.
+
+    Every security row of the selected version counts, including rows whose
+    ``security_id`` is null (unmatched securities are still holdings); cash, fx
+    and derivative rows are excluded because their weights are not securities.
+    """
+    selection = _select_version(con, fund, asof)
     if selection is None:
         return Concentration(
             fund=fund,
@@ -169,18 +176,26 @@ def concentration(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> Conc
             hhi=0.0,
             partial=False,
         )
-    weights = securities["weight"]
-    top10 = float(weights.sort(descending=True).head(10).sum()) if securities.height else 0.0
-    hhi = float((weights**2).sum()) if securities.height else 0.0
+    weights = _security_weights(_selected_rows(con, fund, selection))
+    top10 = float(weights.sort(descending=True).head(10).sum()) if weights.len() else 0.0
+    hhi = float((weights**2).sum()) if weights.len() else 0.0
     return Concentration(
         fund=fund,
         asof=asof,
         as_of_date=selection.as_of_date,
-        n_holdings=securities.height,
+        n_holdings=weights.len(),
         top10_weight=top10,
         hhi=hhi,
         partial=selection.partial,
     )
+
+
+def _security_weights(rows: pl.DataFrame) -> pl.Series:
+    """Weights of the rows that are securities (not cash, fx or derivatives)."""
+    if rows.is_empty():
+        return pl.Series("weight", [], dtype=pl.Float64)
+    non_security = rows["asset_class"].str.to_lowercase().is_in(_NON_SECURITY_CLASSES)
+    return rows.filter(~non_security)["weight"]
 
 
 def breakdown(

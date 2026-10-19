@@ -17,6 +17,10 @@ breakdown but its holdings list totals less, the file is marked
 ``partial_list=true`` (D52) so validation does not force a sum the source never
 published. A shortfall without that evidence stays unmarked: a parsing gap must
 never hide behind the note.
+
+Funds that publish a section list instead of ``Level4.holdings`` (for example a
+fund-of-funds "Holding Breakdown" under ``portfolio.holdings_data``) are read
+from that list; the sections are concatenated in document order.
 """
 
 from __future__ import annotations
@@ -187,8 +191,16 @@ def _holding_rows(payload: dict[str, Any]) -> list[Any]:
         return list(level4["holdings"])
     if isinstance(portfolio.get("holdings"), list):
         return list(portfolio["holdings"])
-    if isinstance(portfolio.get("holdings_data"), list):
-        return list(portfolio["holdings_data"])
+    data = portfolio.get("holdings_data")
+    if isinstance(data, list):
+        return list(data)
+    if isinstance(data, dict):
+        # Some documents (for example the fund-of-funds breakdown) carry the
+        # holdings as a dict of named sections; concatenate the section lists
+        # in document order.
+        sections = [value for value in data.values() if isinstance(value, list)]
+        if sections:
+            return [row for section in sections for row in section]
     raise ValueError("missing portfolio holdings")
 
 
