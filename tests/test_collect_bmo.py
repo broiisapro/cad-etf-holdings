@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from collections.abc import Callable
 from datetime import UTC, date, datetime
@@ -29,6 +30,12 @@ USER_AGENT = "cad-etf-holdings-tests (https://example.com)"
 
 def _source() -> Source:
     return load_sources(CONFIG_DIR / "sources.yaml")["bmo_daily"]
+
+
+def _collector(source: Source | None = None) -> BmoCollector:
+    collector = BmoCollector()
+    collector.source = source
+    return collector
 
 
 def _fund(**overrides: object) -> Fund:
@@ -96,7 +103,7 @@ def test_candidate_days_are_business_days() -> None:
 
 def test_fetch_steps_back_to_the_latest_file(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     handler = _handler({"20261016"}, requests, etag='"b1"')
     with _client(handler, fake_clock) as client:
@@ -120,7 +127,7 @@ def test_fetch_steps_back_to_the_latest_file(tmp_path: Path, fake_clock: FakeClo
 
 def test_unchanged_file_gets_304_and_writes_nothing(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     handler = _handler({"20261016"}, requests, etag='"b1"')
     with _client(handler, fake_clock) as client:
@@ -138,7 +145,7 @@ def test_newer_file_does_not_send_stale_conditional_headers(
     tmp_path: Path, fake_clock: FakeClock
 ) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     handler = _handler({"20261016", "20261019"}, requests, etag='"b1"')
     with _client(handler, fake_clock) as client:
@@ -154,7 +161,7 @@ def test_newer_file_does_not_send_stale_conditional_headers(
 
 def test_no_file_in_six_candidates_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     with (
         _client(_handler(set(), requests), fake_clock) as client,
@@ -165,9 +172,60 @@ def test_no_file_in_six_candidates_is_collect_error(tmp_path: Path, fake_clock: 
     assert len(file_requests) == 6
 
 
+def test_copy_bound_to_not_allowed_source_makes_no_requests(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    source = _source()
+    assert source.terms.decision is Decision.allowed_with_conditions
+    terms = source.terms.model_copy(update={"decision": Decision.not_allowed, "conditions": []})
+    refused = source.model_copy(update={"terms": terms})
+    collector = copy.copy(COLLECTORS[0])
+    collector.source = refused
+    requests: list[httpx.Request] = []
+    store = RawStore(tmp_path / "raw")
+    with (
+        _client(_handler({"20261016"}, requests), fake_clock) as client,
+        pytest.raises(TermsNotAllowedError) as excinfo,
+    ):
+        collector.fetch(_fund(), date(2026, 10, 19), client, store)
+    assert str(excinfo.value).startswith("skipped: terms")
+    assert requests == []
+    assert store.iter_raw() == []
+
+
+def test_copy_bound_to_the_config_source_fetches(tmp_path: Path, fake_clock: FakeClock) -> None:
+    collector = copy.copy(COLLECTORS[0])
+    collector.source = _source()
+    store = RawStore(tmp_path / "raw")
+    with _client(_handler({"20261016"}), fake_clock) as client:
+        raws = collector.fetch(_fund(), date(2026, 10, 19), client, store)
+    assert len(raws) == 1
+    assert len(store.iter_raw()) == 1
+
+
+def test_unbound_collector_falls_back_to_the_default_config(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    collector = BmoCollector()
+    assert collector.source is None
+    store = RawStore(tmp_path / "raw")
+    with _client(_handler({"20261016"}), fake_clock) as client:
+        raws = collector.fetch(_fund(), date(2026, 10, 19), client, store)
+    assert len(raws) == 1
+    assert collector.source is None
+
+
+def test_binding_a_copy_does_not_leak_into_other_copies() -> None:
+    first = copy.copy(COLLECTORS[0])
+    first.source = _source()
+    second = copy.copy(COLLECTORS[0])
+    assert second.source is None
+    assert COLLECTORS[0].source is None
+
+
 def test_http_error_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -180,7 +238,7 @@ def test_http_error_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> N
 
 def test_wrong_content_type_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -195,7 +253,7 @@ def test_wrong_content_type_is_collect_error(tmp_path: Path, fake_clock: FakeClo
 
 def test_non_zip_body_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=_source())
+    collector = _collector(_source())
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -221,7 +279,7 @@ def test_gate_refuses_not_allowed_source_without_requests(
     terms = source.terms.model_copy(update={"decision": Decision.not_allowed, "conditions": []})
     refused = source.model_copy(update={"terms": terms})
     store = RawStore(tmp_path / "raw")
-    collector = BmoCollector(source=refused)
+    collector = _collector(refused)
     requests: list[httpx.Request] = []
     with (
         _client(_handler({"20261016"}, requests), fake_clock) as client,
@@ -250,7 +308,7 @@ def test_live_bmo_fetch_and_parse(tmp_path: Path) -> None:
     fund = _fund(ticker="ZSP", name="BMO S&P 500 Index ETF")
     store = RawStore(tmp_path / "raw")
     with PoliteClient() as client:
-        raws = BmoCollector(source=source).fetch(fund, datetime.now(UTC).date(), client, store)
+        raws = _collector(source).fetch(fund, datetime.now(UTC).date(), client, store)
     assert len(raws) == 1
     assert raws[0].as_of_hint is not None
     parsed = BmoParser().parse(raws[0])

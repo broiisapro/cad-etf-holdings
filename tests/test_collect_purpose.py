@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from collections.abc import Callable
@@ -29,6 +30,12 @@ USER_AGENT = "cad-etf-holdings-tests (https://example.com)"
 
 def _source() -> Source:
     return load_sources(CONFIG_DIR / "sources.yaml")["purpose_daily"]
+
+
+def _collector(source: Source | None = None) -> PurposeCollector:
+    collector = PurposeCollector()
+    collector.source = source
+    return collector
 
 
 def _fund(**overrides: object) -> Fund:
@@ -84,7 +91,7 @@ def _json_response(etag: str | None = None) -> httpx.Response:
 
 def test_fetch_stores_document_with_as_of_hint(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     with _client(_handler(_json_response(etag='"v1"')), fake_clock) as client:
         raws = collector.fetch(_fund(), date(2026, 10, 17), client, store)
     assert len(raws) == 1
@@ -102,7 +109,7 @@ def test_unchanged_document_gets_304_and_writes_nothing(
     tmp_path: Path, fake_clock: FakeClock
 ) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     requests: list[httpx.Request] = []
     handler = _handler(_json_response(etag='"v1"'), requests, etag='"v1"')
     with _client(handler, fake_clock) as client:
@@ -117,7 +124,7 @@ def test_unchanged_document_gets_304_and_writes_nothing(
 
 def test_identical_bytes_without_304_deduplicate(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     with _client(_handler(_json_response()), fake_clock) as client:
         first = collector.fetch(_fund(), date(2026, 10, 17), client, store)
         second = collector.fetch(_fund(), date(2026, 10, 17), client, store)
@@ -135,7 +142,7 @@ def test_gate_refuses_not_allowed_source_without_requests(
     refused = source.model_copy(update={"terms": terms})
     requests: list[httpx.Request] = []
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=refused)
+    collector = _collector(refused)
     with (
         _client(_handler(_json_response(), requests), fake_clock) as client,
         pytest.raises(TermsNotAllowedError) as excinfo,
@@ -146,9 +153,60 @@ def test_gate_refuses_not_allowed_source_without_requests(
     assert store.iter_raw() == []
 
 
+def test_copy_bound_to_not_allowed_source_makes_no_requests(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    source = _source()
+    assert source.terms.decision is Decision.allowed_with_conditions
+    terms = source.terms.model_copy(update={"decision": Decision.not_allowed, "conditions": []})
+    refused = source.model_copy(update={"terms": terms})
+    collector = copy.copy(COLLECTORS[0])
+    collector.source = refused
+    requests: list[httpx.Request] = []
+    store = RawStore(tmp_path / "raw")
+    with (
+        _client(_handler(_json_response(), requests), fake_clock) as client,
+        pytest.raises(TermsNotAllowedError) as excinfo,
+    ):
+        collector.fetch(_fund(), date(2026, 10, 17), client, store)
+    assert str(excinfo.value).startswith("skipped: terms")
+    assert requests == []
+    assert store.iter_raw() == []
+
+
+def test_copy_bound_to_the_config_source_fetches(tmp_path: Path, fake_clock: FakeClock) -> None:
+    collector = copy.copy(COLLECTORS[0])
+    collector.source = _source()
+    store = RawStore(tmp_path / "raw")
+    with _client(_handler(_json_response()), fake_clock) as client:
+        raws = collector.fetch(_fund(), date(2026, 10, 17), client, store)
+    assert len(raws) == 1
+    assert len(store.iter_raw()) == 1
+
+
+def test_unbound_collector_falls_back_to_the_default_config(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    collector = PurposeCollector()
+    assert collector.source is None
+    store = RawStore(tmp_path / "raw")
+    with _client(_handler(_json_response()), fake_clock) as client:
+        raws = collector.fetch(_fund(), date(2026, 10, 17), client, store)
+    assert len(raws) == 1
+    assert collector.source is None
+
+
+def test_binding_a_copy_does_not_leak_into_other_copies() -> None:
+    first = copy.copy(COLLECTORS[0])
+    first.source = _source()
+    second = copy.copy(COLLECTORS[0])
+    assert second.source is None
+    assert COLLECTORS[0].source is None
+
+
 def test_http_error_becomes_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     with (
         _client(_handler(httpx.Response(500)), fake_clock) as client,
         pytest.raises(CollectError) as excinfo,
@@ -161,7 +219,7 @@ def test_http_error_becomes_collect_error(tmp_path: Path, fake_clock: FakeClock)
 
 def test_wrong_content_type_becomes_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     response = httpx.Response(
         200, text="<html>blocked</html>", headers={"content-type": "text/html"}
     )
@@ -174,7 +232,7 @@ def test_wrong_content_type_becomes_collect_error(tmp_path: Path, fake_clock: Fa
 
 def test_malformed_json_becomes_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     response = httpx.Response(200, text="not json", headers={"content-type": "application/json"})
     with (
         _client(_handler(response), fake_clock) as client,
@@ -185,7 +243,7 @@ def test_malformed_json_becomes_collect_error(tmp_path: Path, fake_clock: FakeCl
 
 def test_missing_slug_raises(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     with (
         _client(_handler(_json_response()), fake_clock) as client,
         pytest.raises(CollectError, match="purpose_slug"),
@@ -207,7 +265,7 @@ def test_collectors_registry_exports_the_collector() -> None:
 
 def test_unknown_fund_document_is_collect_error(tmp_path: Path, fake_clock: FakeClock) -> None:
     store = RawStore(tmp_path / "raw")
-    collector = PurposeCollector(source=_source())
+    collector = _collector(_source())
     response = httpx.Response(
         200,
         content=b'{"portfolio": {"Level4": {"holdings": []}}}',
@@ -232,7 +290,7 @@ def test_live_purpose_fetch_and_parse(tmp_path: Path) -> None:
     )
     store = RawStore(tmp_path / "raw")
     with PoliteClient() as client:
-        raws = PurposeCollector(source=source).fetch(fund, datetime.now(UTC).date(), client, store)
+        raws = _collector(source).fetch(fund, datetime.now(UTC).date(), client, store)
     assert len(raws) == 1
     assert raws[0].as_of_hint == date.fromisoformat(fund_dt(raws[0].path))
     parsed = PurposeParser().parse(raws[0])
