@@ -435,41 +435,189 @@ def write_bmo_lookalike(path: Path) -> Path:
 
 
 def write_purpose_lookalike(path: Path) -> Path:
-    """Write a fictional Purpose-style disclosure PDF."""
-    return write_qpd_pdf(
-        path,
-        as_of="June 30, 2026",
-        fund_name="Purpose Fictional Dividend Fund",
-        published=None,
-        header="Holding % of Net Asset Value",
-        rows=[
-            "Canadian Equity",
-            ("Maplecrest Properties", "15.40"),
-            ("Northgate Bank", "9.85"),
-            ("Cedarline Energy Corp.", "7.20"),
-            "U.S. Equity",
-            ("Pineview Software Corp.", "4.50"),
-            ("Juniper Health Corp.", "3.66"),
-            ("Uplands Chemicals Inc.", "2.60"),
-        ],
-        total="Total of the holdings listed above: 43.21% of net asset value",
-    )
+    """Write a fictional Purpose-style two-column disclosure.
+
+    The sector and asset mixes sit down the left column and the Top 25
+    Holdings down the right; the holdings have no stated total. One bond name
+    wraps so its weight lands on its own line, as happens in the real
+    documents.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Quarterly Portfolio Disclosure")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 320.0
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Fictional Meridian Dividend Fund")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 16, "As At June 30, 2026")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(right, _TOP - 16, "TOP 25 HOLDINGS")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(right, _TOP - 30, "% of Fund's Net")
+    pdf.drawString(right, _TOP - 42, "Asset Value")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 64, "SECTOR MIX")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 76, "Financials 32.45")
+    pdf.drawString(_LEFT, _TOP - 90, "Energy 18.81")
+    pdf.drawString(_LEFT, _TOP - 104, "Cash and Cash Equivalents 0.43")
+    pdf.drawString(_LEFT, _TOP - 118, "Net Other Assets -0.04")
+    pdf.drawString(_LEFT, _TOP - 132, "Total Net Asset Value 100.00")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 154, "ASSET MIX")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 166, "Canadian Equities 72.90")
+    pdf.drawString(_LEFT, _TOP - 180, "United States Equities 25.57")
+
+    holdings = [
+        ("Northgate Bank", "5.39"),
+        ("Maplecrest Properties", "4.87"),
+        ("Pineview Software Corp.", "4.50"),
+        ("Juniper Health Corp.", "4.14"),
+    ]
+    y = _TOP - 56
+    for name, weight in holdings:
+        pdf.drawString(right, y, name)
+        pdf.drawRightString(_RIGHT, y, weight)
+        y -= 14
+    pdf.drawString(right, y, "Fjord Shipping Holdings Ltd., Callable,")
+    y -= 12
+    pdf.drawRightString(_RIGHT, y, "3.20")
+    y -= 12
+    pdf.drawString(right, y, "2041/01/31")
+
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(_LEFT, y - 30, "The summary of investment portfolio may change due to")
+    pdf.drawString(_LEFT, y - 40, "ongoing portfolio transactions of the investment fund.")
+    pdf.drawString(right, y - 30, "Top Holdings table includes the fund's 25 largest")
+    pdf.drawString(right, y - 40, "positions. If the fund holds fewer positions, all are shown.")
+    pdf.save()
+    return path
+
+
+# Right-column x positions of the real Evolve layout: names at 360, the
+# sector weights right-aligned at 568, and the Top 25 weights right-aligned
+# at 336; the left/right split sits between 336 and 360.
+_EVOLVE_LEFT_WEIGHT = 336.0
+_EVOLVE_RIGHT = 360.0
+_EVOLVE_RIGHT_WEIGHT = 568.0
 
 
 def write_evolve_lookalike(path: Path) -> Path:
-    """Write a fictional Evolve-style disclosure PDF."""
-    return write_qpd_pdf(
-        path,
-        as_of="June 30, 2026",
-        fund_name="Evolve Fictional Cyber Security Index ETF (CYBX)",
-        published=None,
-        header="Security % of Net Assets",
-        rows=[
-            ("Northwind Materials Inc.", "25.10"),
-            ("Harbourside Logistics Corp.", "12.30"),
-            ("Foxglove Networks Inc.", "5.40"),
-            ("Quarrystone Cement Inc.", "2.60"),
-            ("Birchwood Timber Corp.", "1.40"),
-        ],
-        total="Total of the holdings listed above: 46.80% of net asset value",
-    )
+    """Write a fictional Evolve-style two-column disclosure.
+
+    Top 25 Positions on the left with the listed total at the foot of that
+    column, and the sector mix on the right with its own 100.00% total.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Quarterly Portfolio Disclosure")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(44.0, _TOP, "Evolve Fictional Cyber Security Index Fund")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(44.0, _TOP - 16, "As at June 30, 2026")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(44.0, _TOP - 32, "Top 25 Positions % of Net Asset")
+    pdf.drawString(44.0, _TOP - 44, "Value")
+    pdf.drawString(_EVOLVE_RIGHT, _TOP - 32, "Sector Mix % of Net Asset")
+    pdf.drawString(_EVOLVE_RIGHT, _TOP - 44, "Value")
+
+    holdings = [
+        ("Northwind Materials Inc.", "25.10%"),
+        ("Harbourside Logistics Corp.", "12.30%"),
+        ("Foxglove Networks Inc.", "5.40%"),
+        ("Quarrystone Cement Inc.", "2.60%"),
+        ("Birchwood Timber Corp.", "1.40%"),
+    ]
+    pdf.setFont("Helvetica", 9)
+    y = _TOP - 60
+    for name, weight in holdings:
+        pdf.drawString(44.0, y, name)
+        pdf.drawRightString(_EVOLVE_LEFT_WEIGHT, y, weight)
+        y -= 14
+    pdf.drawString(44.0, y, "Total 46.80%")
+
+    sectors = [
+        ("Information Technology", "91.63%"),
+        ("Industrials", "8.25%"),
+        ("Communication Services", "0.12%"),
+    ]
+    y = _TOP - 60
+    for name, weight in sectors:
+        pdf.drawString(_EVOLVE_RIGHT, y, name)
+        pdf.drawRightString(_EVOLVE_RIGHT_WEIGHT, y, weight)
+        y -= 14
+    pdf.drawString(_EVOLVE_RIGHT, y, "Total 100.00%")
+    pdf.drawString(_EVOLVE_RIGHT, y - 12, "Total Net Asset Value $ 151,715,057")
+    pdf.save()
+    return path
+
+
+def write_vanguard_lookalike(path: Path) -> Path:
+    """Write a fictional Vanguard-style two-column disclosure.
+
+    Sector allocation down the left column, the Top 25 Holdings down the
+    right, and the listed holdings' unlabelled total at the foot of the right
+    column just above "Total net asset value".
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 330.0
+
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP, "Quarterly Portfolio Disclosure | June 30, 2026")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 16, "Vanguard Fictional 500 Index ETF")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 30, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(_LEFT, _TOP - 50, "Sector Allocation")
+    pdf.drawString(right, _TOP - 50, "Top 25 Holdings")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "As at June 30, 2026")
+    pdf.drawString(right, _TOP - 62, "As at June 30, 2026")
+    pdf.drawString(_LEFT, _TOP - 74, "% of")
+    pdf.drawRightString(_RIGHT, _TOP - 74, "% of Underlying Fund")
+    pdf.drawString(_RIGHT - 60, _TOP - 86, "Underlying Fund")
+
+    sectors = [
+        ("Financials", "32.9%"),
+        ("Energy", "18.0"),
+        ("Technology", "7.7"),
+        ("Other assets and liabilities (net)", "0.2"),
+    ]
+    y = _TOP - 100
+    for name, weight in sectors:
+        pdf.drawString(_LEFT, y, name)
+        pdf.drawRightString(290.0, y, weight)
+        y -= 14
+    pdf.drawString(_LEFT, y, "100.0")
+
+    holdings = [
+        ("Northwind Materials Inc.", "12.50%"),
+        ("Pineview Software Corp.", "10.00%"),
+        ("Northgate Bank", "8.50%"),
+        ("Maplecrest Properties", "7.00%"),
+        ("Juniper Health Corp.", "6.50%"),
+        ("Cedarline Energy Corp.", "5.50%"),
+    ]
+    y = _TOP - 100
+    for name, weight in holdings:
+        pdf.drawString(right, y, name)
+        pdf.drawRightString(_RIGHT, y, weight)
+        y -= 14
+    pdf.drawString(right, y, "50.0")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(right, y - 12, "Total net asset value $12,345,678,901")
+    pdf.save()
+    return path

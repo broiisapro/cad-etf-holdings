@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import date
 from pathlib import Path
 
@@ -151,6 +152,68 @@ def test_purpose_missing_slug_is_a_collect_error(tmp_path: Path) -> None:
             )
     finally:
         client.close()
+
+
+def test_purpose_pdf_request_is_conditional(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf = write_purpose_lookalike(tmp_path / "purpose.pdf").read_bytes()
+    state = {"pdf_calls": 0}
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        if request.url.host == "www.purposeinvest.com":
+            return httpx.Response(200, json=_purpose_payload())
+        state["pdf_calls"] += 1
+        if state["pdf_calls"] == 1:
+            return httpx.Response(
+                200,
+                content=pdf,
+                headers={
+                    "content-type": "application/pdf",
+                    "last-modified": "Wed, 01 Jul 2026 00:00:00 GMT",
+                },
+            )
+        seen["if-modified-since"] = request.headers.get("If-Modified-Since")
+        return httpx.Response(304)
+
+    collector = PurposeQpdCollector(source=_purpose_source())
+    store = RawStore(tmp_path / "raw")
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        first = collector.fetch(_purpose_fund(), date(2026, 7, 1), client, store)
+        second = collector.fetch(_purpose_fund(), date(2026, 7, 2), client, store)
+    finally:
+        client.close()
+    assert len(first) == 1
+    assert second == []
+    assert seen["if-modified-since"] == "Wed, 01 Jul 2026 00:00:00 GMT"
+
+
+def test_evolve_source_is_a_class_attribute_bound_by_copy(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    assert EvolveQpdCollector.source is None
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, text="User-agent: *\nAllow: /")
+
+    collector = copy.copy(EvolveQpdCollector())
+    collector.source = qpd_source("evolve_qpd", issuer="evolve", decision=Decision.not_allowed)
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        with pytest.raises(TermsNotAllowedError, match="skipped: terms"):
+            collector.fetch(
+                qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
+                date(2026, 7, 1),
+                client,
+                RawStore(tmp_path),
+            )
+    finally:
+        client.close()
+    assert calls == []
 
 
 def test_purpose_json_without_disclosure_is_a_collect_error(
