@@ -19,7 +19,8 @@ from urllib.parse import urljoin
 from etfh.collect.registry import CollectError
 from etfh.http import HTTPRetryError, PoliteClient, RobotsDisallowedError
 from etfh.registry import Fund, Source, load_sources, require_collectable
-from etfh.types import RawFile, RawStore
+from etfh.storage import RawStore
+from etfh.types import RawFile
 
 __all__ = ["COLLECTORS", "GlobalXQpdCollector"]
 
@@ -33,6 +34,29 @@ _QUARTER_YEAR = re.compile(r"\bQ([1-4])\s*[-_ ]?\s*(20\d{2})\b", re.IGNORECASE)
 def _configured_source(source_id: str) -> Source:
     config_dir = Path(os.environ.get("ETFH_CONFIG_DIR", "config"))
     return load_sources(config_dir / "sources.yaml")[source_id]
+
+
+def _conditional_for_url(
+    store: RawStore, source_id: str, fund_ticker: str, url: str
+) -> tuple[str | None, str | None]:
+    """ETag/Last-Modified only when the newest stored version has this URL."""
+    raws = [
+        raw
+        for raw in store.iter_raw()
+        if raw.source_id == source_id and raw.fund_ticker == fund_ticker
+    ]
+    if not raws:
+        return None, None
+    latest = max(raws, key=lambda raw: raw.fetched_at)
+    if latest.url != url:
+        return None, None
+    meta = store.read_meta(latest.path.parent / f"{latest.path.stem}.meta.json")
+    etag = meta.get("etag")
+    last_modified = meta.get("last_modified")
+    return (
+        str(etag) if etag is not None else None,
+        str(last_modified) if last_modified is not None else None,
+    )
 
 
 def _anchor_text(fragment: str) -> str:
@@ -83,14 +107,17 @@ class GlobalXQpdCollector:
     """Read a product page and download its newest quarterly summary PDF."""
 
     source_id: str = _SOURCE_ID
+    source: Source | None = None
 
     def __init__(self, source: Source | None = None) -> None:
-        self._source = source
+        self.source = source
 
-    def source(self) -> Source:
-        if self._source is None:
-            self._source = _configured_source(self.source_id)
-        return self._source
+    def _resolve_source(self, fund: Fund) -> Source:
+        if self.source is not None:
+            return self.source
+        source = _configured_source(self.source_id)
+        self.source = source
+        return source
 
     def product_url(self, ticker: str) -> str:
         return _PRODUCT_URL.format(ticker=ticker.strip().upper())
@@ -113,7 +140,7 @@ class GlobalXQpdCollector:
         client: PoliteClient,
         store: RawStore,
     ) -> list[RawFile]:
-        source = self.source()
+        source = self._resolve_source(fund)
         require_collectable(source)
         product_url = self.product_url(fund.ticker)
         try:
@@ -131,8 +158,11 @@ class GlobalXQpdCollector:
                 f"HTTP {page_response.status_code} for {product_url}",
             )
         pdf_url = self.disclosure_url(page_response.text, fund.ticker)
+        etag, last_modified = _conditional_for_url(store, self.source_id, fund.ticker, pdf_url)
         try:
-            pdf_response = client.get(pdf_url, source=source)
+            pdf_response = client.get(
+                pdf_url, source=source, etag=etag, last_modified=last_modified
+            )
         except RobotsDisallowedError as exc:
             raise CollectError(self.source_id, fund, f"robots.txt disallows {pdf_url}") from exc
         except HTTPRetryError as exc:
