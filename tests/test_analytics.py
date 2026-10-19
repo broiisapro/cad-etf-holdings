@@ -91,6 +91,21 @@ def test_concentration_known_values() -> None:
     assert metrics.partial is False
 
 
+def test_concentration_counts_unmatched_rows_but_overlap_does_not() -> None:
+    rows = [
+        holding("UFUND", None, 0.40, name="Unknown One"),
+        holding("UFUND", None, 0.30, name="Unknown Two"),
+        holding("UFUND", "ISIN:A", 0.30),
+    ]
+    con = make_con(rows)
+    metrics = analytics.concentration(con, "UFUND", AS_OF)
+    assert metrics.n_holdings == 3
+    assert metrics.top10_weight == pytest.approx(1.0)
+    assert metrics.hhi == pytest.approx(0.40**2 + 0.30**2 + 0.30**2)
+    assert analytics.overlap(con, "UFUND", "UFUND", AS_OF).common.height == 1
+    assert analytics.overlap(con, "UFUND", "UFUND", AS_OF).overlap == pytest.approx(0.30)
+
+
 def test_concentration_is_zero_when_nothing_is_known_by_asof() -> None:
     con = make_con(standard_rows())
     metrics = analytics.concentration(con, "XFUND", date(2026, 10, 1))
