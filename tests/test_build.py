@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import polars as pl
@@ -482,6 +485,58 @@ def test_build_without_openfigi_skips_prefetch(tmp_path: Path) -> None:
         validator=lambda *args, **kwargs: [],
     )
     assert master.prefetched == []
+
+
+def test_build_openfigi_assigns_figi_ids_with_a_cached_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_clock: Any
+) -> None:
+    import httpx
+
+    from etfh.secmaster.openfigi import FigiLookup
+
+    requests_seen: list[list[dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        jobs = json.loads(request.content)
+        requests_seen.append(jobs)
+        entries = []
+        for job in jobs:
+            digest = hashlib.sha1(job["idValue"].encode(), usedforsecurity=False).hexdigest()
+            entries.append(
+                {"data": [{"compositeFIGI": f"BBG{digest[:10].upper()}", "exchCode": "CN"}]}
+            )
+        return httpx.Response(200, json=entries)
+
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    figi = FigiLookup(
+        tmp_path / "figi-cache",
+        transport=httpx.MockTransport(handler),
+        clock=fake_clock.time,
+        sleep=fake_clock.sleep,
+    )
+    result = build(RAW_ROOT, tmp_path / "out", config_dir=CONFIG_DIR, figi=figi)
+    assert len(requests_seen) >= 1
+    assert all(
+        job.get("idType") in {"ID_ISIN", "TICKER"} for batch in requests_seen for job in batch
+    )
+    assert result.n_figi > 0
+    assert result.n_figi < result.n_holdings  # cash and identifier-less rows keep their ids
+    ids = _query(
+        tmp_path / "out",
+        "SELECT security_id FROM holdings WHERE security_id LIKE 'FIGI:%'",
+    )["security_id"].to_list()
+    assert len(ids) == result.n_figi
+    assert all(identifier.startswith("FIGI:BBG") for identifier in ids)
+    assert any(path.suffix == ".json" for path in (tmp_path / "figi-cache").iterdir())
+
+
+def test_default_build_reports_no_figi_rows(tmp_path: Path) -> None:
+    result = build(RAW_ROOT, tmp_path / "out", config_dir=CONFIG_DIR)
+    assert result.n_figi == 0
+    frame = _query(
+        tmp_path / "out", "SELECT COUNT(*) AS n FROM holdings WHERE security_id LIKE 'FIGI:%'"
+    )
+    assert frame["n"][0] == 0
 
 
 def test_connect_honours_etfh_duckdb_threads(monkeypatch: pytest.MonkeyPatch) -> None:
