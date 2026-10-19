@@ -1,0 +1,81 @@
+{
+  "code": "PURO",
+  "name": "Purpose Lookalike Option Income Fund",
+  "urlName": "purpose-lookalike-option-income-fund",
+  "fundCode": "PURO",
+  "assetClass": [
+    {
+      "fields": {
+        "slug": "equity",
+        "className": "Equity",
+        "displayName": "Equity"
+      }
+    }
+  ],
+  "portfolio": {
+    "dt": "2026-10-16",
+    "exposure": {},
+    "Level1": {
+      "asset_class": {
+        "Equities": 75.18,
+        "Covered Call": 45.25,
+        "Cash-Covered Puts": 30.05
+      }
+    },
+    "Level2": {
+      "geo": {
+        "Canada": 75.5,
+        "United States": 24.5
+      }
+    },
+    "Level4": {
+      "holdings": [
+        {
+          "name": "Northvale Banking Corp.",
+          "geo": "Canada",
+          "sector": "Financials",
+          "weight": "45.50%"
+        },
+        {
+          "name": "Pinehurst Utilities Inc.",
+          "geo": "Canada",
+          "sector": "Utilities",
+          "weight": "30.00%"
+        },
+        {
+          "name": "Northvale Banking Corp. Call 120 11/20/26",
+          "geo": "Canada",
+          "sector": "Financials",
+          "weight": "-0.25%"
+        },
+        {
+          "name": "Pinehurst Utilities Inc. Put 88 12/18/26",
+          "geo": "Canada",
+          "sector": "Utilities",
+          "weight": "-0.05%"
+        },
+        {
+          "name": "Maple Ridge 10-Year Note Future 03/20/27",
+          "geo": "United States",
+          "sector": "Fixed Income Index",
+          "weight": "0.00%"
+        },
+        {
+          "name": "Sterling Creek FX Forward 12/15/26",
+          "geo": "United States",
+          "sector": "Unknown",
+          "weight": "-0.02%"
+        },
+        {
+          "name": "Cedar Hollow Cash Account",
+          "weight": "24.82%"
+        },
+        {
+          "name": "Total",
+          "weight": "100.00%"
+        }
+      ]
+    },
+    "holdings_data": null
+  }
+}

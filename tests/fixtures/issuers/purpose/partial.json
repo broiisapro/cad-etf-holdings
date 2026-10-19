@@ -1,0 +1,53 @@
+{
+  "code": "PURP",
+  "name": "Purpose Lookalike Property Income Fund",
+  "urlName": "purpose-lookalike-property-income-fund",
+  "fundCode": "PURP",
+  "assetClass": [
+    {
+      "fields": {
+        "slug": "equity",
+        "className": "Equity",
+        "displayName": "Equity"
+      }
+    }
+  ],
+  "portfolio": {
+    "dt": "2026-10-16",
+    "exposure": {},
+    "Level1": {
+      "sector": {
+        "Real Estate": 80.0,
+        "Financials": 16.67,
+        "Cash": 3.33
+      },
+      "geo": {
+        "Canada": 96.67,
+        "Cash": 3.33
+      }
+    },
+    "Level4": {
+      "holdings": [
+        {
+          "name": "Cedar Hollow Property Trust",
+          "geo": "Canada",
+          "sector": "Real Estate",
+          "weight": "60.00%"
+        },
+        {
+          "name": "Pinehurst Industrial REIT",
+          "geo": "Canada",
+          "sector": "Real Estate",
+          "weight": "20.00%"
+        },
+        {
+          "name": "Northvale Mortgage Corp.",
+          "geo": "Canada",
+          "sector": "Financials",
+          "weight": "16.67%"
+        }
+      ]
+    },
+    "holdings_data": null
+  }
+}
