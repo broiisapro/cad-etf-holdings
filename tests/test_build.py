@@ -297,6 +297,22 @@ def test_sources_table_records_the_build_config(built: tuple[Path, BuildResult])
     assert any(kind == "quarterly_disclosure" for _issuer, kind, _format in rows.values())
 
 
+def test_partial_list_files_get_an_info_event_not_an_exclusion(
+    built: tuple[Path, BuildResult],
+) -> None:
+    out_dir, _ = built
+    events = _query(
+        out_dir,
+        "SELECT fund_ticker, severity, excluded FROM qa_events WHERE \"check\" = 'partial_list'",
+    )
+    assert events.rows() == [("SYNF", "info", False)]
+    status = _query(
+        out_dir,
+        "SELECT status FROM file_versions WHERE fund_ticker = 'SYNF'",
+    )
+    assert status["status"].to_list() == ["included"]
+
+
 def test_pdf_version_known_at_is_the_stated_publication_date(
     built: tuple[Path, BuildResult],
 ) -> None:

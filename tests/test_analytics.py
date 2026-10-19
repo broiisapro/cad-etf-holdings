@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -11,7 +11,8 @@ import pytest
 
 from etfh import analytics
 from etfh.analytics import FundNotFoundError
-from tests._analytics_helpers import AS_OF, change, holding, make_con, standard_rows
+from etfh.asof import cutoff_utc
+from tests._analytics_helpers import AS_OF, SHA, change, holding, make_con, standard_rows
 from tests._build_helpers import FIXTURES, build_fixture_db
 
 
@@ -118,6 +119,105 @@ def test_daily_holdings_win_over_a_newer_quarterly_disclosure() -> None:
     metrics = analytics.concentration(con, "PFUND", date(2026, 11, 5))
     assert metrics.as_of_date == date(2026, 10, 29)
     assert metrics.partial is False
+
+
+def test_version_known_exactly_at_the_cutoff_is_excluded() -> None:
+    cutoff = cutoff_utc(AS_OF)
+    con = make_con(
+        [
+            holding(
+                "RFUND",
+                "ISIN:A",
+                1.0,
+                as_of=date(2026, 10, 29),
+                known_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+            ),
+            holding("RFUND", "ISIN:B", 1.0, as_of=date(2026, 10, 30), known_at=cutoff),
+        ]
+    )
+    frame = analytics.holdings_asof(con, "RFUND", AS_OF)
+    assert frame["as_of_date"].unique().to_list() == [date(2026, 10, 29)]
+    assert frame["security_id"].to_list() == ["ISIN:A"]
+
+
+def test_version_known_one_second_before_the_cutoff_is_included() -> None:
+    cutoff = cutoff_utc(AS_OF)
+    con = make_con(
+        [
+            holding(
+                "RFUND",
+                "ISIN:A",
+                1.0,
+                as_of=date(2026, 10, 29),
+                known_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+            ),
+            holding(
+                "RFUND",
+                "ISIN:B",
+                1.0,
+                as_of=date(2026, 10, 30),
+                known_at=cutoff - timedelta(seconds=1),
+            ),
+        ]
+    )
+    frame = analytics.holdings_asof(con, "RFUND", AS_OF)
+    assert frame["as_of_date"].unique().to_list() == [date(2026, 10, 30)]
+    assert frame["security_id"].to_list() == ["ISIN:B"]
+
+
+def test_source_priority_comes_from_the_source_kind_not_the_weight_sum() -> None:
+    # The daily file does not sum to 1 and is older; the quarterly file sums to
+    # 1 and is newer. D53 ranks by source kind, so the daily file wins and its
+    # bad sum does not flag the fund partial (that is validation's job).
+    con = make_con(
+        [
+            holding(
+                "GFUND",
+                "ISIN:A",
+                0.6,
+                as_of=date(2026, 10, 29),
+                known_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+            ),
+            holding(
+                "GFUND",
+                "ISIN:B",
+                1.0,
+                as_of=date(2026, 10, 31),
+                known_at=datetime(2026, 10, 31, 22, tzinfo=UTC),
+                source_id="quarterly",
+            ),
+        ]
+    )
+    frame = analytics.holdings_asof(con, "GFUND", date(2026, 11, 5))
+    assert frame["security_id"].to_list() == ["ISIN:A"]
+    metrics = analytics.concentration(con, "GFUND", date(2026, 11, 5))
+    assert metrics.as_of_date == date(2026, 10, 29)
+    assert metrics.partial is False
+
+
+def test_partial_list_event_marks_a_daily_file_partial() -> None:
+    con = make_con(
+        [holding("LFUND", "ISIN:A", 0.6), holding("LFUND", "ISIN:B", 0.4)],
+        partial_list_shas=[SHA],
+    )
+    metrics = analytics.concentration(con, "LFUND", AS_OF)
+    assert metrics.partial is True
+    assert analytics.overlap(con, "LFUND", "LFUND", AS_OF).partial is True
+
+
+def test_security_name_in_aggregated_results_is_deterministic() -> None:
+    forward = [
+        holding("NFUND", "ISIN:A", 0.3, name="Zeta"),
+        holding("NFUND", "ISIN:A", 0.2, name="Alpha"),
+        holding("NFUND", "ISIN:B", 0.5, name="Beta"),
+    ]
+    backward = list(reversed(forward))
+    for rows in (forward, backward):
+        con = make_con(rows)
+        common = analytics.overlap(con, "NFUND", "NFUND", AS_OF).common
+        names = dict(zip(common["security_id"], common["security_name"], strict=True))
+        assert names["ISIN:A"] == "Alpha"
+        assert common["weight_a"].to_list() == [0.5, 0.5]
 
 
 def test_late_known_version_does_not_leak_into_an_earlier_asof() -> None:

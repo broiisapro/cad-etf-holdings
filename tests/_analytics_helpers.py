@@ -8,6 +8,7 @@ from typing import Any
 import duckdb
 import polars as pl
 
+from etfh.build import DDL_SOURCES
 from etfh.schema import (
     DDL_FILE_VERSIONS,
     DDL_HOLDINGS,
@@ -113,12 +114,39 @@ def change(
     }
 
 
+_SOURCES_SCHEMA: dict[str, Any] = {
+    "source_id": pl.String,
+    "issuer": pl.String,
+    "kind": pl.String,
+    "format": pl.String,
+}
+
+_QA_EVENTS_SCHEMA: dict[str, Any] = {
+    "raw_file_sha256": pl.String,
+    "source_id": pl.String,
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "check": pl.String,
+    "severity": pl.String,
+    "detail": pl.String,
+    "excluded": pl.Boolean,
+}
+
+
 def make_con(
     rows: list[dict[str, Any]] | None = None,
     changes: list[dict[str, Any]] | None = None,
+    partial_list_shas: list[str] | None = None,
 ) -> duckdb.DuckDBPyConnection:
+    """A database with the build's tables, the two test sources seeded.
+
+    ``daily`` is a ``daily_holdings`` CSV source and ``quarterly`` a
+    ``quarterly_disclosure`` PDF source, matching the source ids the hand-made
+    rows use. ``partial_list_shas`` adds ``partial_list`` info events, the way
+    the build records a daily source that publishes only part of the portfolio.
+    """
     con = duckdb.connect(":memory:")
-    for ddl in (DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES):
+    for ddl in (DDL_FILE_VERSIONS, DDL_SOURCES, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES):
         con.execute(ddl)
     holdings = pl.DataFrame(rows or [], schema=_HOLDINGS_SCHEMA)
     con.register("_holdings_rows", holdings)
@@ -128,6 +156,36 @@ def make_con(
     con.register("_change_rows", changes_frame)
     con.execute("INSERT INTO holdings_changes SELECT * FROM _change_rows")
     con.unregister("_change_rows")
+    sources = pl.DataFrame(
+        [
+            ("daily", "tests", "daily_holdings", "csv"),
+            ("quarterly", "tests", "quarterly_disclosure", "pdf"),
+        ],
+        schema=_SOURCES_SCHEMA,
+        orient="row",
+    )
+    con.register("_source_rows", sources)
+    con.execute("INSERT INTO sources SELECT * FROM _source_rows")
+    con.unregister("_source_rows")
+    events = pl.DataFrame(
+        [
+            {
+                "raw_file_sha256": sha,
+                "source_id": "daily",
+                "fund_ticker": "",
+                "as_of_date": None,
+                "check": "partial_list",
+                "severity": "info",
+                "detail": "partial_list=true",
+                "excluded": False,
+            }
+            for sha in (partial_list_shas or [])
+        ],
+        schema=_QA_EVENTS_SCHEMA,
+    )
+    con.register("_qa_rows", events)
+    con.execute("INSERT INTO qa_events SELECT * FROM _qa_rows")
+    con.unregister("_qa_rows")
     return con
 
 
