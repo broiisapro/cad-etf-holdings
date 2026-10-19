@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -24,9 +25,12 @@ from etfh.registry import Source, require_collectable
 
 __all__ = ["HTTPRetryError", "PoliteClient", "RobotsDisallowedError"]
 
+_LOGGER = logging.getLogger(__name__)
+
 _MAX_ATTEMPTS = 4
 _BASE_INTERVAL_SECONDS = 1.0
 _MAX_RETRY_AFTER_SECONDS = 120.0
+_MAX_ROBOTS_REDIRECTS = 5
 
 
 class RobotsDisallowedError(PermissionError):
@@ -222,20 +226,67 @@ class PoliteClient:
         return policy
 
     def _load_robots(self, scheme: str, host: str) -> _RobotsPolicy:
+        """Load and interpret a host's robots.txt following RFC 9309 (D46).
+
+        ``2xx`` responses are parsed and obeyed; ``3xx`` responses are followed
+        for at most five hops and the final response is interpreted with the
+        same rules; ``4xx`` responses (including 401 and 403) mean the host has
+        no robots.txt, so everything is allowed and one line is logged per host
+        as ``robots unavailable (status N)``. ``5xx`` responses and transport
+        errors mean robots.txt is unreachable, so the host is disallowed for
+        this client's lifetime. Redirects that run past the hop limit are
+        treated as unreachable as well (fail closed).
+        """
         url = f"{scheme}://{host}/robots.txt"
-        self._throttle(host, _BASE_INTERVAL_SECONDS)
-        try:
-            response = self._client.get(url, headers={"User-Agent": self._user_agent})
-        except httpx.TransportError:
-            return _RobotsPolicy(None, disallow_all=True)
-        if response.status_code == 404:
-            return _RobotsPolicy(None, allow_all=True)
-        if response.status_code >= 500:
-            return _RobotsPolicy(None, disallow_all=True)
-        if response.status_code != 200:
-            return _RobotsPolicy(None, disallow_all=True)
-        parser = RobotFileParser()
-        parser.set_url(url)
-        text: Any = response.text
-        parser.parse(str(text).splitlines())
-        return _RobotsPolicy(parser)
+        for _ in range(_MAX_ROBOTS_REDIRECTS + 1):
+            request_host = urlsplit(url).netloc or host
+            self._throttle(request_host, _BASE_INTERVAL_SECONDS)
+            try:
+                response = self._client.get(
+                    url,
+                    headers={"User-Agent": self._user_agent},
+                    follow_redirects=False,
+                )
+            except httpx.TransportError:
+                _LOGGER.warning("robots.txt unreachable for %s; disallowing all requests", host)
+                return _RobotsPolicy(None, disallow_all=True)
+            status = response.status_code
+            if 300 <= status < 400:
+                location = response.headers.get("location")
+                if not location:
+                    _LOGGER.warning(
+                        "robots.txt redirect without a Location header for %s; "
+                        "disallowing all requests",
+                        host,
+                    )
+                    return _RobotsPolicy(None, disallow_all=True)
+                url = urljoin(url, location)
+                continue
+            if status >= 500:
+                _LOGGER.warning(
+                    "robots.txt unavailable (status %d) for %s; disallowing all requests",
+                    status,
+                    host,
+                )
+                return _RobotsPolicy(None, disallow_all=True)
+            if 400 <= status < 500:
+                _LOGGER.info("robots unavailable (status %d) for %s", status, host)
+                return _RobotsPolicy(None, allow_all=True)
+            if status < 200 or status >= 300:
+                _LOGGER.warning(
+                    "robots.txt returned unexpected status %d for %s; disallowing all requests",
+                    status,
+                    host,
+                )
+                return _RobotsPolicy(None, disallow_all=True)
+            parser = RobotFileParser()
+            parser.set_url(url)
+            text: Any = response.text
+            parser.parse(str(text).splitlines())
+            return _RobotsPolicy(parser)
+        _LOGGER.warning(
+            "robots.txt exceeded %d redirects for %s; disallowing all requests",
+            _MAX_ROBOTS_REDIRECTS,
+            host,
+        )
+        return _RobotsPolicy(None, disallow_all=True)

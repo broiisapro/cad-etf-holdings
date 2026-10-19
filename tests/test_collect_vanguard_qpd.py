@@ -127,19 +127,23 @@ def test_gate_refusal_does_not_touch_the_network(tmp_path: Path) -> None:
     assert calls == []
 
 
-def test_robots_refusal_is_a_collect_error(tmp_path: Path) -> None:
+def test_robots_403_allows_the_download(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
-            return httpx.Response(403, text="Access Denied")
-        return httpx.Response(200, content=b"%PDF-1.4")
+            return httpx.Response(403, text="<Error><Code>AccessDenied</Code></Error>")
+        return httpx.Response(
+            200, content=b"%PDF-1.4\n", headers={"content-type": "application/pdf"}
+        )
 
     collector = VanguardQpdCollector(source=qpd_source())
     client = _client(httpx.MockTransport(handler))
     try:
-        with pytest.raises(CollectError, match="robots.txt disallows"):
-            collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path))
+        raw_files = collector.fetch(qpd_fund(TICKER), date(2026, 7, 1), client, RawStore(tmp_path))
     finally:
         client.close()
+    assert len(raw_files) == 1
+    assert raw_files[0].fund_ticker == TICKER
+    assert raw_files[0].path.read_bytes() == b"%PDF-1.4\n"
 
 
 def test_missing_pdf_is_a_collect_error(tmp_path: Path) -> None:
