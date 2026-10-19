@@ -23,7 +23,7 @@ from etfh.types import RawFile
 from tests._build_helpers import CONFIG_DIR, FIXTURES, RAW_ROOT
 
 runner = CliRunner()
-COMMANDS = ("collect", "parse", "build", "qa", "overlap", "changes")
+COMMANDS = ("collect", "parse", "build", "qa", "overlap", "changes", "spotcheck", "export")
 
 _SOURCES_YAML = """
 sources:
@@ -358,6 +358,102 @@ def test_cli_reads_the_database_through_the_thread_aware_connect(
     result = runner.invoke(app, ["qa", "--db", str(fixture_build / "etfh.duckdb")])
     assert result.exit_code == 0, result.output
     assert seen == [True]
+
+
+def test_spotcheck_command_prints_sampled_raw_values(fixture_build: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "spotcheck",
+            "--raw",
+            str(RAW_ROOT),
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--n",
+            "2",
+            "--seed",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("spotcheck n=2 seed=1\n")
+    assert "source=syn_csv issuer=synthetic" in result.output
+    assert result.output.count(" | raw=") == 2
+    assert result.output.count(" | weight=") == 2
+
+
+def test_spotcheck_unknown_issuer_reports_nothing_found(fixture_build: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "spotcheck",
+            "--raw",
+            str(RAW_ROOT),
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--issuer",
+            "nope",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no included files found for issuer 'nope'" in result.output
+
+
+def test_spotcheck_missing_database_exits_two() -> None:
+    result = runner.invoke(app, ["spotcheck", "--db", "/nonexistent/etfh.duckdb"])
+    assert result.exit_code == 2
+    assert "database not found" in result.output
+
+
+def test_export_command_writes_aggregates_only(fixture_build: Path, tmp_path: Path) -> None:
+    out_dir = tmp_path / "exports"
+    result = runner.invoke(
+        app,
+        [
+            "export",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--out",
+            str(out_dir),
+            "--asof",
+            "2026-11-02",
+            "--funds",
+            "SYNA,SYNB",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert str(out_dir / "overlap_matrix.csv") in result.output
+    assert str(out_dir / "concentration.csv") in result.output
+    assert str(out_dir / "sector_breakdown.csv") in result.output
+    import polars as pl
+
+    concentration = pl.read_csv(out_dir / "concentration.csv")
+    assert concentration["fund"].to_list() == ["SYNA", "SYNB"]
+    text = "".join(
+        (out_dir / name).read_text(encoding="utf-8")
+        for name in ("overlap_matrix.csv", "concentration.csv", "sector_breakdown.csv")
+    )
+    assert "Quarrystone" not in text
+    assert "ISIN:" not in text
+
+
+def test_export_unknown_fund_exits_two(fixture_build: Path, tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "export",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--out",
+            str(tmp_path / "exports"),
+            "--asof",
+            "2026-11-02",
+            "--funds",
+            "NOPE",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "unknown fund" in result.output
 
 
 def test_bad_date_exits_two_with_a_message(fixture_build: Path) -> None:
