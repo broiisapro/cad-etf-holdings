@@ -173,7 +173,11 @@ def test_all_collectors_discovery_and_lookup(install_modules: Any, source_factor
     )
     collectors = all_collectors()
     assert [collector.source_id for collector in collectors] == ["syn_csv", "syn_json"]
-    assert collector_for(source_factory("syn_json")) is collectors[1]
+    csv_source = source_factory("syn_json")
+    bound = collector_for(csv_source)
+    assert bound is not None
+    assert bound.source is csv_source  # type: ignore[attr-defined]
+    assert type(bound) is type(collectors[1])
     assert collector_for(source_factory("syn_pdf")) is None
 
 
@@ -181,6 +185,37 @@ def test_non_list_collectors_attribute_raises(install_modules: Any) -> None:
     install_modules("etfh.collect", {"bad": "COLLECTORS = 3\n"})
     with pytest.raises(TypeError, match="COLLECTORS must be a list"):
         all_collectors()
+
+
+_BOUND_COLLECTOR_BODY = """
+class BoundCollector:
+    source_id = "bound_source"
+    source = None
+
+    def fetch(self, fund, day, client, store):
+        raise NotImplementedError
+
+
+COLLECTORS = [BoundCollector()]
+"""
+
+
+def test_collector_for_returns_a_fresh_copy_bound_to_the_given_source(
+    install_modules: Any, source_factory: Any
+) -> None:
+    install_modules("etfh.collect", {"aa_bound": _BOUND_COLLECTOR_BODY})
+    source = source_factory("bound_source")
+    first = collector_for(source)
+    second = collector_for(source)
+    assert first is not None
+    assert second is not None
+    assert first is not second
+    assert first.source is source  # type: ignore[attr-defined]
+    assert second.source is source  # type: ignore[attr-defined]
+    registered = all_collectors()
+    assert registered[0].source is None  # type: ignore[attr-defined]
+    other = source_factory("bound_source")
+    assert collector_for(other).source is other  # type: ignore[union-attr,attr-defined]
 
 
 def test_collect_error_carries_source_fund_and_reason() -> None:

@@ -9,7 +9,7 @@ import duckdb
 import polars as pl
 import pytest
 
-from etfh.build import BuildResult
+from etfh.build import BuildResult, connect
 from etfh.storage import RawStore
 from tests._build_helpers import RAW_ROOT, build_fixture_db, copy_raw_files
 
@@ -113,7 +113,7 @@ def test_second_build_is_byte_identical(tmp_path: Path) -> None:
     assert first.n_holdings == second.n_holdings
     assert first.n_qa_events == 1
     assert first.n_changes > 0
-    for table in ("file_versions", "holdings", "qa_events", "holdings_changes"):
+    for table in ("file_versions", "sources", "holdings", "qa_events", "holdings_changes"):
         left = (tmp_path / "a" / "parquet" / f"{table}.parquet").read_bytes()
         right = (tmp_path / "b" / "parquet" / f"{table}.parquet").read_bytes()
         assert left == right, table
@@ -202,10 +202,99 @@ def test_unparseable_unknown_source_and_unknown_fund_files_are_reported(
         _query(tmp_path / "out", 'SELECT DISTINCT "check" FROM qa_events')["check"].to_list()
     )
     assert checks == {"no_parser", "unknown_source", "unknown_fund"}
-    assert result.n_file_versions == 1
+    assert result.n_file_versions == 4
     assert result.n_included_files == 1
-    assert result.n_excluded_files == 0
+    assert result.n_excluded_files == 3
     assert result.n_qa_events == 3
+    versions = _query(
+        tmp_path / "out",
+        "SELECT source_id, fund_ticker, status FROM file_versions",
+    )
+    assert set(versions.rows()) == {
+        ("mystery_source", "SYNA", "excluded"),
+        ("syn_csv", "NOPE", "excluded"),
+        ("syn_csv", "SYNA", "excluded"),
+        ("syn_csv", "SYNA", "included"),
+    }
+
+
+def test_no_errored_raw_file_is_missing_from_file_versions(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    store = RawStore(raw_root)
+    store.write(
+        b"not a holdings file at all\n",
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/bad.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    store.write(
+        b"no parser knows this\n",
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/bad.txt",
+        fetched_at=datetime(2026, 10, 29, 22, 1, tzinfo=UTC),
+        ext="txt",
+        as_of_hint=date(2026, 10, 29),
+    )
+    result = build_fixture_db(tmp_path / "out", raw_root=raw_root)
+    out_dir = tmp_path / "out"
+    for raw in RawStore(raw_root).iter_raw():
+        status = _query(
+            out_dir,
+            f"SELECT status FROM file_versions WHERE raw_file_sha256 = '{raw.sha256}'",
+        )
+        assert status.height >= 1, f"{raw.path} has no file_versions row"
+        assert set(status["status"].to_list()) == {"excluded"}
+    assert result.n_file_versions == 2
+    assert result.n_excluded_files == 2
+    assert (
+        _query(
+            out_dir,
+            "SELECT COUNT(*) AS n FROM file_versions fv WHERE NOT EXISTS "
+            "(SELECT 1 FROM qa_events qe WHERE qe.raw_file_sha256 = fv.raw_file_sha256 "
+            "AND qe.excluded AND qe.severity = 'error')",
+        )["n"][0]
+        == 0
+    )
+
+
+def test_failed_file_without_a_hint_uses_the_fetch_date_as_asof(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    store = RawStore(raw_root)
+    store.write(
+        b"no parser for this\n",
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/unknown.txt",
+        fetched_at=datetime(2026, 10, 30, 2, tzinfo=UTC),
+        ext="txt",
+        as_of_hint=None,
+    )
+    build_fixture_db(tmp_path / "out", raw_root=raw_root)
+    versions = _query(
+        tmp_path / "out",
+        "SELECT as_of_date, status FROM file_versions",
+    )
+    assert versions.rows() == [(date(2026, 10, 29), "excluded")]
+
+
+def test_sources_table_records_the_build_config(built: tuple[Path, BuildResult]) -> None:
+    out_dir, _ = built
+    frame = _query(out_dir, "SELECT * FROM sources ORDER BY source_id")
+    assert frame.columns == ["source_id", "issuer", "kind", "format"]
+    rows = {row[0]: row[1:] for row in frame.rows()}
+    assert {"syn_csv", "syn_xlsx", "syn_json", "syn_pdf"} <= set(rows)
+    assert rows["syn_csv"] == ("synthetic", "synthetic", "csv")
+    assert rows["syn_xlsx"] == ("synthetic", "synthetic", "xlsx")
+    assert rows["syn_pdf"] == ("synthetic", "synthetic", "pdf")
+    assert any(kind == "daily_holdings" for _issuer, kind, _format in rows.values())
+    assert any(kind == "quarterly_disclosure" for _issuer, kind, _format in rows.values())
 
 
 def test_pdf_version_known_at_is_the_stated_publication_date(
@@ -273,6 +362,7 @@ def test_every_table_is_written_in_its_documented_order(
 ) -> None:
     out_dir, _ = built
     keys = {
+        "sources": ["source_id"],
         "file_versions": ["source_id", "fund_ticker", "as_of_date", "file_version"],
         "holdings": [
             "fund_ticker",
@@ -305,6 +395,59 @@ def test_every_table_is_written_in_its_documented_order(
     for table, sort_key in keys.items():
         frame = pl.read_parquet(out_dir / "parquet" / f"{table}.parquet")
         assert frame.equals(frame.sort(sort_key)), table
+
+
+def test_connect_honours_etfh_duckdb_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "2")
+    connection = connect(":memory:")
+    try:
+        assert connection.execute("SELECT current_setting('threads')").fetchone() == (2,)
+    finally:
+        connection.close()
+    monkeypatch.delenv("ETFH_DUCKDB_THREADS")
+    connection = connect(":memory:")
+    try:
+        default = connection.execute("SELECT current_setting('threads')").fetchone()
+    finally:
+        connection.close()
+    assert default is not None
+
+
+def test_connect_rejects_a_bad_thread_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "many")
+    with pytest.raises(ValueError, match="ETFH_DUCKDB_THREADS"):
+        connect(":memory:")
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "0")
+    with pytest.raises(ValueError, match="ETFH_DUCKDB_THREADS"):
+        connect(":memory:")
+
+
+def test_build_opens_duckdb_through_the_connect_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import etfh.build as build_module
+
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    seen: list[tuple[str, bool]] = []
+    real_connect = build_module.connect
+
+    def spy(path: str | Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+        seen.append((Path(path).name, read_only))
+        return real_connect(path, read_only=read_only)
+
+    monkeypatch.setattr(build_module, "connect", spy)
+    build_fixture_db(tmp_path / "out", raw_root=raw_root)
+    assert seen == [("etfh.duckdb", False)]
 
 
 def test_reports_and_result_counts_match_the_tables(

@@ -33,6 +33,7 @@ from etfh.analytics import FundNotFoundError, OverlapResult
 from etfh.analytics import changes as compute_changes
 from etfh.analytics import overlap as compute_overlap
 from etfh.build import build as run_build
+from etfh.build import connect as connect_duckdb
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.parse.registry import find_parser
@@ -305,4 +306,4 @@ def _connect(db: Path) -> duckdb.DuckDBPyConnection:
     if not Path(db).is_file():
         typer.echo(f"error: database not found: {db}", err=True)
         raise typer.Exit(code=2)
-    return duckdb.connect(str(db), read_only=True)
+    return connect_duckdb(db, read_only=True)

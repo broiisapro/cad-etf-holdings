@@ -1,10 +1,16 @@
-"""Collector discovery and the shared collection error.
+"""Collector discovery, source binding and the shared collection error.
 
 Collector modules live in ``etfh/collect/<name>.py`` and export ``COLLECTORS``
 (a list of :class:`etfh.types.Collector` instances). Discovery is automatic and
 deterministic: every module in this package except ``registry`` itself is
 imported in sorted module-name order, and the exported lists are concatenated
 in that order, preserving each module's own order.
+
+:func:`collector_for` returns a **bound copy** of the registered collector with
+its ``source`` attribute set to the :class:`~etfh.registry.Source` the caller
+looked up, so ``etfh collect --config DIR`` gates every request (in the client
+and in the collector) with DIR's terms record rather than the default config
+the module was imported with.
 """
 
 from __future__ import annotations
@@ -12,7 +18,9 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from collections.abc import Iterator
+from copy import copy
 from types import ModuleType
+from typing import Any, cast
 
 from etfh.registry import Fund, Source
 from etfh.types import Collector
@@ -61,8 +69,16 @@ def all_collectors() -> list[Collector]:
 
 
 def collector_for(source: Source) -> Collector | None:
-    """Return the first discovered collector registered for ``source``."""
+    """Return a bound copy of the first collector registered for ``source``.
+
+    The copy carries ``source`` as an attribute so the collector gates its
+    requests with exactly the registry entry the caller passed (D3, interfaces
+    §1). The registered instance is never mutated, so two callers with
+    different ``Source`` objects cannot interfere.
+    """
     for collector in all_collectors():
         if collector.source_id == source.id:
-            return collector
+            bound = copy(collector)
+            cast(Any, bound).source = source
+            return bound
     return None

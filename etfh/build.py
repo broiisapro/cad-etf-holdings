@@ -16,9 +16,23 @@ Point-in-time rules (D20):
 - ``known_at`` is the stated publication date when the file carries one,
   otherwise the fetch time.
 
+Every raw file is accounted for: each one gets exactly one ``file_versions``
+row, sharing a version when its bytes duplicate an earlier fetch for the same
+source, fund and as-of date. A file that cannot be parsed (``parse_error``,
+``no_parser``), names an unknown source or fund, or fails validation still gets
+an excluded row plus its ``qa_events`` finding, so the QA report can list every
+problem file. As-of dates for files that never parsed fall back to the raw
+hint, then the fetch date in America/Toronto; ``file_version`` follows the
+usual rule.
+
+The build also writes an additive ``sources`` table (``source_id``, ``issuer``,
+``kind``, ``format``) from the config it loaded, which analytics uses for the
+daily-over-quarterly priority and the ``partial`` flag (D53).
+
 Every table is sorted on a documented key before writing (D15):
 
 - ``file_versions``: source_id, fund_ticker, as_of_date, file_version
+- ``sources``: source_id
 - ``holdings``: fund_ticker, as_of_date, file_version, security_id,
   security_name, security_ticker, isin, cusip, currency
 - ``qa_events``: source_id, fund_ticker, as_of_date, check, detail,
@@ -29,6 +43,7 @@ Every table is sorted on a documented key before writing (D15):
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -40,6 +55,7 @@ import duckdb
 import polars as pl
 from polars.datatypes import DataType, DataTypeClass
 
+from etfh.asof import TORONTO
 from etfh.parse.registry import find_parser
 from etfh.registry import Fund, Source, load_funds, load_sources
 from etfh.schema import (
@@ -57,11 +73,33 @@ if TYPE_CHECKING:
     from etfh.secmaster.resolve import SecurityMaster
     from etfh.validate import QaFinding
 
-__all__ = ["CHANGE_THRESHOLD", "BuildResult", "build"]
+__all__ = ["CHANGE_THRESHOLD", "BuildResult", "build", "connect"]
 
 CHANGE_THRESHOLD = 0.001
 
-_DDLS = (DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES)
+DDL_SOURCES = """
+CREATE TABLE IF NOT EXISTS sources (
+    source_id VARCHAR NOT NULL,
+    issuer VARCHAR NOT NULL,
+    kind VARCHAR NOT NULL,
+    format VARCHAR NOT NULL
+);
+"""
+
+_DDLS = (
+    DDL_FILE_VERSIONS,
+    DDL_SOURCES,
+    DDL_HOLDINGS,
+    DDL_QA_EVENTS,
+    DDL_HOLDINGS_CHANGES,
+)
+
+_SOURCES_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "source_id": pl.String,
+    "issuer": pl.String,
+    "kind": pl.String,
+    "format": pl.String,
+}
 
 _FILE_VERSIONS_SCHEMA: dict[str, DataTypeClass | DataType] = {
     "source_id": pl.String,
@@ -157,9 +195,19 @@ class _Candidate:
     parsed: ParsedFile
     source: Source
     fund: Fund
+
+
+@dataclass
+class _Record:
+    """One raw file (after collapsing identical SHAs) awaiting a version number."""
+
+    raw: RawFile
+    as_of_date: date
     known_at: datetime
     fetched_at: datetime
     path: str
+    candidate: _Candidate | None = None
+    finding: tuple[str, str] | None = None
 
 
 @dataclass
@@ -168,7 +216,11 @@ class _Version:
     fund_ticker: str
     as_of_date: date
     file_version: int
-    candidate: _Candidate = field(repr=False)
+    raw: RawFile = field(repr=False)
+    path: str
+    known_at: datetime
+    candidate: _Candidate | None = field(default=None, repr=False)
+    finding: tuple[str, str] | None = None
 
 
 def build(
@@ -199,65 +251,56 @@ def build(
 
     raws = RawStore(raw_root).iter_raw()
     parsed_cache: dict[str, ParsedFile] = {}
-    failures: dict[str, tuple[str, str]] = {}
+    parse_failures: dict[str, tuple[str, str]] = {}
     qa_rows: list[dict[str, Any]] = []
-    candidates: dict[tuple[str, str, date], dict[str, _Candidate]] = {}
+    records: dict[tuple[str, str, date, str], _Record] = {}
 
     for raw in raws:
         source = sources.get(raw.source_id)
-        if source is None:
-            qa_rows.append(
-                _qa_row(
-                    raw,
-                    raw.as_of_hint,
-                    "unknown_source",
-                    "error",
-                    f"source {raw.source_id!r} is not in sources.yaml",
-                    excluded=True,
-                )
-            )
-            continue
         fund = funds_by_ticker.get(raw.fund_ticker)
-        if fund is None:
-            qa_rows.append(
-                _qa_row(
-                    raw,
-                    raw.as_of_hint,
-                    "unknown_fund",
-                    "error",
-                    f"fund {raw.fund_ticker!r} is not in funds.csv",
-                    excluded=True,
-                )
-            )
-            continue
-        if raw.sha256 not in parsed_cache and raw.sha256 not in failures:
-            parser = find_parser(raw, source)
-            if parser is None:
-                failures[raw.sha256] = (
-                    "no_parser",
-                    f"no parser for .{raw.ext} files from source {source.id}",
-                )
+        candidate: _Candidate | None = None
+        finding: tuple[str, str] | None = None
+        as_of_date = _fallback_as_of(raw)
+        known_at = raw.fetched_at
+        if source is None:
+            finding = ("unknown_source", f"source {raw.source_id!r} is not in sources.yaml")
+        elif fund is None:
+            finding = ("unknown_fund", f"fund {raw.fund_ticker!r} is not in funds.csv")
+        else:
+            if raw.sha256 not in parsed_cache and raw.sha256 not in parse_failures:
+                parser = find_parser(raw, source)
+                if parser is None:
+                    parse_failures[raw.sha256] = (
+                        "no_parser",
+                        f"no parser for .{raw.ext} files from source {source.id}",
+                    )
+                else:
+                    try:
+                        parsed_cache[raw.sha256] = parser.parse(raw)
+                    except Exception as error:
+                        parse_failures[raw.sha256] = (
+                            "parse_error",
+                            f"{type(error).__name__}: {error}",
+                        )
+            if raw.sha256 in parse_failures:
+                finding = parse_failures[raw.sha256]
             else:
-                try:
-                    parsed_cache[raw.sha256] = parser.parse(raw)
-                except Exception as error:
-                    failures[raw.sha256] = ("parse_error", f"{type(error).__name__}: {error}")
-        if raw.sha256 in failures:
-            check, detail = failures[raw.sha256]
-            qa_rows.append(_qa_row(raw, raw.as_of_hint, check, "error", detail, excluded=True))
-            continue
-        parsed = parsed_cache[raw.sha256]
-        known_at = parsed.published_at if parsed.published_at is not None else raw.fetched_at
-        group = candidates.setdefault((raw.source_id, raw.fund_ticker, parsed.as_of_date), {})
-        previous = group.get(raw.sha256)
+                parsed = parsed_cache[raw.sha256]
+                as_of_date = parsed.as_of_date
+                if parsed.published_at is not None:
+                    known_at = parsed.published_at
+                candidate = _Candidate(parsed=parsed, source=source, fund=fund)
+        key = (raw.source_id, raw.fund_ticker, as_of_date, raw.sha256)
+        previous = records.get(key)
         if previous is None:
-            group[raw.sha256] = _Candidate(
-                parsed=parsed,
-                source=source,
-                fund=fund,
+            records[key] = _Record(
+                raw=raw,
+                as_of_date=as_of_date,
                 known_at=known_at,
                 fetched_at=raw.fetched_at,
                 path=str(raw.path),
+                candidate=candidate,
+                finding=finding,
             )
         else:
             previous.known_at = min(previous.known_at, known_at)
@@ -265,17 +308,23 @@ def build(
             previous.path = min(previous.path, str(raw.path))
 
     versions: list[_Version] = []
-    for source_id, fund_ticker, as_of_date in sorted(candidates):
-        group = candidates[(source_id, fund_ticker, as_of_date)]
-        ordered = sorted(group.items(), key=lambda item: (item[1].known_at, item[0]))
-        for index, (_, candidate) in enumerate(ordered, start=1):
+    grouped: dict[tuple[str, str, date], list[_Record]] = {}
+    for (source_id, fund_ticker, as_of_date, _sha), record in sorted(records.items()):
+        grouped.setdefault((source_id, fund_ticker, as_of_date), []).append(record)
+    for (source_id, fund_ticker, as_of_date), group in grouped.items():
+        ordered = sorted(group, key=lambda record: (record.known_at, record.raw.sha256))
+        for index, record in enumerate(ordered, start=1):
             versions.append(
                 _Version(
                     source_id=source_id,
                     fund_ticker=fund_ticker,
                     as_of_date=as_of_date,
                     file_version=index,
-                    candidate=candidate,
+                    raw=record.raw,
+                    path=record.path,
+                    known_at=record.known_at,
+                    candidate=record.candidate,
+                    finding=record.finding,
                 )
             )
 
@@ -283,6 +332,31 @@ def build(
     holdings_frames: list[pl.DataFrame] = []
     for version in versions:
         candidate = version.candidate
+        if candidate is None:
+            check, detail = version.finding if version.finding is not None else ("parse_error", "")
+            file_version_rows.append(
+                {
+                    "source_id": version.source_id,
+                    "fund_ticker": version.fund_ticker,
+                    "as_of_date": version.as_of_date,
+                    "file_version": version.file_version,
+                    "known_at": version.known_at,
+                    "raw_file_sha256": version.raw.sha256,
+                    "path": version.path,
+                    "status": "excluded",
+                }
+            )
+            qa_rows.append(
+                _qa_row(
+                    version.raw,
+                    version.as_of_date,
+                    check,
+                    "error",
+                    detail,
+                    excluded=True,
+                )
+            )
+            continue
         assigned = security_master.assign(candidate.parsed.frame)
         parsed_with_id = ParsedFile(
             raw=candidate.parsed.raw,
@@ -304,22 +378,22 @@ def build(
                 "fund_ticker": version.fund_ticker,
                 "as_of_date": version.as_of_date,
                 "file_version": version.file_version,
-                "known_at": candidate.known_at,
-                "raw_file_sha256": candidate.parsed.raw.sha256,
-                "path": candidate.path,
+                "known_at": version.known_at,
+                "raw_file_sha256": version.raw.sha256,
+                "path": version.path,
                 "status": "excluded" if excluded else "included",
             }
         )
-        for finding in findings:
+        for qa_finding in findings:
             qa_rows.append(
                 {
-                    "raw_file_sha256": candidate.parsed.raw.sha256,
+                    "raw_file_sha256": version.raw.sha256,
                     "source_id": version.source_id,
                     "fund_ticker": version.fund_ticker,
                     "as_of_date": version.as_of_date,
-                    "check": finding.check,
-                    "severity": finding.severity,
-                    "detail": finding.detail,
+                    "check": qa_finding.check,
+                    "severity": qa_finding.severity,
+                    "detail": qa_finding.detail,
                     "excluded": excluded,
                 }
             )
@@ -327,7 +401,7 @@ def build(
             holdings_frames.append(
                 _holdings_frame(
                     assigned,
-                    known_at=candidate.known_at,
+                    known_at=version.known_at,
                     file_version=version.file_version,
                 )
             )
@@ -351,6 +425,7 @@ def build(
 
     frames = {
         "file_versions": file_versions,
+        "sources": _sources_frame(sources),
         "holdings": holdings,
         "qa_events": qa_events,
         "holdings_changes": holdings_changes,
@@ -368,6 +443,26 @@ def build(
         n_qa_events=qa_events.height,
         n_unmatched=unmatched.height,
     )
+
+
+def _fallback_as_of(raw: RawFile) -> date:
+    """The as-of date for a file that never parsed: hint, else fetch date (D30)."""
+    if raw.as_of_hint is not None:
+        return raw.as_of_hint
+    return raw.fetched_at.astimezone(TORONTO).date()
+
+
+def _sources_frame(sources: Mapping[str, Source]) -> pl.DataFrame:
+    rows = [
+        {
+            "source_id": source.id,
+            "issuer": source.issuer,
+            "kind": source.kind.value,
+            "format": source.format.value,
+        }
+        for source in sorted(sources.values(), key=lambda source: source.id)
+    ]
+    return pl.DataFrame(rows, schema=_SOURCES_SCHEMA)
 
 
 def _qa_row(
@@ -513,11 +608,36 @@ def _compute_changes(holdings: pl.DataFrame, priority: Mapping[str, int]) -> pl.
     )
 
 
+def connect(path: str | Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection, honouring ``ETFH_DUCKDB_THREADS`` (D49).
+
+    Every connection the package opens goes through this helper so the
+    single-runner CI setting (``ETFH_DUCKDB_THREADS=1``) applies without any
+    other configuration. An invalid value fails loudly rather than silently
+    using every core.
+    """
+    connection = duckdb.connect(str(path), read_only=read_only)
+    configured = os.environ.get("ETFH_DUCKDB_THREADS")
+    if configured:
+        try:
+            threads = int(configured)
+        except ValueError as error:
+            connection.close()
+            raise ValueError(
+                f"ETFH_DUCKDB_THREADS must be a positive integer, got {configured!r}"
+            ) from error
+        if threads < 1:
+            connection.close()
+            raise ValueError(f"ETFH_DUCKDB_THREADS must be >= 1, got {threads}")
+        connection.execute(f"SET threads TO {threads}")
+    return connection
+
+
 def _write_database(out_dir: Path, frames: Mapping[str, pl.DataFrame]) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     db_path = out_dir / "etfh.duckdb"
     db_path.unlink(missing_ok=True)
-    connection = duckdb.connect(str(db_path))
+    connection = connect(db_path)
     try:
         for ddl in _DDLS:
             connection.execute(ddl)
