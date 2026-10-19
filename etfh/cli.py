@@ -6,7 +6,9 @@ Commands:
   line per fund/source pair and never contacts a source the terms gate refuses.
 - ``parse --raw DIR --out DIR [--config DIR]`` writes every parseable frame to
   ``<out>/parsed.parquet``.
-- ``build --raw DIR --out DIR [--config DIR]`` rebuilds the DuckDB and exports.
+- ``build --raw DIR --out DIR [--config DIR] [--openfigi [--figi-cache DIR]]``
+  rebuilds the DuckDB and exports; ``--openfigi`` assigns cached composite
+  FIGI ids to the rows that map.
 - ``qa --db PATH`` prints the QA report and exits 0 only when every errored
   file is excluded and reported.
 - ``overlap A B --asof D --db PATH [--json]`` prints pairwise overlap; ``--json``
@@ -22,6 +24,7 @@ Commands:
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
@@ -43,6 +46,7 @@ from etfh.export import export_aggregates
 from etfh.http import PoliteClient
 from etfh.parse.registry import find_parser
 from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
+from etfh.secmaster.openfigi import FigiLookup
 from etfh.spotcheck import spotcheck as run_spotcheck
 from etfh.storage import RawStore
 from etfh.types import Decision, SourceKind
@@ -50,6 +54,7 @@ from etfh.types import Decision, SourceKind
 __all__ = ["app"]
 
 _TORONTO = ZoneInfo("America/Toronto")
+_DEFAULT_FIGI_CACHE = Path.home() / ".cache" / "etfh" / "openfigi"
 
 _PARSED_SCHEMA = {
     "fund_ticker": pl.String,
@@ -141,9 +146,19 @@ def build(
     raw: Annotated[Path, typer.Option("--raw", help="raw store directory")] = Path("raw"),
     out: Annotated[Path, typer.Option("--out", help="output directory")] = Path("build"),
     config: Annotated[Path, typer.Option("--config", help="config directory")] = Path("config"),
+    openfigi: Annotated[
+        bool, typer.Option("--openfigi", help="assign cached OpenFIGI composite ids")
+    ] = False,
+    figi_cache: Annotated[
+        Path,
+        typer.Option("--figi-cache", help="OpenFIGI cache directory"),
+    ] = _DEFAULT_FIGI_CACHE,
 ) -> None:
     """Rebuild the DuckDB database and Parquet exports from the raw store."""
-    result = run_build(raw, out, config_dir=config)
+    figi = None
+    if openfigi:
+        figi = FigiLookup(figi_cache, api_key=os.environ.get("OPENFIGI_API_KEY"))
+    result = run_build(raw, out, config_dir=config, figi=figi)
     typer.echo(f"database {result.db_path}")
     typer.echo(
         f"file versions {result.n_file_versions} "
@@ -153,6 +168,8 @@ def build(
     typer.echo(f"changes {result.n_changes} rows")
     typer.echo(f"qa events {result.n_qa_events}")
     typer.echo(f"unmatched {result.n_unmatched}")
+    if openfigi:
+        typer.echo(f"figi rows {result.n_figi}")
 
 
 @app.command()

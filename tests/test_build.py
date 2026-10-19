@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import polars as pl
 import pytest
 
-from etfh.build import BuildResult, connect
+from etfh.build import BuildResult, build, connect
 from etfh.storage import RawStore
-from tests._build_helpers import RAW_ROOT, build_fixture_db, copy_raw_files
+from tests._build_helpers import CONFIG_DIR, RAW_ROOT, build_fixture_db, copy_raw_files
 
 _SYNA_2026_10_29 = RAW_ROOT / "synthetic" / "SYNA" / "2026-10-29" / "20261029T220000Z.csv"
 
@@ -411,6 +414,129 @@ def test_every_table_is_written_in_its_documented_order(
     for table, sort_key in keys.items():
         frame = pl.read_parquet(out_dir / "parquet" / f"{table}.parquet")
         assert frame.equals(frame.sort(sort_key)), table
+
+
+class _FigiMaster:
+    """Security master stand-in that emits FIGI ids and records prefetch calls."""
+
+    def __init__(self) -> None:
+        self.prefetched: list[pl.DataFrame] = []
+
+    def prefetch(self, frames: object) -> None:
+        self.prefetched.extend(list(frames))  # type: ignore[call-overload]
+
+    def assign(self, frame: pl.DataFrame) -> pl.DataFrame:
+        return frame.with_columns(
+            pl.Series("security_id", ["FIGI:BBG000000001"] * frame.height, dtype=pl.String)
+        )
+
+
+def test_openfigi_prefetches_frames_and_counts_figi_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    master = _FigiMaster()
+    result = build(
+        raw_root,
+        tmp_path / "out",
+        config_dir=CONFIG_DIR,
+        security_master=master,
+        validator=lambda *args, **kwargs: [],
+        figi=object(),  # type: ignore[arg-type]
+    )
+    assert len(master.prefetched) == 1
+    assert master.prefetched[0].height == 25
+    assert result.n_figi == result.n_holdings == 25
+    figi_rows = _query(
+        tmp_path / "out",
+        "SELECT COUNT(*) AS n FROM holdings WHERE security_id LIKE 'FIGI:%'",
+    )
+    assert figi_rows["n"][0] == 25
+
+
+def test_build_without_openfigi_skips_prefetch(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    master = _FigiMaster()
+    build(
+        raw_root,
+        tmp_path / "out",
+        config_dir=CONFIG_DIR,
+        security_master=master,
+        validator=lambda *args, **kwargs: [],
+    )
+    assert master.prefetched == []
+
+
+def test_build_openfigi_assigns_figi_ids_with_a_cached_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_clock: Any
+) -> None:
+    import httpx
+
+    from etfh.secmaster.openfigi import FigiLookup
+
+    requests_seen: list[list[dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        jobs = json.loads(request.content)
+        requests_seen.append(jobs)
+        entries = []
+        for job in jobs:
+            digest = hashlib.sha1(job["idValue"].encode(), usedforsecurity=False).hexdigest()
+            entries.append(
+                {"data": [{"compositeFIGI": f"BBG{digest[:10].upper()}", "exchCode": "CN"}]}
+            )
+        return httpx.Response(200, json=entries)
+
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    figi = FigiLookup(
+        tmp_path / "figi-cache",
+        transport=httpx.MockTransport(handler),
+        clock=fake_clock.time,
+        sleep=fake_clock.sleep,
+    )
+    result = build(RAW_ROOT, tmp_path / "out", config_dir=CONFIG_DIR, figi=figi)
+    assert len(requests_seen) >= 1
+    assert all(
+        job.get("idType") in {"ID_ISIN", "TICKER"} for batch in requests_seen for job in batch
+    )
+    assert result.n_figi > 0
+    assert result.n_figi < result.n_holdings  # cash and identifier-less rows keep their ids
+    ids = _query(
+        tmp_path / "out",
+        "SELECT security_id FROM holdings WHERE security_id LIKE 'FIGI:%'",
+    )["security_id"].to_list()
+    assert len(ids) == result.n_figi
+    assert all(identifier.startswith("FIGI:BBG") for identifier in ids)
+    assert any(path.suffix == ".json" for path in (tmp_path / "figi-cache").iterdir())
+
+
+def test_default_build_reports_no_figi_rows(tmp_path: Path) -> None:
+    result = build(RAW_ROOT, tmp_path / "out", config_dir=CONFIG_DIR)
+    assert result.n_figi == 0
+    frame = _query(
+        tmp_path / "out", "SELECT COUNT(*) AS n FROM holdings WHERE security_id LIKE 'FIGI:%'"
+    )
+    assert frame["n"][0] == 0
 
 
 def test_connect_honours_etfh_duckdb_threads(monkeypatch: pytest.MonkeyPatch) -> None:
