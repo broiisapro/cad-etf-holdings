@@ -6,8 +6,16 @@ CUSIP, its exchange-qualified ticker, the human-reviewed overrides file and
 learned from other holdings files, so a file known later cannot change how an
 earlier file's rows resolve.
 
-The same ticker on two exchanges never merges: a row without an exchange
+The same ticker on two exchanges never merges: a row without a known exchange
 cannot form the ``TKR:<MIC>:<TICKER>`` key and stays unmatched instead.
+
+Non-security rows get explicit ids (D33): cash rows ``CASH:<CCY>`` (or
+``CASH:XXX``, ISO 4217's "no currency", when the file states no currency) and
+fx/derivative rows ``DERIV:<fund>:<key>``. Derivative keys are unique per
+instrument within a file: the normalized ``security_ticker`` when the row has
+one, otherwise the normalized full name (which carries option strike/expiry
+tokens); rows that still collide in one file get a stable ordinal suffix
+``#2``, ``#3`` ... in file order (interfaces §3).
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ _REQUIRED_COLUMNS = (
 _MIC_PATTERN = re.compile(r"^[A-Z0-9]{4}$")
 _CASH_CLASSES = frozenset({"cash"})
 _DERIVATIVE_CLASSES = frozenset({"fx", "derivative"})
+_NO_CURRENCY = "XXX"
 
 
 class SecurityMaster:
@@ -53,8 +62,10 @@ class SecurityMaster:
 
     1. reviewed overrides, most specific first (``isin``, ``cusip``,
        ``ticker``, ``name``);
-    2. cash rows → ``CASH:<CCY>``;
-    3. fx and derivative rows → ``DERIV:<fund_ticker>:<normalized name>``;
+    2. cash rows → ``CASH:<CCY>`` (``CASH:XXX`` without a stated currency);
+    3. fx and derivative rows → ``DERIV:<fund_ticker>:<normalized ticker>``,
+       else ``DERIV:<fund_ticker>:<normalized name>``; colliding rows in the
+       same frame get ``#2``, ``#3`` ... suffixes in file order;
     4. provided valid ISIN → ``ISIN:<isin>``;
     5. provided valid CUSIP → ``ISIN:<derived>`` for CA/US, else
        ``CUSIP:<cusip>``;
@@ -108,6 +119,7 @@ class SecurityMaster:
             raise ValueError(f"holdings frame is missing columns: {', '.join(missing)}")
         security_ids: list[str | None] = []
         invalid = 0
+        derivative_counts: dict[str, int] = {}
         rows = zip(
             frame["fund_ticker"].to_list(),
             frame["security_name"].to_list(),
@@ -142,6 +154,11 @@ class SecurityMaster:
                 country=country,
                 currency=currency,
             )
+            if security_id is not None and security_id.startswith("DERIV:"):
+                seen = derivative_counts.get(security_id, 0) + 1
+                derivative_counts[security_id] = seen
+                if seen > 1:
+                    security_id = f"{security_id}#{seen}"
             security_ids.append(security_id)
             invalid += row_invalid
         self.invalid_identifier_count = invalid
@@ -227,10 +244,10 @@ class SecurityMaster:
 
         normalized_class = (asset_class or "").strip().lower()
         if normalized_class in _CASH_CLASSES:
-            ccy = _clean(currency)
-            return (f"CASH:{ccy}" if ccy is not None else None), 0
+            ccy = _clean(currency) or _NO_CURRENCY
+            return f"CASH:{ccy}", 0
         if normalized_class in _DERIVATIVE_CLASSES:
-            return _derivative_key(fund_ticker, security_name), 0
+            return _derivative_key(fund_ticker, ticker, security_name), 0
 
         invalid = 0
         if provided_isin is not None:
@@ -288,6 +305,16 @@ def _mic(exchange: str | None) -> str | None:
     return cleaned if _MIC_PATTERN.match(cleaned) else None
 
 
-def _derivative_key(fund_ticker: str, security_name: str) -> str:
+def _derivative_key(fund_ticker: str, ticker: str | None, security_name: str) -> str:
+    """Base ``DERIV:`` id for one fx/derivative row.
+
+    The normalized instrument ticker wins when the row has one (it is the
+    issuer's own instrument identifier); otherwise the normalized full name is
+    used, which keeps option strike/expiry tokens. Rows whose base key still
+    collides with an earlier row of the same file are resolved by
+    :meth:`SecurityMaster.assign` with ordinal suffixes in file order.
+    """
+    if ticker is not None:
+        return f"DERIV:{fund_ticker}:{ticker}"
     normalized = re.sub(r"[^0-9A-Z]+", " ", security_name.upper()).strip()
     return f"DERIV:{fund_ticker}:{normalized}"

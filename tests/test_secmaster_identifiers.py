@@ -12,6 +12,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from etfh.secmaster.identifiers import (
+    composite_code,
     cusip_is_valid,
     cusip_to_isin,
     isin_is_valid,
@@ -273,6 +274,17 @@ def test_synd_duplicate_cusip_derives_the_synd_isin() -> None:
         ("BATS", "BATS"),
         ("LSE", "XLON"),
         ("XLON", "XLON"),
+        # Bloomberg codes for single venues (issue #73); reasons in the table.
+        ("FP", "XPAR"),
+        ("IM", "XMIL"),
+        ("DC", "XCSE"),
+        ("NA", "XAMS"),
+        ("NO", "XOSL"),
+        ("SS", "XSTO"),
+        ("AV", "XWBO"),
+        ("BB", "XBRU"),
+        ("LN", "XLON"),
+        ("HK", "XHKG"),
     ],
 )
 def test_normalize_exchange_known_labels(label: str, mic: str) -> None:
@@ -285,6 +297,31 @@ def test_normalize_exchange_known_labels(label: str, mic: str) -> None:
 )
 def test_normalize_exchange_unknown_labels_are_none(label: str | None) -> None:
     assert normalize_exchange(label) is None
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["US", "CN", "GR", "JP", "KS", "SM", "AU"],
+)
+def test_normalize_exchange_composite_codes_are_not_mics(code: str) -> None:
+    assert normalize_exchange(code) is None
+    assert composite_code(code) == code
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["us", " CN ", "jp", "sm"],
+)
+def test_composite_code_normalizes_case_and_whitespace(code: str) -> None:
+    assert composite_code(code) == code.strip().upper()
+
+
+@pytest.mark.parametrize(
+    "label",
+    [None, "", "   ", "XTSE", "FP", "HK", "CANADA", "UNITED STATES", "GRX"],
+)
+def test_composite_code_rejects_non_composite_labels(label: str | None) -> None:
+    assert composite_code(label) is None
 
 
 def test_normalize_exchange_strips_and_collapses_whitespace() -> None:
