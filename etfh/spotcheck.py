@@ -20,6 +20,7 @@ import io
 import json
 import os
 import random
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -192,7 +193,7 @@ def _raw_values(raw: RawFile, parsed: ParsedFile, *, scale: float) -> list[str |
     if extension == "json":
         return _json_values(raw.path, parsed, scale=scale)
     if extension == "pdf":
-        return _pdf_values(raw.path, parsed)
+        return _pdf_values(raw.path, parsed, scale=scale)
     return [None] * parsed.frame.height
 
 
@@ -337,7 +338,7 @@ def _entry_weight(entry: dict[str, Any], target: float) -> tuple[str | None, flo
     return best, best_delta
 
 
-def _pdf_values(path: Path, parsed: ParsedFile) -> list[str | None]:
+def _pdf_values(path: Path, parsed: ParsedFile, *, scale: float) -> list[str | None]:
     import pdfplumber
 
     lines: list[str] = []
@@ -346,19 +347,43 @@ def _pdf_values(path: Path, parsed: ParsedFile) -> list[str | None]:
             text = page.extract_text() or ""
             lines.extend(line.strip() for line in text.splitlines() if line.strip())
     names = [str(name) for name in parsed.frame["security_name"].to_list()]
+    weights = [float(weight) for weight in parsed.frame["weight"].to_list()]
     used: set[int] = set()
     values: list[str | None] = []
-    for name in names:
-        match: str | None = None
-        for index, line in enumerate(lines):
-            if index in used:
-                continue
-            if name in line:
-                match = line
-                used.add(index)
-                break
-        values.append(match)
+    for name, weight in zip(names, weights, strict=True):
+        candidates = [
+            index for index, line in enumerate(lines) if index not in used and name in line
+        ]
+        if not candidates:
+            compact_name = _compact(name)
+            candidates = [
+                index
+                for index, line in enumerate(lines)
+                if index not in used and compact_name and compact_name in _compact(line)
+            ]
+        if not candidates:
+            values.append(None)
+            continue
+        best = min(candidates, key=lambda index: _line_weight_delta(lines[index], weight * scale))
+        used.add(best)
+        values.append(lines[best])
     return values
+
+
+def _compact(text: str) -> str:
+    """Drop whitespace for matching PDF text that extraction glued together."""
+    return re.sub(r"\s+", "", text)
+
+
+def _line_weight_delta(line: str, target: float) -> float:
+    """Smallest distance between ``target`` and any number written in ``line``."""
+    best = float("inf")
+    for token in line.split():
+        number = parse_number(token)
+        if number is None:
+            continue
+        best = min(best, abs(number - target))
+    return best
 
 
 def _declared_scale(parsed: ParsedFile) -> float:
