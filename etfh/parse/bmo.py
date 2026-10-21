@@ -20,10 +20,17 @@ so any leading rows survive; openpyxl is the fallback reader.
 Rows that repeat an ISIN (for example the same security held in two currency
 lines, as real files show) are parsed faithfully as separate rows; whether that
 is a double listing or an acceptable duplicate is validation's decision (D51).
+
+The note ``weight_decimals=<n>`` records the finest precision printed for a
+``Weight (%)`` value in the workbook (``str()`` of a numeric cell is the
+shortest round-trip rendering), so validation can derive a rounding-aware
+weight-sum tolerance (D56).
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +76,30 @@ _ASSET_CLASSES = {
     "other": "other",
 }
 _NULL_LABELS = {"", "-", "\u2013", "n/a"}
+# A printed number as a workbook cell or text: optional sign, digits with an
+# optional fraction, and an optional exponent.
+_PRINTED_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$")
+
+
+def _printed_decimals(value: object) -> int | None:
+    """Decimal places printed for one weight value, or ``None`` if not numeric."""
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    match = _PRINTED_NUMBER.fullmatch(text)
+    if match is None:
+        return None
+    fraction = match.group(1) or match.group(2) or ""
+    exponent = int(match.group(3) or 0)
+    return max(len(fraction) - exponent, 0)
+
+
+def _weight_decimals(values: Iterable[object]) -> int:
+    """Finest number of decimals printed for the weights in one file (D56)."""
+    printed = [decimals for decimals in map(_printed_decimals, values) if decimals is not None]
+    return max(printed) if printed else 0
 
 
 def _text(value: Any) -> str | None:
@@ -136,6 +167,7 @@ class BmoParser:
         positions = {label: index for index, label in enumerate(headers) if label}
         fixed_income_shape = "Par Value" in positions or "Coupon" in positions
         records: list[dict[str, Any]] = []
+        weight_cells: list[object] = []
         for cells in rows[header_index + 1 :]:
             record = {
                 label: (cells[index] if index < len(cells) else None)
@@ -144,9 +176,11 @@ class BmoParser:
             name = _text(record.get("Name"))
             if name is None:
                 continue
-            weight = parse_number(_text(record.get("Weight (%)")))
+            weight_cell = record.get("Weight (%)")
+            weight = parse_number(_text(weight_cell))
             if weight is None:
                 continue
+            weight_cells.append(weight_cell)
             sector = _text(record.get("Sector"))
             if sector is not None and sector.lower() in _NULL_LABELS:
                 sector = None
@@ -173,7 +207,10 @@ class BmoParser:
         declared = WeightUnit.percent
         weights = [row["weight"] for row in records]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
-        notes = [f"declared_unit={declared.value}"]
+        notes = [
+            f"declared_unit={declared.value}",
+            f"weight_decimals={_weight_decimals(weight_cells)}",
+        ]
         if unit_check.suggested is not None:
             notes.append(f"unit_check={unit_check.detail()}")
         count = len(records)

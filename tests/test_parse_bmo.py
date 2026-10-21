@@ -34,6 +34,7 @@ def test_parses_equity_workbook() -> None:
     assert parsed.as_of_date == date(2026, 10, 16)
     assert parsed.published_at is None
     assert parsed.notes[0] == "declared_unit=percent"
+    assert "weight_decimals=2" in parsed.notes
     assert not any(note.startswith("unit_check=") for note in parsed.notes)
     frame = parsed.frame
     ParsedHoldings.validate(frame)
@@ -118,6 +119,20 @@ def test_unit_contradiction_note_when_values_are_fractions(tmp_path: Path) -> No
     notes = [note for note in parsed.notes if note.startswith("unit_check=")]
     assert len(notes) == 1
     assert "total matches unit fraction" in notes[0]
+
+
+def test_weight_decimals_note_tracks_the_printed_precision(tmp_path: Path) -> None:
+    path = tmp_path / "precision.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Weight (%)", "Name", "ISIN", "Number of Shares", "Asset Class"])
+    sheet.append([60.125, "Northolt Instruments PLC", "CA600001AA14", 10, "Equity"])
+    sheet.append([39.875, "Pinehurst Utilities Inc.", "CA600002AA96", 20, "Equity"])
+    workbook.save(path)
+    parsed = BmoParser().parse(
+        make_raw(path, source_id="bmo_daily", fund_ticker="EQLK", as_of_hint=date(2026, 10, 16))
+    )
+    assert "weight_decimals=3" in parsed.notes
 
 
 def test_missing_as_of_hint_raises() -> None:

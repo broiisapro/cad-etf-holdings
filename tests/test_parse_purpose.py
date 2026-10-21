@@ -50,6 +50,7 @@ def test_parses_lookalike_holdings() -> None:
     assert parsed.as_of_date == date(2026, 10, 16)
     assert parsed.published_at is None
     assert parsed.notes[0] == "declared_unit=percent"
+    assert "weight_decimals=2" in parsed.notes
     assert not any(note.startswith("unit_check=") for note in parsed.notes)
     frame = parsed.frame
     assert frame.height == 3
@@ -66,6 +67,19 @@ def test_parses_lookalike_holdings() -> None:
     assert cash["security_ticker"][0] is None
     assert cash["isin"][0] is None
     assert "Total" not in frame["security_name"].to_list()
+
+
+def test_weight_decimals_note_tracks_the_printed_precision(tmp_path: Path) -> None:
+    payload = _payload(FIXTURE)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    portfolio["Level4"]["holdings"][0]["weight"] = "40.125%"  # type: ignore[index]
+    portfolio["Level4"]["holdings"][1]["weight"] = "29.875%"  # type: ignore[index]
+    portfolio["Level4"]["holdings"][2]["weight"] = "30.000%"  # type: ignore[index]
+    path = _write(tmp_path, payload, "precision.json")
+    parsed = PurposeParser().parse(_raw(path))
+    assert "weight_decimals=3" in parsed.notes
+    assert float(parsed.frame["weight"].sum()) == pytest.approx(1.0, abs=1e-12)
 
 
 def test_parsed_frame_validates_against_schema() -> None:

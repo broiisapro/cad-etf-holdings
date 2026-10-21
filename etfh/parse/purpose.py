@@ -21,12 +21,17 @@ never hide behind the note.
 Funds that publish a section list instead of ``Level4.holdings`` (for example a
 fund-of-funds "Holding Breakdown" under ``portfolio.holdings_data``) are read
 from that list; the sections are concatenated in document order.
+
+The note ``weight_decimals=<n>`` records the finest precision printed for a
+weight in the document (percentages are printed to two decimals today), so
+validation can derive a rounding-aware weight-sum tolerance (D56).
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -85,6 +90,30 @@ _FX_WORD = re.compile(r"\b(?:fx|foreign exchange)\b", re.IGNORECASE)
 # Percentages are printed to two decimals, so a complete list can round to
 # within a few hundredths of 100. A shortfall beyond this is real.
 _COMPLETE_TOLERANCE = 0.05
+# A printed number as the document writes weights: optional sign, digits with
+# an optional fraction, and an optional exponent.
+_PRINTED_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$")
+
+
+def _printed_decimals(value: object) -> int | None:
+    """Decimal places printed for one weight value, or ``None`` if not numeric."""
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    match = _PRINTED_NUMBER.fullmatch(text)
+    if match is None:
+        return None
+    fraction = match.group(1) or match.group(2) or ""
+    exponent = int(match.group(3) or 0)
+    return max(len(fraction) - exponent, 0)
+
+
+def _weight_decimals(values: Iterable[object]) -> int:
+    """Finest number of decimals printed for the weights in one file (D56)."""
+    printed = [decimals for decimals in map(_printed_decimals, values) if decimals is not None]
+    return max(printed) if printed else 0
 
 
 def _date_value(value: Any) -> date | None:
@@ -227,18 +256,21 @@ class PurposeParser:
         holdings = _holding_rows(payload)
         rows: list[dict[str, Any]] = []
         unparsed_weights = 0
+        weight_cells: list[object] = []
         for holding in holdings:
             if not isinstance(holding, dict):
                 continue
             name = _text(holding.get("name")) or _text(holding.get("security_name"))
             if name is None or name.lower() in _TOTAL_NAMES:
                 continue
-            weight = parse_number(_text(holding.get("weight")))
+            weight_cell = holding.get("weight")
+            weight = parse_number(_text(weight_cell))
             if weight is None:
                 # A named row without a parseable weight may be a parsing gap;
                 # it must not be silently hidden behind partial_list (D52).
                 unparsed_weights += 1
                 continue
+            weight_cells.append(weight_cell)
             sector = _text(holding.get("sector"))
             country = _text(holding.get("geo")) or _text(holding.get("country"))
             asset_class = "cash" if fund_class == "cash" else _row_asset_class(name, fund_class)
@@ -263,7 +295,10 @@ class PurposeParser:
         declared = WeightUnit.percent
         weights = [row["weight"] for row in rows]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
-        notes = [f"declared_unit={declared.value}"]
+        notes = [
+            f"declared_unit={declared.value}",
+            f"weight_decimals={_weight_decimals(weight_cells)}",
+        ]
         if unit_check.suggested is not None:
             # The total matches the other unit: a real unit contradiction.
             notes.append(f"unit_check={unit_check.detail()}")

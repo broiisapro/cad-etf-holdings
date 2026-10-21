@@ -16,6 +16,17 @@ to ``normalize_exchange`` unchanged (never guessed here) and listed in the
 ``exchange_codes=`` note so the mapping table can be extended from real
 evidence.
 
+Market codes follow D57: a code that names one venue becomes the exchange MIC
+and the bare symbol stays the ticker; a Bloomberg country-composite code
+(``US``, ``CN``, ``JP``, ...) aggregates several venues, so the row keeps
+``exchange = null`` and ``security_ticker = "<TICKER> <CODE>"`` for the
+security master's composite-code split and optional FIGI lookup.
+
+The note ``weight_decimals=<n>`` records the finest precision printed for a
+weight in this file (scientific notation counts mantissa decimals minus the
+exponent), so validation can derive a rounding-aware weight-sum tolerance
+(D56).
+
 The file states no portfolio date; the fund page states "Holdings As at
 <date>", which the collector records as the raw file's as-of hint. The parser
 therefore uses ``raw.as_of_hint`` and refuses to guess a date.
@@ -30,12 +41,13 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from etfh.secmaster.identifiers import normalize_exchange
+from etfh.secmaster.identifiers import composite_code, normalize_exchange
 from etfh.types import FileFormat, ParsedFile, RawFile
 from etfh.units import WeightUnit, check_unit, normalize_weights, parse_number
 
@@ -83,6 +95,32 @@ _CURRENCIES = {
     "NOK",
     "ILS",
 }
+
+# A printed number as this file writes weights: optional sign, digits with an
+# optional fraction, and an optional exponent. Captures the fraction digits
+# and the exponent so scientific notation can be converted to decimal places.
+_PRINTED_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$")
+
+
+def _printed_decimals(value: object) -> int | None:
+    """Decimal places printed for one weight value, or ``None`` if not numeric."""
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    match = _PRINTED_NUMBER.fullmatch(text)
+    if match is None:
+        return None
+    fraction = match.group(1) or match.group(2) or ""
+    exponent = int(match.group(3) or 0)
+    return max(len(fraction) - exponent, 0)
+
+
+def _weight_decimals(values: Iterable[object]) -> int:
+    """Finest number of decimals printed for the weights in one file (D56)."""
+    printed = [decimals for decimals in map(_printed_decimals, values) if decimals is not None]
+    return max(printed) if printed else 0
 
 
 def _read_text(path: Path) -> str:
@@ -155,25 +193,42 @@ class EvolveParser:
             raise ValueError(f"{raw.path}: unexpected Evolve header {reader.fieldnames!r}")
         rows: list[dict[str, Any]] = []
         exchange_codes: set[str] = set()
+        weight_cells: list[object] = []
         for record in reader:
             raw_ticker = _text(record.get("TICKER")) or ""
             name = _text(record.get("SECURITY_NAME"))
             if name is None:
                 continue
-            weight = parse_number(_text(record.get("PORTFOLIO_MWEIGHT")))
+            weight_cell = record.get("PORTFOLIO_MWEIGHT")
+            weight = parse_number(_text(weight_cell))
             if weight is None:
                 continue
+            weight_cells.append(weight_cell)
             symbol, market, descriptor = _split_ticker(raw_ticker)
             asset_class = _asset_class(name, raw_ticker)
             derivative = asset_class == "derivative"
             if market is not None and asset_class != "cash":
                 exchange_codes.add(market)
+            if derivative:
+                exchange = normalize_exchange(market)
+                security_ticker = descriptor
+            else:
+                exchange = normalize_exchange(market)
+                code = composite_code(market)
+                if code is not None:
+                    # A country-composite code is not a venue (D57): keep it on
+                    # the ticker for the security master's composite split and
+                    # leave the exchange unknown.
+                    exchange = None
+                    security_ticker = f"{symbol} {code}"
+                else:
+                    security_ticker = symbol
             rows.append(
                 {
                     "security_name": name,
-                    "security_ticker": descriptor if derivative else symbol,
+                    "security_ticker": security_ticker,
                     # Cash rows carry a currency where equities carry a market.
-                    "exchange": None if asset_class == "cash" else normalize_exchange(market),
+                    "exchange": None if asset_class == "cash" else exchange,
                     "isin": _text(record.get("ISIN")),
                     "cusip": _text(record.get("CUSIP")),
                     "asset_class": asset_class,
@@ -192,7 +247,10 @@ class EvolveParser:
         declared = WeightUnit.fraction
         weights = [row["weight"] for row in rows]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
-        notes = [f"declared_unit={declared.value}"]
+        notes = [
+            f"declared_unit={declared.value}",
+            f"weight_decimals={_weight_decimals(weight_cells)}",
+        ]
         if unit_check.suggested is not None:
             notes.append(f"unit_check={unit_check.detail()}")
         if exchange_codes:
