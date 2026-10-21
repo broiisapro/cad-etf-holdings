@@ -168,6 +168,29 @@ def test_french_decimal_commas_never_mis_scaled(tmp_path: Path) -> None:
     assert float(_note(parsed.notes, "stated_total_fraction=")) == pytest.approx(0.1975)  # type: ignore[attr-defined]
 
 
+def test_weight_decimals_note_reports_the_smallest_printed_unit(tmp_path: Path) -> None:
+    one_decimal = write_qpd_pdf(
+        tmp_path / "one_decimal.pdf",
+        rows=[("Maplecrest Properties", "12.5"), ("Northgate Bank", "7.5")],
+        total="Total of the holdings listed above: 20.0% of net asset value",
+    )
+    assert "weight_decimals=1" in _parse(one_decimal).notes  # type: ignore[attr-defined]
+
+    two_decimals = write_qpd_pdf(
+        tmp_path / "two_decimals.pdf",
+        rows=[("Maplecrest Properties", "12.50"), ("Northgate Bank", "7.50")],
+        total="Total of the holdings listed above: 20.00% of net asset value",
+    )
+    assert "weight_decimals=2" in _parse(two_decimals).notes  # type: ignore[attr-defined]
+
+    whole = write_qpd_pdf(
+        tmp_path / "whole.pdf",
+        rows=[("Maplecrest Properties", "12"), ("Northgate Bank", "8")],
+        total="Total of the holdings listed above: 20% of net asset value",
+    )
+    assert "weight_decimals=0" in _parse(whole).notes  # type: ignore[attr-defined]
+
+
 def test_wrong_stated_total_is_reported_not_hidden(tmp_path: Path) -> None:
     rows = [("Maplecrest Properties", "20.00")]
     path = write_qpd_pdf(
