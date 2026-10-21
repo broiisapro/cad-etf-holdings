@@ -14,7 +14,14 @@ from pydantic import ValidationError
 from etfh.registry import Source, load_funds, load_sources
 from etfh.types import AssetClass, ParsedFile, RawFile
 from etfh.units import WeightUnit, check_unit
-from etfh.validate import QaFinding, ValidationConfig, is_excluded, validate_file
+from etfh.validate import (
+    TOLERANCE_CAP,
+    QaFinding,
+    ValidationConfig,
+    is_excluded,
+    tolerance_for,
+    validate_file,
+)
 from tests._validate_helpers import load_manifest, parse_fixture, raw_files
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -99,6 +106,29 @@ def _single_row_frame(total: float) -> pl.DataFrame:
     return _with_security_id(_frame([_row(weight=total)]), ["ISIN:CA600000AA15"])
 
 
+def _weighted_frame(weights: list[float]) -> pl.DataFrame:
+    """A frame of fictional, unmatched rows carrying exactly ``weights``."""
+    rows = [
+        _row(
+            security_name=f"Fictional Holding {index:03d}",
+            security_ticker=None,
+            exchange=None,
+            isin=None,
+            cusip=None,
+            weight=weight,
+        )
+        for index, weight in enumerate(weights)
+    ]
+    return _with_security_id(_frame(rows), [None] * len(weights))
+
+
+def _weights_summing_to(total: float, n_rows: int) -> list[float]:
+    """``n_rows`` weights (each <= 1.0) whose sum is ``total``."""
+    baseline = [0.01] * (n_rows - 2)
+    remaining = total - sum(baseline)
+    return [*baseline, remaining / 2.0, remaining / 2.0]
+
+
 def _weight_sum_errors(asset_class: AssetClass, total: float) -> set[str]:
     findings = validate_file(
         _parsed(_single_row_frame(total)),
@@ -115,8 +145,9 @@ def _tolerance_cases() -> list[tuple[AssetClass, float, bool]]:
         (AssetClass.fixed_income, 0.993, False),
         (AssetClass.balanced, 0.993, False),
     ]
-    for asset_class in (AssetClass.equity, AssetClass.balanced):
-        tolerance = _CONFIG.weight_sum_tolerance[asset_class]
+    single_row = _weighted_frame([1.0])
+    for asset_class in AssetClass:
+        tolerance = tolerance_for(single_row, [], asset_class, _CONFIG)
         high = 1.0 + tolerance
         low = 1.0 - tolerance
         cases.extend(
@@ -262,6 +293,135 @@ def test_weights_sum_tolerance_by_asset_class(
     assert (errors == {"weight_sum"}) is expect_error
 
 
+class TestRoundingTolerance:
+    """D56: tolerance = asset-class floor + printed rounding bound, capped."""
+
+    def test_tolerance_adds_the_rounding_bound_to_the_floor(self) -> None:
+        frame = _weighted_frame([0.01] * 100)
+        tolerance = tolerance_for(
+            frame,
+            ["declared_unit=percent", "weight_decimals=2"],
+            AssetClass.equity,
+            _CONFIG,
+        )
+        assert tolerance == pytest.approx(0.005 + 100 * 0.00005)
+        assert tolerance == pytest.approx(0.01)
+
+    def test_tolerance_is_capped_at_two_points(self) -> None:
+        frame = _weighted_frame([0.001] * 1000)
+        tolerance = tolerance_for(
+            frame,
+            ["declared_unit=percent", "weight_decimals=2"],
+            AssetClass.equity,
+            _CONFIG,
+        )
+        assert tolerance == TOLERANCE_CAP
+        assert tolerance == 0.02
+
+    def test_tolerance_never_drops_below_the_asset_class_floor(self) -> None:
+        frame = _weighted_frame([1.0])
+        assert tolerance_for(frame, [], AssetClass.equity, _CONFIG) == pytest.approx(
+            0.005 + 0.00005
+        )
+        assert tolerance_for(frame, [], AssetClass.fixed_income, _CONFIG) == pytest.approx(
+            0.01 + 0.00005
+        )
+        assert tolerance_for(frame, [], AssetClass.balanced, _CONFIG) == TOLERANCE_CAP
+
+    def test_missing_or_bad_weight_decimals_falls_back_to_the_unit_default(self) -> None:
+        frame = _weighted_frame([0.01] * 10)
+        expected = 0.005 + 10 * 0.00005
+        for notes in (
+            ["declared_unit=percent"],
+            ["declared_unit=percent", "weight_decimals=n/a"],
+            ["declared_unit=percent", "weight_decimals=-1"],
+        ):
+            assert tolerance_for(frame, notes, AssetClass.equity, _CONFIG) == pytest.approx(
+                expected
+            )
+
+    def test_100_rows_of_two_decimal_percents_summing_to_100_51_pass(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        weights = [0.01] * 99 + [0.0151]
+        assert sum(weights) == pytest.approx(1.0051)
+        findings = validate_file(
+            _parsed(
+                _weighted_frame(weights),
+                notes=["declared_unit=percent", "weight_decimals=2"],
+            ),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        assert findings == []
+
+    def test_rounding_tolerance_boundary_both_sides(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        tolerance = 0.01
+        below = 1.0 + tolerance - 1e-9
+        above = 1.0 + tolerance + 1e-9
+        for total, expect_error in ((below, False), (above, True)):
+            findings = validate_file(
+                _parsed(
+                    _weighted_frame(_weights_summing_to(total, 100)),
+                    notes=["declared_unit=percent", "weight_decimals=2"],
+                ),
+                source=source_factory(),
+                fund_asset_class=AssetClass.equity,
+                config=_CONFIG,
+            )
+            assert ("weight_sum" in _checks(findings)) is expect_error
+
+    def test_a_quarterly_file_summing_to_307_is_over_one(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        parsed = _parsed(
+            _weighted_frame([1.0, 1.0, 1.0, 0.07]),
+            notes=[
+                "declared_unit=percent",
+                "weight_decimals=2",
+                "stated_total_fraction=3.07",
+                "partial_list=true",
+            ],
+        )
+        findings = validate_file(
+            parsed,
+            source=_SOURCES["syn_pdf"],
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        over_one = [finding for finding in findings if finding.check == "weight_sum_over_one"]
+        assert len(over_one) == 1
+        assert over_one[0].severity == "error"
+        assert "sum=3.0700" in over_one[0].detail
+        assert "exceeds 1+tolerance" in over_one[0].detail
+        assert "weight_sum" not in _checks(findings)
+        assert is_excluded(findings)
+
+    def test_a_partial_daily_file_over_one_is_still_an_error(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        findings = validate_file(
+            _parsed(
+                _weighted_frame(_weights_summing_to(1.03, 100)),
+                notes=[
+                    "declared_unit=percent",
+                    "weight_decimals=2",
+                    "partial_list=true",
+                ],
+            ),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        assert _error_checks(findings) == {"weight_sum_over_one"}
+        assert any(
+            finding.check == "weight_sum" and finding.severity == "warning" for finding in findings
+        )
+
+
 def _validate_raw(raw: RawFile) -> list[QaFinding]:
     return validate_file(
         parse_fixture(raw),
@@ -298,7 +458,8 @@ class TestFixtureFiles:
                     finding.detail for finding in _validate_raw(raw) if finding.severity == "error"
                 ]
         assert any(
-            "sum=0.8500" in detail and "expected=1±0.005" in detail for detail in details["SYNC"]
+            "sum=0.8500" in detail and "expected=1±0.006" in detail and "rows=20" in detail
+            for detail in details["SYNC"]
         )
         assert any(
             "ISIN:CA600000AA15" in detail and "appears 2 times" in detail

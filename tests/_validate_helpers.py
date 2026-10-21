@@ -91,6 +91,20 @@ def _frame(rows: list[dict[str, object]]) -> pl.DataFrame:
     return frame.with_columns(pl.Series("security_id", security_ids, dtype=pl.String))
 
 
+def raw_decimals(value: object) -> int:
+    """Decimals printed for one raw weight value (``7.77`` -> 2, ``0.0908`` -> 4)."""
+    text = repr(value) if isinstance(value, float) else str(value)
+    text = text.strip().rstrip("%")
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1])
+
+
+def printed_decimals(values: list[object]) -> int:
+    """The most decimals printed among a file's raw weight values."""
+    return max((raw_decimals(value) for value in values), default=0)
+
+
 def _base_row(raw: RawFile, as_of: date, **values: object) -> dict[str, object]:
     row: dict[str, object] = {
         "fund_ticker": raw.fund_ticker,
@@ -131,7 +145,9 @@ def _parse_csv(raw: RawFile) -> ParsedFile:
     unit = WeightUnit.percent if "Weight (%)" in (reader.fieldnames or []) else WeightUnit.fraction
     weight_column = "Weight (%)" if unit is WeightUnit.percent else "Weight"
     parsed_rows: list[dict[str, object]] = []
+    weight_texts: list[object] = []
     for row in reader:
+        weight_texts.append(row[weight_column])
         weight = float(row[weight_column]) / (100.0 if unit is WeightUnit.percent else 1.0)
         parsed_rows.append(
             _base_row(
@@ -155,7 +171,10 @@ def _parse_csv(raw: RawFile) -> ParsedFile:
         as_of_date=as_of,
         published_at=None,
         frame=_frame(parsed_rows),
-        notes=[f"declared_unit={unit.value}"],
+        notes=[
+            f"declared_unit={unit.value}",
+            f"weight_decimals={printed_decimals(weight_texts)}",
+        ],
     )
 
 
@@ -173,9 +192,11 @@ def _parse_xlsx(raw: RawFile) -> ParsedFile:
     assert as_of is not None, f"{raw.path}: no as-of date"
     assert header_index is not None, f"{raw.path}: no holdings header"
     parsed_rows: list[dict[str, object]] = []
+    weight_values: list[object] = []
     for row in rows[header_index + 1 :]:
         if row[0] is None:
             continue
+        weight_values.append(row[8])
         parsed_rows.append(
             _base_row(
                 raw,
@@ -198,13 +219,17 @@ def _parse_xlsx(raw: RawFile) -> ParsedFile:
         as_of_date=as_of,
         published_at=None,
         frame=_frame(parsed_rows),
-        notes=["declared_unit=fraction"],
+        notes=[
+            "declared_unit=fraction",
+            f"weight_decimals={printed_decimals(weight_values)}",
+        ],
     )
 
 
 def _parse_json(raw: RawFile) -> ParsedFile:
     payload = json.loads(raw.path.read_text(encoding="utf-8"))
     as_of = date.fromisoformat(payload["portfolio"]["dt"])
+    holdings = payload["portfolio"]["holdings"]
     parsed_rows = [
         _base_row(
             raw,
@@ -222,14 +247,17 @@ def _parse_json(raw: RawFile) -> ParsedFile:
             shares=float(holding["shares"]),
             market_value=float(holding["market_value"]),
         )
-        for holding in payload["portfolio"]["holdings"]
+        for holding in holdings
     ]
     return ParsedFile(
         raw=raw,
         as_of_date=as_of,
         published_at=None,
         frame=_frame(parsed_rows),
-        notes=["declared_unit=fraction"],
+        notes=[
+            "declared_unit=fraction",
+            f"weight_decimals={printed_decimals([holding['weight'] for holding in holdings])}",
+        ],
     )
 
 
@@ -240,6 +268,7 @@ def _parse_pdf(raw: RawFile) -> ParsedFile:
     published_at: datetime | None = None
     stated_total: float | None = None
     table: list[tuple[str, float]] = []
+    weight_texts: list[object] = []
     in_table = False
     for line in text.splitlines():
         if line.startswith("Summary of Investment Portfolio as at "):
@@ -259,6 +288,7 @@ def _parse_pdf(raw: RawFile) -> ParsedFile:
                 value = float(value_text)
             except ValueError:
                 continue
+            weight_texts.append(value_text)
             table.append((name.strip(), value / 100.0))
     assert as_of is not None, f"{raw.path}: no as-of date"
     assert stated_total is not None, f"{raw.path}: no stated total"
@@ -280,6 +310,7 @@ def _parse_pdf(raw: RawFile) -> ParsedFile:
         frame=_frame(parsed_rows),
         notes=[
             "declared_unit=percent",
+            f"weight_decimals={printed_decimals(weight_texts)}",
             f"stated_total_fraction={stated_total}",
             "partial_list=true",
         ],
