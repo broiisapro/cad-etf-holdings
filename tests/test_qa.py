@@ -12,7 +12,14 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from etfh.qa import exit_code, render, summarize, unmatched_shares
+from etfh.qa import (
+    QaSummary,
+    UnmatchedQuality,
+    exit_code,
+    render,
+    summarize,
+    unmatched_shares,
+)
 from etfh.schema import DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_HOLDINGS_CHANGES, DDL_QA_EVENTS
 
 SHA_A = "a" * 64
@@ -338,29 +345,83 @@ def _unmatched_version(
     )
 
 
-def test_issuer_medians_and_worst_funds(tmp_path: Path) -> None:
+def _quality(summary: QaSummary, kind: str) -> UnmatchedQuality:
+    return next(quality for quality in summary.unmatched_quality if quality.kind == kind)
+
+
+def test_daily_and_quarterly_quality_are_separate(tmp_path: Path) -> None:
     con = _connect(tmp_path, sources=True)
     _source(con, "evolve_daily", issuer="evolve", kind="daily_holdings")
     _source(con, "bmo_daily", issuer="bmo", kind="daily_holdings")
+    _source(con, "vanguard_qpd", issuer="vanguard", kind="quarterly_disclosure", format="pdf")
     _unmatched_version(
         con, 0, SHA_A, fund="ESPX", source="evolve_daily", unmatched=0.5, matched=0.5
     )
     _unmatched_version(con, 2, SHA_B, fund="ZEM", source="bmo_daily", unmatched=0.2, matched=0.8)
     _unmatched_version(con, 4, SHA_C, fund="XEQT", source="bmo_daily", unmatched=0.1, matched=0.9)
+    _unmatched_version(con, 6, SHA_D, fund="VFV", source="vanguard_qpd", unmatched=0.9, matched=0.1)
+    _unmatched_version(
+        con, 8, "e" * 64, fund="VIU", source="vanguard_qpd", unmatched=0.3, matched=0.7
+    )
     summary = summarize(con)
-    assert summary.unmatched_issuer_medians == (
+    daily = _quality(summary, "daily")
+    quarterly = _quality(summary, "quarterly")
+    assert daily.issuer_medians == (
         ("bmo", pytest.approx(0.15)),
         ("evolve", pytest.approx(0.5)),
     )
-    assert [row.fund_ticker for row in summary.unmatched_worst_funds] == ["ESPX", "ZEM", "XEQT"]
+    assert [row.fund_ticker for row in daily.worst_funds] == ["ESPX", "ZEM", "XEQT"]
+    assert quarterly.issuer_medians == (("vanguard", pytest.approx(0.6)),)
+    assert [row.fund_ticker for row in quarterly.worst_funds] == ["VFV", "VIU"]
     text = render(summary)
     assert "unmatched weight share (included files):" in text
-    assert "  issuer median:" in text
-    assert "    bmo 15.00%" in text
-    assert "    evolve 50.00%" in text
-    assert "  worst funds:" in text
-    assert "    ESPX as_of=2026-11-02 source=evolve_daily share=50.00%" in text
-    assert "    XEQT as_of=2026-11-02 source=bmo_daily share=10.00%" in text
+    assert "  daily files:" in text
+    assert "  quarterly files:" in text
+    assert "      bmo 15.00%" in text
+    assert "      evolve 50.00%" in text
+    assert "      vanguard 60.00%" in text
+    assert "    worst funds:" in text
+    assert "      ESPX as_of=2026-11-02 source=evolve_daily share=50.00%" in text
+    assert "      XEQT as_of=2026-11-02 source=bmo_daily share=10.00%" in text
+    assert "      VFV as_of=2026-11-02 source=vanguard_qpd share=90.00%" in text
+    # The daily section must not absorb the quarterly median or vice versa.
+    daily_section = text.split("  daily files:", 1)[1].split("  quarterly files:", 1)[0]
+    assert "vanguard" not in daily_section
+    assert "bmo" not in text.split("  quarterly files:", 1)[1]
+
+
+def test_worst_funds_only_lists_positive_shares(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "evolve_daily", issuer="evolve", kind="daily_holdings")
+    _source(con, "vanguard_qpd", issuer="vanguard", kind="quarterly_disclosure", format="pdf")
+    _unmatched_version(
+        con, 0, SHA_A, fund="ZERO1", source="evolve_daily", unmatched=0.0, matched=0.5
+    )
+    _unmatched_version(
+        con, 2, SHA_B, fund="ZERO2", source="evolve_daily", unmatched=0.0, matched=0.5
+    )
+    _unmatched_version(
+        con, 4, SHA_C, fund="HAS1", source="evolve_daily", unmatched=0.4, matched=0.6
+    )
+    _unmatched_version(con, 6, SHA_D, fund="VFV", source="vanguard_qpd", unmatched=0.9, matched=0.1)
+    summary = summarize(con)
+    assert [row.fund_ticker for row in _quality(summary, "daily").worst_funds] == ["HAS1"]
+    assert [row.fund_ticker for row in _quality(summary, "quarterly").worst_funds] == ["VFV"]
+    text = render(summary)
+    assert "ZERO1 as_of=" not in text
+    assert "ZERO2 as_of=" not in text
+    assert "    worst funds: none" not in text
+
+
+def test_synthetic_quarterly_source_is_classified_quarterly(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_pdf", issuer="synthetic", kind="synthetic", format="pdf")
+    _source(con, "syn_csv", issuer="synthetic", kind="synthetic", format="csv")
+    _unmatched_version(con, 0, SHA_A, fund="SYNF", source="syn_pdf", unmatched=0.8, matched=0.2)
+    _unmatched_version(con, 2, SHA_B, fund="SYNA", source="syn_csv", unmatched=0.1, matched=0.9)
+    summary = summarize(con)
+    assert [row.fund_ticker for row in _quality(summary, "daily").worst_funds] == ["SYNA"]
+    assert [row.fund_ticker for row in _quality(summary, "quarterly").worst_funds] == ["SYNF"]
 
 
 def test_worst_funds_take_the_worst_file_per_fund_and_cap_at_ten(tmp_path: Path) -> None:
@@ -392,12 +453,14 @@ def test_worst_funds_take_the_worst_file_per_fund_and_cap_at_ten(tmp_path: Path)
         weight=0.1,
     )
     summary = summarize(con)
-    assert len(summary.unmatched_worst_funds) == 10
-    assert summary.unmatched_worst_funds[0].fund_ticker == "F00"
-    assert summary.unmatched_worst_funds[0].share == pytest.approx(0.9)
-    assert [row.fund_ticker for row in summary.unmatched_worst_funds[1:]] == [
+    worst_funds = _quality(summary, "daily").worst_funds
+    assert len(worst_funds) == 10
+    assert worst_funds[0].fund_ticker == "F00"
+    assert worst_funds[0].share == pytest.approx(0.9)
+    assert [row.fund_ticker for row in worst_funds[1:]] == [
         f"F{index:02d}" for index in range(11, 2, -1)
     ]
+    assert _quality(summary, "quarterly").worst_funds == ()
 
 
 def test_max_unmatched_share_checks_only_daily_files_and_exits_three(tmp_path: Path) -> None:
@@ -415,7 +478,11 @@ def test_max_unmatched_share_checks_only_daily_files_and_exits_three(tmp_path: P
     text = render(summary)
     assert "unmatched threshold 10.00% exceeded by 1 included daily file(s):" in text
     assert "  ESPX as_of=2026-11-02 source=evolve_daily share=50.00%" in text
-    assert "Vanguard" not in text
+    # The quarterly file is reported in its own quality section, never as a
+    # threshold breach.
+    threshold_section = text.split("unmatched threshold", 1)[1]
+    assert "VFV" not in threshold_section
+    assert "      VFV as_of=2026-11-02 source=vanguard_qpd share=90.00%" in text
 
 
 def test_max_unmatched_share_not_checked_by_default(tmp_path: Path) -> None:
@@ -440,6 +507,18 @@ def test_max_unmatched_share_below_the_threshold_passes(tmp_path: Path) -> None:
     assert summary.unmatched_over_threshold == ()
     assert exit_code(summary) == 0
     assert "unmatched threshold 20.00%: no included daily file exceeds it" in render(summary)
+
+
+def test_a_quarterly_file_never_trips_the_threshold(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "vanguard_qpd", issuer="vanguard", kind="quarterly_disclosure", format="pdf")
+    _unmatched_version(con, 0, SHA_A, fund="VFV", source="vanguard_qpd", unmatched=0.9, matched=0.1)
+    summary = summarize(con, max_unmatched_share=0.1)
+    assert summary.unmatched_over_threshold == ()
+    assert exit_code(summary) == 0
+    text = render(summary)
+    assert "unmatched threshold 10.00%: no included daily file exceeds it" in text
+    assert "unmatched threshold 10.00% exceeded" not in text
 
 
 def test_max_unmatched_share_without_a_sources_table_checks_every_file(tmp_path: Path) -> None:
@@ -470,12 +549,47 @@ def test_invalid_threshold_rejected(tmp_path: Path) -> None:
         summarize(con, max_unmatched_share=-0.1)
 
 
-def test_render_is_deterministic(tmp_path: Path) -> None:
-    con = _connect(tmp_path, sources=True)
-    _source(con, "syn_csv", issuer="synthetic", kind="daily_holdings")
-    _file_version(con, SHA_A, fund="SYNC", status="excluded")
-    _qa_event(con, SHA_A, fund="SYNC", check="weight_sum")
-    _unmatched_version(con, 0, SHA_B, fund="SYNB", source="syn_csv", unmatched=0.3, matched=0.7)
-    first = render(summarize(con, max_unmatched_share=0.1))
-    second = render(summarize(con, max_unmatched_share=0.1))
-    assert first == second
+def _report_with_insertion_order(root: Path, *, reverse: bool) -> str:
+    """Render the same database content with rows inserted in either order."""
+    root.mkdir(parents=True, exist_ok=True)
+    con = _connect(root, sources=True)
+    sources = [
+        ("evolve_daily", "evolve", "daily_holdings", "xlsx"),
+        ("bmo_daily", "bmo", "daily_holdings", "xlsx"),
+        ("vanguard_qpd", "vanguard", "quarterly_disclosure", "pdf"),
+    ]
+    for source_id, issuer, kind, source_format in reversed(sources) if reverse else sources:
+        _source(con, source_id, issuer=issuer, kind=kind, format=source_format)
+    versions = [
+        (SHA_A, "ESPX", "evolve_daily", 0.5, 0.5),
+        (SHA_B, "ZEM", "bmo_daily", 0.2, 0.8),
+        (SHA_C, "XEQT", "bmo_daily", 0.1, 0.9),
+        (SHA_D, "ZERO", "bmo_daily", 0.0, 0.5),
+        ("e" * 64, "VFV", "vanguard_qpd", 0.9, 0.1),
+        ("f" * 64, "VIU", "vanguard_qpd", 0.3, 0.7),
+    ]
+    base_index = {fund: index * 2 for index, (_sha, fund, *_rest) in enumerate(versions)}
+    for sha, fund, source_id, unmatched, matched in reversed(versions) if reverse else versions:
+        _unmatched_version(
+            con,
+            base_index[fund],
+            sha,
+            fund=fund,
+            source=source_id,
+            unmatched=unmatched,
+            matched=matched,
+        )
+    _file_version(con, "9" * 64, fund="SYNC", source="evolve_daily", status="excluded")
+    _qa_event(con, "9" * 64, fund="SYNC", source="evolve_daily", check="weight_sum")
+    text = render(summarize(con, max_unmatched_share=0.1))
+    con.close()
+    return text
+
+
+def test_render_does_not_depend_on_insertion_order(tmp_path: Path) -> None:
+    forward = _report_with_insertion_order(tmp_path / "forward", reverse=False)
+    backward = _report_with_insertion_order(tmp_path / "backward", reverse=True)
+    assert forward == backward
+    assert "  daily files:" in forward
+    assert "  quarterly files:" in forward
+    assert forward.count("    worst funds:") == 2
