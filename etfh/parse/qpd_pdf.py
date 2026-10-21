@@ -118,6 +118,7 @@ class QpdRules:
 
     name: str = "generic"
     wrapped_names: bool = False
+    max_weight_percent: float = 100.0
     as_of_patterns: tuple[str, ...] = (
         rf"\bas\s+(?:at|of)\s+({_DATE_TOKEN})",
         rf"\bfor\s+the\s+(?:quarter|period|year|six\s+months)\s+ended\s+({_DATE_TOKEN})",
@@ -177,12 +178,27 @@ QPD_RULES: dict[str, QpdRules] = {}
 # left, the Top 25 Holdings on the right. The document's font kerning makes
 # pdfplumber merge adjacent words at the default tolerance, so the rules lower
 # it to 1. The sum of the listed holdings is printed unlabelled at the bottom
-# of the right column, just above "Total net asset value".
+# of the right column, just above "Total net asset value". Long fund names wrap
+# above their weight line (VXC), so the wrapped-name pass is enabled; the prose
+# and footnotes outside the table are skipped explicitly.
 VANGUARD_RULES = replace(
     DEFAULT_RULES,
     name="vanguard_ca",
     x_tolerance=1.0,
     column_scope="right",
+    wrapped_names=True,
+    sector_grouping=False,
+    section_start_patterns=(r"^%\s+of\b",),
+    skip_patterns=(
+        r"^net\s+asset\s+value$",
+        r"^underlying\s+fund$",
+        r"^total\s+net\s+asset\s+value\b",
+        r"^\d+(?:\.\d+)?%?$",
+        r"^\*",
+        r"^portfolio\s+transactions\b",
+        r"^[A-Z]{1,6}\s+\d{6}$",
+        *DEFAULT_RULES.skip_patterns,
+    ),
     total_patterns=(
         r"([<>]?\s*-?\d[\d.,]*)\s*\n\s*total\s+net\s+asset\s+value",
         r"total\s+investments?\s*:?\s*([<>]?\s*-?\d[\d\s.,]*\s*%)",
@@ -240,6 +256,7 @@ PURPOSE_RULES = replace(
     column_scope="right",
     orphan_weight_join=True,
     wrapped_names=True,
+    max_weight_percent=150.0,
     sector_grouping=False,
     section_start_patterns=(r"^top\s*25\s+holdings\b",),
     partial_section_pattern=r"^top\s*25\s+holdings\b",
@@ -707,35 +724,49 @@ def _join_orphan_weights(
     return merged
 
 
-def _weight_column_x1(lines: Sequence[Sequence[_Segment]]) -> float | None:
+def _weight_cell_value(text: str, rules: QpdRules) -> float | None:
+    """Percent value of a weight cell, allowing issuer-declared overweight lines."""
+    if not _NUMERIC_SEGMENT.match(text):
+        return None
+    value = _number_value(text)
+    if value is None or abs(value) > rules.max_weight_percent:
+        return None
+    return value
+
+
+def _weight_column_x1(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> float | None:
     """Right edge of the weight cell column on one page, when it is printed.
 
     Weight cells are right-aligned, so the rightmost numeric segment that is a
     plausible weight marks the column. Continuation lines print strike prices
-    and coupons inside the name column, well to the left of it.
+    and coupons inside the name column, well to the left of it. The cell edge
+    moves by the width of a trailing ``%`` (about six points), so callers
+    compare against it with a small tolerance.
     """
     edges = [
         segment.x1
         for line in lines
         for segment in line
-        if segment.x1 is not None and _weight_value(segment.text) is not None
+        if segment.x1 is not None and _weight_cell_value(segment.text, rules) is not None
     ]
     return max(edges) if edges else None
 
 
-def _is_weight_cell(segment: _Segment, column_x1: float) -> bool:
+def _is_weight_cell(segment: _Segment, column_x1: float, rules: QpdRules) -> bool:
     return (
         segment.x1 is not None
-        and segment.x1 >= column_x1 - 1.5
-        and _weight_value(segment.text) is not None
+        and segment.x1 >= column_x1 - 8.0
+        and _weight_cell_value(segment.text, rules) is not None
     )
 
 
-def _line_has_weight(segments: Sequence[_Segment], column_x1: float) -> bool:
-    return any(_is_weight_cell(segment, column_x1) for segment in segments)
+def _line_has_weight(segments: Sequence[_Segment], column_x1: float, rules: QpdRules) -> bool:
+    return any(_is_weight_cell(segment, column_x1, rules) for segment in segments)
 
 
-def _weight_line_tops(lines: Sequence[Sequence[_Segment]], column_x1: float) -> list[float]:
+def _weight_line_tops(
+    lines: Sequence[Sequence[_Segment]], column_x1: float, rules: QpdRules
+) -> list[float]:
     """Top positions of the weight cells themselves.
 
     An orphan weight that was merged back into its name line keeps the top it
@@ -747,12 +778,18 @@ def _weight_line_tops(lines: Sequence[Sequence[_Segment]], column_x1: float) -> 
         tops.extend(
             segment.top
             for segment in segments
-            if segment.top is not None and _is_weight_cell(segment, column_x1)
+            if segment.top is not None and _is_weight_cell(segment, column_x1, rules)
         )
     return sorted(tops)
 
 
 _SENTENCE_BREAK = re.compile(r"[.!?]\s+\w")
+_INCOMPLETE_NAME_END = re.compile(
+    r"(?:,|/|-|\u2013|\u2014|\b(?:at|of|and|the|on|for|to|in|with|due|callable|variable|"
+    r"rate|class|series)|"
+    r"\b(?:CAD|USD|EUR|GBP|JPY|AUD|CHF))$",
+    re.IGNORECASE,
+)
 
 
 def _is_name_fragment(text: str) -> bool:
@@ -768,22 +805,38 @@ def _is_name_fragment(text: str) -> bool:
     return len(words) <= 12 or any(character.isdigit() for character in text)
 
 
-def _nearest_weight_is_below(top: float, weight_tops: Sequence[float]) -> bool:
-    """True when the closest weight cell belongs to the next row.
+def _looks_incomplete(name: str) -> bool:
+    """True when a printed name ends mid-phrase and a wrapped tail may follow."""
+    return bool(_INCOMPLETE_NAME_END.search(name.strip()))
+
+
+def _weight_gaps(top: float, weight_tops: Sequence[float]) -> tuple[float | None, float | None]:
+    """Distance to the closest weight cell below and above a bare line."""
+    below = [candidate for candidate in weight_tops if candidate > top]
+    above = [candidate for candidate in weight_tops if candidate < top]
+    down = min(below) - top if below else None
+    up = top - max(above) if above else None
+    return down, up
+
+
+def _is_prefix_line(top: float, weight_tops: Sequence[float], previous_name: str | None) -> bool:
+    """True when a bare line starts the next row rather than ending the previous.
 
     A line without a weight cell is either the first part of a wrapped name
     (the weight follows on a later line) or the tail of the previous row (the
     weight was printed before it). The vertical distance to the adjacent weight
-    cells decides; a tie counts as a tail, which keeps a stray continuation
-    attached to the row it follows.
+    cells decides. When the two are equally close, the previous name decides:
+    a name ending mid-phrase (``..., Callable,`` or ``... at CAD``) is followed
+    by its tail, while a complete name is followed by a new wrapped name.
     """
-    below = [candidate for candidate in weight_tops if candidate > top]
-    above = [candidate for candidate in weight_tops if candidate < top]
-    if not below:
+    down, up = _weight_gaps(top, weight_tops)
+    if down is None:
         return False
-    if not above:
+    if up is None:
         return True
-    return min(below) - top < top - max(above)
+    if abs(down - up) <= 2.0:
+        return previous_name is None or not _looks_incomplete(previous_name)
+    return down < up
 
 
 def _prepend_text(segments: Sequence[_Segment], prefix: str) -> list[_Segment]:
@@ -793,6 +846,48 @@ def _prepend_text(segments: Sequence[_Segment], prefix: str) -> list[_Segment]:
     return [_Segment(f"{prefix} {first.text}".strip(), first.top, first.x1), *rest]
 
 
+def _wrapped_rows(
+    segments: Sequence[_Segment],
+    column_x1: float,
+    sector: str | None,
+    rules: QpdRules,
+) -> list[_Row]:
+    """Build rows for a layout whose weight cells sit in a fixed column.
+
+    In these layouts a holding is one name cell plus one weight cell, and a
+    name may wrap over several lines (the caller joins those first). Reading
+    the weight from the cell itself keeps a position printed above 100% of NAV
+    (a fund with negative other net assets) from being mistaken for a
+    continuation number. Lines with only a weight cell are the unlabelled
+    listed total and produce no rows.
+    """
+    weight_cells = [segment for segment in segments if _is_weight_cell(segment, column_x1, rules)]
+    if len(weight_cells) != 1:
+        return _entries_from_segments(segments, sector or "Unknown", rules)
+    weight_cell = weight_cells[0]
+    weight = _weight_cell_value(weight_cell.text, rules)
+    if weight is None:
+        return []
+    name_parts = [
+        cleaned
+        for segment in segments
+        if segment is not weight_cell
+        and (cleaned := _clean(segment.text))
+        and not _ignored_segment(cleaned, rules)
+    ]
+    name = _clean_name(" ".join(name_parts), rules)
+    if not name:
+        return []
+    return [
+        _Row(
+            name=name,
+            weight=weight,
+            sector=sector or "Unknown",
+            decimals=_decimal_places(weight_cell.text),
+        )
+    ]
+
+
 def _rows_from_lines(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> _Extraction:
     rows: list[_Row] = []
     sector: str | None = None
@@ -800,8 +895,10 @@ def _rows_from_lines(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> _E
     active = not rules.section_start_patterns
     if rules.orphan_weight_join:
         lines = _join_orphan_weights(lines, rules)
-    weight_column = _weight_column_x1(lines) if rules.wrapped_names else None
-    weight_tops = _weight_line_tops(lines, weight_column) if weight_column is not None else []
+    weight_column = _weight_column_x1(lines, rules) if rules.wrapped_names else None
+    weight_tops = (
+        _weight_line_tops(lines, weight_column, rules) if weight_column is not None else []
+    )
     pending_parts: list[str] = []
     for index, segments in enumerate(lines):
         text = _line_text(segments)
@@ -828,10 +925,10 @@ def _rows_from_lines(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> _E
             continue
         if _is_total_line(text, rules):
             continue
-        if weight_column is not None and not _line_has_weight(segments, weight_column):
+        if weight_column is not None and not _line_has_weight(segments, weight_column, rules):
             if rules.sector_grouping and _sector_candidate(text):
                 has_following_holding = any(
-                    _line_has_weight(following, weight_column)
+                    _line_has_weight(following, weight_column, rules)
                     for following in lines[index + 1 : index + 3]
                 )
                 if has_following_holding:
@@ -840,7 +937,8 @@ def _rows_from_lines(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> _E
             top = _line_top(segments)
             if not _is_name_fragment(text):
                 continue
-            if top is not None and _nearest_weight_is_below(top, weight_tops):
+            previous_name = rows[-1].name if rows else None
+            if top is not None and _is_prefix_line(top, weight_tops, previous_name):
                 pending_parts.append(text)
             elif rows:
                 rows[-1] = replace(rows[-1], name=_clean_name(f"{rows[-1].name} {text}", rules))
@@ -848,7 +946,10 @@ def _rows_from_lines(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> _E
         if pending_parts:
             segments = _prepend_text(segments, " ".join(pending_parts))
             pending_parts = []
-        parsed = _entries_from_segments(segments, sector or "Unknown", rules)
+        if weight_column is not None:
+            parsed = _wrapped_rows(segments, weight_column, sector, rules)
+        else:
+            parsed = _entries_from_segments(segments, sector or "Unknown", rules)
         if parsed:
             for row in parsed:
                 if _is_subtotal(row.name, sector):
@@ -962,6 +1063,9 @@ class QpdPdfParser:
             raw_weights.append(row.weight)
             sectors.append(row.sector)
             classes.append(_asset_class(row.name))
+        overweight = sorted({value for value in raw_weights if abs(value) > 100.0})
+        if overweight:
+            raw_weights = [max(-100.0, min(value, 100.0)) for value in raw_weights]
         weights = normalize_weights(raw_weights, WeightUnit.percent)
         count = len(names)
         frame = pl.DataFrame(
@@ -1008,6 +1112,9 @@ class QpdPdfParser:
             default=2,
         )
         notes.append(f"weight_decimals={decimals}")
+        if overweight:
+            rendered = ",".join(f"{value:g}" for value in overweight)
+            notes.append(f"weight_capped_percent={rendered}")
         notes.append("partial_list=true")
         if stated_total is not None and not omit_stated_total:
             stated_total_fraction = stated_total / 100.0

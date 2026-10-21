@@ -15,7 +15,12 @@ from etfh.parse.qpd_pdf import QPD_RULES, QpdPdfParser
 from etfh.registry import load_sources
 from etfh.schema import ParsedHoldings
 from etfh.storage import RawStore
-from tests._qpd_helpers import qpd_fund, raw_file_for_pdf, write_vanguard_lookalike
+from tests._qpd_helpers import (
+    qpd_fund,
+    raw_file_for_pdf,
+    write_vanguard_lookalike,
+    write_vanguard_wrapped_lookalike,
+)
 
 
 def _lookalike(tmp_path: Path) -> Path:
@@ -53,6 +58,40 @@ def test_vanguard_lookalike_parses_to_stated_total(tmp_path: Path) -> None:
     assert "Financials" not in names
     assert "Other assets and liabilities (net)" not in names
     assert parsed.frame["sector"].unique().to_list() == ["Unknown"]
+
+
+def test_vanguard_wrapped_name_keeps_the_full_fund_name(tmp_path: Path) -> None:
+    """VXC wraps a fund name above the line that carries its weight.
+
+    The name must be joined across the two lines, the unlabelled listed total
+    on its own line must not become a suffix, and a weight printed without a
+    ``%`` (six points left of one printed with it) must still be recognised.
+    """
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_vanguard_wrapped_lookalike(tmp_path / "vanguard_wrapped.pdf"),
+            source_id="vanguard_ca_qpd",
+            fund_ticker="VWXC",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    names = parsed.frame["security_name"].to_list()
+    assert names == [
+        "Vanguard Fictional Large-Cap ETF*",
+        "Vanguard Fictional Developed All Cap ex North America Index ETF**",
+        "Vanguard Fictional Emerging Markets ETF*",
+        "Cash",
+    ]
+    assert parsed.frame["weight"].to_list() == pytest.approx([0.125, 0.264, 0.11, 0.003])
+    assert round(float(parsed.frame["weight"].sum()), 4) == 0.502
+    stated = float(
+        next(
+            note.split("=", 1)[1]
+            for note in parsed.notes
+            if note.startswith("stated_total_fraction=")
+        )
+    )
+    assert stated == pytest.approx(0.502)
 
 
 @pytest.mark.network
