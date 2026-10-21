@@ -21,6 +21,8 @@ from typer.testing import CliRunner
 from etfh.analytics import overlap
 from etfh.build import BuildResult, build
 from etfh.cli import app
+from etfh.secmaster.overrides import Override
+from etfh.secmaster.resolve import SecurityMaster
 from tests._build_helpers import CONFIG_DIR, RAW_ROOT
 
 runner = CliRunner()
@@ -131,6 +133,74 @@ def test_review_workflow_assigns_approved_names_on_the_next_build(
     assert overlap_before.overlap == 0.0
     assert overlap_after.overlap > 0.0
     assert overlap_after.common.height > 0
+
+    # approving a name must never rewrite a row that already has its own id
+    con = _connect(tmp_path / "after")
+    try:
+        con.execute(f"ATTACH '{tmp_path / 'before' / 'etfh.duckdb'}' AS before (READ_ONLY)")
+        changed = con.execute(
+            """
+            SELECT count(*)
+            FROM main.holdings a
+            JOIN before.holdings b
+              ON a.fund_ticker = b.fund_ticker
+             AND a.as_of_date = b.as_of_date
+             AND a.file_version = b.file_version
+             AND a.source_id = b.source_id
+             AND a.security_name = b.security_name
+             AND a.security_ticker IS NOT DISTINCT FROM b.security_ticker
+             AND a.isin IS NOT DISTINCT FROM b.isin
+             AND a.cusip IS NOT DISTINCT FROM b.cusip
+             AND a.currency IS NOT DISTINCT FROM b.currency
+            WHERE b.security_id IS NOT NULL
+              AND a.security_id IS DISTINCT FROM b.security_id
+            """
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert changed == 0
+
+
+def test_a_global_name_override_never_rewrites_an_identified_row() -> None:
+    """Global name overrides identify name-only rows; identifiers keep precedence.
+
+    A review approval is global by name, and the same name can appear on a row
+    that already carries an ISIN or an exchange-qualified ticker. Those rows
+    keep their own id (D8, D23), otherwise approving a name could merge two
+    securities (for example two share classes or two bonds of one issuer).
+    """
+    override = Override(
+        match_type="name",
+        match_value="*|NORTHWIND MATERIALS",
+        security_id="FIGI:BBG000000001",
+        reviewer="review test",
+        reviewed_on=date(2026, 10, 21),
+    )
+    frame = pl.DataFrame(
+        {
+            "fund_ticker": ["NAME", "ISIN", "TICKER", "CASH"],
+            "security_name": [
+                "Northwind Materials Inc.",
+                "Northwind Materials Inc.",
+                "Northwind Materials Inc.",
+                "Cash and Cash Equivalents",
+            ],
+            "security_ticker": [None, None, "NWM", None],
+            "exchange": [None, None, "XTSE", None],
+            "isin": [None, "CA600000AA15", None, None],
+            "cusip": [None, None, None, None],
+            "asset_class": ["equity", "equity", "equity", "cash"],
+            "country": ["CA", "CA", "CA", "CA"],
+            "currency": ["CAD", "CAD", "CAD", "CAD"],
+        }
+    )
+    assigned = SecurityMaster([override]).assign(frame)
+    assert assigned["security_id"].to_list() == [
+        "FIGI:BBG000000001",
+        "ISIN:CA600000AA15",
+        "TKR:XTSE:NWM",
+        "CASH:CAD",
+    ]
 
 
 def test_build_never_applies_its_own_proposals(tmp_path: Path, config: Path) -> None:

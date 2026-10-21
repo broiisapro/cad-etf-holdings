@@ -71,9 +71,9 @@ class SecurityMaster:
 
     Resolution order per row:
 
-    1. reviewed overrides, most specific first (``isin``, ``cusip``,
-       ``ticker``, then a fund-specific ``name``, then a global
-       ``*|<normalized name>`` name override);
+    1. reviewed overrides that fix a specific identifier or fund row, most
+       specific first (``isin``, ``cusip``, ``ticker``, then a fund-specific
+       ``name``);
     2. cash rows → ``CASH:<CCY>`` (``CASH:XXX`` without a stated currency);
     3. fx and derivative rows → ``DERIV:<fund_ticker>:<normalized ticker>``,
        else ``DERIV:<fund_ticker>:<normalized name>``; colliding rows in the
@@ -85,7 +85,14 @@ class SecurityMaster:
        trailing single-venue exchange code and no ``exchange`` is split first
        (``"NWM CT"`` → ``TKR:XTSE:NWM``); a country-composite code (``"AAPL
        US"``) is not a venue and stays unmatched;
-    7. otherwise null; the row appears in the unmatched report.
+    7. a global ``*|<normalized name>`` name override. These are approved for
+       name-only rows (D54), so they apply only after the row's own
+       identifiers and never rewrite an identifier-bearing row;
+    8. otherwise null; the row appears in the unmatched report.
+
+    A fund-specific ``name`` override still wins over every identifier: it is
+    an explicit correction for one fund's row and may deliberately replace a
+    wrong provided identifier.
 
     Invalid provided identifiers are ignored and counted in
     :attr:`invalid_identifier_count` for the most recent :meth:`assign` call,
@@ -331,6 +338,11 @@ class SecurityMaster:
             invalid += 1
         if mic is not None and ticker is not None:
             return f"TKR:{mic}:{ticker}", invalid
+        global_name = self._by_global_name.get(
+            normalize_name(security_name, kind=infer_kind(security_name))
+        )
+        if global_name is not None:
+            return global_name, invalid
         return None, invalid
 
     def _match_override(
@@ -352,12 +364,7 @@ class SecurityMaster:
             if key in self._by_ticker:
                 return self._by_ticker[key]
         name_key = (fund_ticker.strip(), security_name.strip())
-        fund_override = self._by_name.get(name_key)
-        if fund_override is not None:
-            return fund_override
-        return self._by_global_name.get(
-            normalize_name(security_name, kind=infer_kind(security_name))
-        )
+        return self._by_name.get(name_key)
 
 
 def _clean(value: str | None) -> str | None:
