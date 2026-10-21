@@ -11,6 +11,29 @@ real fund universe, and a local Streamlit dashboard. Everything is exercised end
 on the committed synthetic fixtures; live collection runs only for sources whose
 recorded terms decision allows it (D40).
 
+## Corrections since Epic 1
+
+This document records what shipped at the end of wave 02. Waves 03 and 04 changed parts of
+it: the "Wave 03 changes" section below has the details, and
+`docs/epic-02-real-data-integration.md` covers wave 04. In short:
+
+- Security ids are per instrument: `DERIV:<fund>:<ticker-or-name>` (ordinal suffixes on
+  collision), `CASH:XXX` when a cash row states no currency, Bloomberg country-composite
+  codes stay in `security_ticker` until an optional FIGI lookup, and `--openfigi` expresses
+  every mappable `ISIN:`/`TKR:` id as one `FIGI:<composite>` space (D55, D57).
+- Name-only holdings are identified only through reviewed global name overrides
+  (`*|<normalized name>`) approved with `etfh review approve`; the build writes
+  `reports/name_proposals.csv` for `etfh review list` (D54).
+- Validation is rounding-aware and adds `weight_sum_over_one`; duplicate lines are split
+  from double listings, and a source-declared partial daily list is a warning (D51, D52,
+  D56).
+- robots.txt follows RFC 9309 (D46) and collectors bind the `Source` looked up by
+  `--config`.
+- The build writes the additive `sources` table, and `etfh qa --max-unmatched-share X`
+  exits 3 when an included daily file exceeds it. The "completeness as the daily/quarterly
+  switch" decision below was superseded by D53: analytics reads the `sources` table, not
+  weight sums.
+
 ## How it works
 
 - **Registry and terms gate.** `config/sources.yaml` carries one record per source with
@@ -90,12 +113,14 @@ recorded terms decision allows it (D40).
 All names below match the merged code on `main`.
 
 - `etfh.build.build(raw_root, out_dir, *, config_dir=Path("config"), security_master=None, validator=None) -> BuildResult`
-  writes `etfh.duckdb`, `parquet/<table>.parquet` and `reports/{unmatched,fuzzy_proposals}.csv`;
-  `BuildResult` reports row/file counts.
+  writes `etfh.duckdb`, `parquet/<table>.parquet`, the additive `sources` table and
+  `reports/{unmatched,fuzzy_proposals,name_proposals}.csv`; `BuildResult` reports row/file
+  counts.
 - `etfh.analytics`: `holdings_asof`, `overlap` (→ `OverlapResult` with `common`),
   `concentration` (→ `Concentration`), `breakdown`, `overlap_matrix`, `changes`,
   `funds_available`, `FundNotFoundError`; all take a DuckDB connection and an as-of date.
-- `etfh.cli`: `collect`, `parse`, `build`, `qa`, `overlap` (with `--json`), `changes`.
+- `etfh.cli`: `collect`, `parse`, `build`, `qa` (with `--max-unmatched-share`), `review`
+  (`list`/`approve`), `overlap` (with `--json`), `changes`, `spotcheck`, `export`.
 - `etfh.secmaster`: `SecurityMaster.assign`, `unmatched_report`, `fuzzy_proposals`,
   `load_overrides`, `FigiLookup`.
 - `etfh.validate`: `ValidationConfig`, `QaFinding`, `validate_file`, `is_excluded`;
@@ -126,9 +151,10 @@ All names below match the merged code on `main`.
   (bot challenge / JavaScript page) and are never worked around.
 - **OpenFIGI is off by default.** `FigiLookup` needs a cache directory and optionally
   `OPENFIGI_API_KEY`; nothing calls it unless a caller passes an instance.
-- **Fuzzy proposals require review.** They are written to `reports/fuzzy_proposals.csv`
-  and only take effect after a human copies a mapping into
-  `config/security_overrides.csv`; unmatched rows stay unmatched.
+- **Fuzzy proposals require review.** Identifier-based proposals are written to
+  `reports/fuzzy_proposals.csv` and name-only proposals to `reports/name_proposals.csv`;
+  neither takes effect until a reviewer runs `etfh review approve`, which appends the
+  override with their name and the date. Unmatched rows stay unmatched.
 - **Quarterly disclosures are top holdings only**, flagged `partial` in analytics and
   labelled "top holdings only" in the dashboard; they never mix into daily series.
 - **Phase 2 and 3 are not started**: shares-outstanding flows, historical backfill,
