@@ -6,7 +6,7 @@ import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -187,7 +187,12 @@ def build_fake_analytics() -> ModuleType:
 
 @contextmanager
 def install_fake_analytics() -> Iterator[ModuleType]:
-    """Install a fake ``etfh.analytics`` module for the duration of the block."""
+    """Install a fake ``etfh.analytics`` module for the duration of the block.
+
+    Modules that bind ``etfh.analytics`` at import time (the dashboard app and
+    its quality panel) are evicted on entry and exit, so neither a cached fake
+    nor a cached real module leaks into the next test.
+    """
     import etfh
 
     saved_module = sys.modules.get("etfh.analytics")
@@ -197,9 +202,11 @@ def install_fake_analytics() -> Iterator[ModuleType]:
     sys.modules["etfh.analytics"] = fake
     if had_attr:
         delattr(etfh, "analytics")
+    _evict_dashboard_modules()
     try:
         yield fake
     finally:
+        _evict_dashboard_modules()
         if saved_module is None:
             sys.modules.pop("etfh.analytics", None)
         else:
@@ -211,9 +218,283 @@ def install_fake_analytics() -> Iterator[ModuleType]:
                 delattr(etfh, "analytics")
 
 
+def _evict_dashboard_modules() -> None:
+    """Drop dashboard modules that hold a bound ``etfh.analytics`` reference."""
+    import etfh.dashboard
+
+    for name in ("app", "quality"):
+        sys.modules.pop(f"etfh.dashboard.{name}", None)
+        if getattr(etfh.dashboard, name, None) is not None:
+            delattr(etfh.dashboard, name)
+
+
 def make_empty_db(path: Path) -> Path:
     """Create a valid, empty DuckDB file the app can open read-only."""
     duckdb.connect(str(path)).close()
+    return path
+
+
+QUALITY_AS_OF = date(2026, 11, 2)
+"""The as-of date the hand-made quality database is designed for."""
+
+QUALITY_FUNDS = ["EXC", "HIGH", "LATE", "LOW", "QTR"]
+"""Fund tickers in the quality database, in the order the dashboard lists them."""
+
+_SHA = {
+    "high": "1" * 64,
+    "low": "2" * 64,
+    "qtr": "3" * 64,
+    "exc_ok": "4" * 64,
+    "exc_bad": "5" * 64,
+    "late": "6" * 64,
+}
+
+_HOLDINGS_COLUMNS = (
+    "fund_ticker",
+    "as_of_date",
+    "known_at",
+    "file_version",
+    "security_id",
+    "security_name",
+    "security_ticker",
+    "exchange",
+    "isin",
+    "cusip",
+    "asset_class",
+    "sector",
+    "country",
+    "currency",
+    "weight",
+    "shares",
+    "market_value",
+    "source_id",
+    "raw_file_sha256",
+)
+
+
+def _quality_holding(
+    fund: str,
+    source: str,
+    sha: str,
+    *,
+    security_id: str | None,
+    name: str,
+    weight: float,
+    as_of: date = QUALITY_AS_OF,
+    known_at: datetime = datetime(2026, 11, 2, 22, 0, tzinfo=UTC),
+    asset_class: str = "equity",
+) -> tuple[object, ...]:
+    values: dict[str, object] = {
+        "fund_ticker": fund,
+        "as_of_date": as_of,
+        "known_at": known_at,
+        "file_version": 1,
+        "security_id": security_id,
+        "security_name": name,
+        "security_ticker": None,
+        "exchange": None,
+        "isin": None,
+        "cusip": None,
+        "asset_class": asset_class,
+        "sector": "Unknown",
+        "country": "CA",
+        "currency": "CAD",
+        "weight": weight,
+        "shares": None,
+        "market_value": None,
+        "source_id": source,
+        "raw_file_sha256": sha,
+    }
+    return tuple(values[column] for column in _HOLDINGS_COLUMNS)
+
+
+def make_quality_db(path: Path) -> Path:
+    """A build-shaped database covering every data-quality state.
+
+    ``HIGH`` has 60% unmatched weight, ``LOW`` 5%, ``QTR`` is a quarterly
+    disclosure (50% unmatched), ``EXC`` has an excluded newer file and ``LATE``
+    is only known after :data:`QUALITY_AS_OF`.
+    """
+    from etfh.build import DDL_SOURCES
+    from etfh.schema import (
+        DDL_FILE_VERSIONS,
+        DDL_HOLDINGS,
+        DDL_HOLDINGS_CHANGES,
+        DDL_QA_EVENTS,
+    )
+
+    con = duckdb.connect(str(path))
+    try:
+        for ddl in (
+            DDL_FILE_VERSIONS,
+            DDL_SOURCES,
+            DDL_HOLDINGS,
+            DDL_QA_EVENTS,
+            DDL_HOLDINGS_CHANGES,
+        ):
+            con.execute(ddl)
+        sources = [
+            ("alpha_daily", "tests", "daily_holdings", "csv"),
+            ("beta_daily", "tests", "daily_holdings", "csv"),
+            ("gamma_qpd", "tests", "quarterly_disclosure", "pdf"),
+            ("delta_daily", "tests", "daily_holdings", "csv"),
+            ("late_daily", "tests", "daily_holdings", "csv"),
+        ]
+        con.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", sources)
+        versions = [
+            (
+                "alpha_daily",
+                "HIGH",
+                QUALITY_AS_OF,
+                1,
+                datetime(2026, 11, 2, 22, tzinfo=UTC),
+                _SHA["high"],
+                "raw/high.csv",
+                "included",
+            ),
+            (
+                "beta_daily",
+                "LOW",
+                QUALITY_AS_OF,
+                1,
+                datetime(2026, 11, 2, 22, tzinfo=UTC),
+                _SHA["low"],
+                "raw/low.csv",
+                "included",
+            ),
+            (
+                "gamma_qpd",
+                "QTR",
+                date(2026, 9, 30),
+                1,
+                datetime(2026, 10, 15, 12, tzinfo=UTC),
+                _SHA["qtr"],
+                "raw/qtr.pdf",
+                "included",
+            ),
+            (
+                "delta_daily",
+                "EXC",
+                date(2026, 10, 30),
+                1,
+                datetime(2026, 10, 30, 22, tzinfo=UTC),
+                _SHA["exc_ok"],
+                "raw/exc-ok.csv",
+                "included",
+            ),
+            (
+                "delta_daily",
+                "EXC",
+                QUALITY_AS_OF,
+                2,
+                datetime(2026, 11, 2, 22, tzinfo=UTC),
+                _SHA["exc_bad"],
+                "raw/exc-bad.csv",
+                "excluded",
+            ),
+            (
+                "late_daily",
+                "LATE",
+                date(2026, 11, 5),
+                1,
+                datetime(2026, 11, 6, 12, tzinfo=UTC),
+                _SHA["late"],
+                "raw/late.csv",
+                "included",
+            ),
+        ]
+        con.executemany("INSERT INTO file_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", versions)
+        holdings = [
+            _quality_holding(
+                "HIGH",
+                "alpha_daily",
+                _SHA["high"],
+                security_id=None,
+                name="Mystery Corp.",
+                weight=0.60,
+            ),
+            _quality_holding(
+                "HIGH",
+                "alpha_daily",
+                _SHA["high"],
+                security_id="ISIN:CA600000AA15",
+                name="Aurora Materials Inc.",
+                weight=0.40,
+            ),
+            _quality_holding(
+                "LOW",
+                "beta_daily",
+                _SHA["low"],
+                security_id=None,
+                name="Mystery Corp.",
+                weight=0.05,
+            ),
+            _quality_holding(
+                "LOW",
+                "beta_daily",
+                _SHA["low"],
+                security_id="ISIN:CA600000AA15",
+                name="Aurora Materials Inc.",
+                weight=0.95,
+            ),
+            _quality_holding(
+                "QTR",
+                "gamma_qpd",
+                _SHA["qtr"],
+                security_id=None,
+                name="Cascade Utilities Ltd.",
+                weight=0.50,
+                as_of=date(2026, 9, 30),
+                known_at=datetime(2026, 10, 15, 12, tzinfo=UTC),
+            ),
+            _quality_holding(
+                "QTR",
+                "gamma_qpd",
+                _SHA["qtr"],
+                security_id="ISIN:CA600001AA97",
+                name="Cascade Utilities Ltd.",
+                weight=0.50,
+                as_of=date(2026, 9, 30),
+                known_at=datetime(2026, 10, 15, 12, tzinfo=UTC),
+            ),
+            _quality_holding(
+                "EXC",
+                "delta_daily",
+                _SHA["exc_ok"],
+                security_id="ISIN:CA600002AA88",
+                name="Granite Systems Inc.",
+                weight=1.0,
+                as_of=date(2026, 10, 30),
+                known_at=datetime(2026, 10, 30, 22, tzinfo=UTC),
+            ),
+            _quality_holding(
+                "LATE",
+                "late_daily",
+                _SHA["late"],
+                security_id="ISIN:CA600003AA62",
+                name="Harbour Lines Ltd.",
+                weight=1.0,
+                as_of=date(2026, 11, 5),
+                known_at=datetime(2026, 11, 6, 12, tzinfo=UTC),
+            ),
+        ]
+        placeholders = ", ".join("?" for _ in _HOLDINGS_COLUMNS)
+        con.executemany(f"INSERT INTO holdings VALUES ({placeholders})", holdings)
+        con.execute(
+            "INSERT INTO qa_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                _SHA["exc_bad"],
+                "delta_daily",
+                "EXC",
+                QUALITY_AS_OF,
+                "weight_sum",
+                "error",
+                "sum=0.8500 expected=1±0.005",
+                True,
+            ],
+        )
+    finally:
+        con.close()
     return path
 
 
