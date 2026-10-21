@@ -20,6 +20,8 @@ from tests._qpd_helpers import (
     raw_file_for_pdf,
     write_evolve_lookalike,
     write_purpose_lookalike,
+    write_purpose_options_lookalike,
+    write_purpose_wrapped_neighbours,
 )
 
 
@@ -45,7 +47,7 @@ def test_purpose_lookalike_parses(tmp_path: Path) -> None:
     )
     ParsedHoldings.validate(parsed.frame)
     assert parsed.as_of_date == date(2026, 6, 30)
-    assert parsed.notes == ["declared_unit=percent", "partial_list=true"]
+    assert parsed.notes == ["declared_unit=percent", "weight_decimals=2", "partial_list=true"]
     names = parsed.frame["security_name"].to_list()
     weights = dict(zip(names, parsed.frame["weight"].to_list(), strict=True))
     # The right-column Top 25 list parses; the left-column SECTOR MIX and
@@ -59,6 +61,65 @@ def test_purpose_lookalike_parses(tmp_path: Path) -> None:
     assert len(wrapped) == 1
     assert weights[wrapped[0]] == pytest.approx(0.032)
     assert round(float(parsed.frame["weight"].sum()), 4) == 0.221
+
+
+def test_purpose_wrapped_option_names_are_names_not_weights(tmp_path: Path) -> None:
+    """The real BNC failure: a strike price on a wrapped option line read as a weight.
+
+    Purpose prints each written-call option over three lines, with the weight
+    between the name and the strike price. Before the wrapped-name pass the
+    strikes below 100 became holdings ("CAD 92.00") and the file summed to
+    3.07 instead of ~1.
+    """
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_purpose_options_lookalike(tmp_path / "purpose_options.pdf"),
+            source_id="purpose_qpd",
+            fund_ticker="BNC",
+            issuer="purpose",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    names = parsed.frame["security_name"].to_list()
+    weights = parsed.frame["weight"].to_list()
+    assert parsed.as_of_date == date(2026, 3, 31)
+    # 10 common shares + cash + 6 written calls; no "CAD" or "205.00" rows.
+    assert parsed.frame.height == 17
+    assert "CAD" not in names
+    assert all(not name[0].isdigit() for name in names)
+    options = [name for name in names if "Written Call Options" in name]
+    assert len(options) == 6
+    assert options[0] == "Northgate Bank, Written Call Options on April 2026 at CAD 205.00"
+    assert options[2] == (
+        "Cedarline Financial Corp., Written Call Options on April 2026 at CAD 195.00"
+    )
+    assert options[-1] == (
+        "Pineview Asset Management, Written Call Options on April 2026 at CAD 66.00"
+    )
+    assert round(float(parsed.frame["weight"].sum()), 4) == 1.0
+    assert max(weights) < 0.2
+    assert "weight_decimals=2" in parsed.notes
+
+
+def test_purpose_wrapped_neighbours_are_not_glued_together(tmp_path: Path) -> None:
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_purpose_wrapped_neighbours(tmp_path / "purpose_neighbours.pdf"),
+            source_id="purpose_qpd",
+            fund_ticker="BOND",
+            issuer="purpose",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    names = parsed.frame["security_name"].to_list()
+    assert parsed.frame.height == 4
+    assert names == [
+        "Fjord Shipping Holdings Ltd., Callable, 2041/01/31",
+        "Kestrel Aerospace Inc., Callable, 4.100%, 2038/05/01",
+        "Northgate Bank",
+        "Pineview Software Corp.",
+    ]
+    assert parsed.frame["weight"].to_list() == pytest.approx([0.032, 0.025, 0.05, 0.043])
 
 
 def test_evolve_lookalike_parses(tmp_path: Path) -> None:

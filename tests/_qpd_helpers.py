@@ -499,6 +499,129 @@ def write_purpose_lookalike(path: Path) -> Path:
     return path
 
 
+def write_purpose_options_lookalike(path: Path) -> Path:
+    """Write a fictional Purpose-style disclosure with wrapped option names.
+
+    Each written-call option is three physical lines: the name fragment, the
+    weight in the right-hand weight column, then the strike price printed
+    inside the name column. The strike continuation must never be read as a
+    second weight (the real failure: a fund's top-25 sum became 3.07).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Quarterly Portfolio Disclosure")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 320.0
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Fictional Meridian Financial Income Fund")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 16, "As At March 31, 2026")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(right, _TOP - 16, "TOP 25 HOLDINGS")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(right, _TOP - 30, "% of Fund's Net")
+    pdf.drawString(right, _TOP - 42, "Asset Value")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 64, "SECTOR MIX")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 76, "Financials 99.66")
+    pdf.drawString(_LEFT, _TOP - 90, "Cash and Cash Equivalents 0.36")
+    pdf.drawString(_LEFT, _TOP - 104, "Net Other Assets 0.01")
+    pdf.drawString(_LEFT, _TOP - 118, "Equity Call Options -0.03")
+    pdf.drawString(_LEFT, _TOP - 132, "Total Net Asset Value 100.00")
+
+    holdings = [
+        ("Northgate Bank", "12.67"),
+        ("Fairhaven Trust", "12.27"),
+        ("Cedarline Financial Corp.", "11.92"),
+        ("Kestrel Bancorp", "11.71"),
+        ("Maplecrest Bank", "11.49"),
+        ("Elmsworth Savings", "10.85"),
+        ("Juniper Life Insurance", "7.54"),
+        ("Oakhurst Financial Group", "7.46"),
+        ("Pineview Asset Management", "6.94"),
+        ("Quarrystone Insurance", "6.81"),
+        ("Cash and Cash Equivalents", "0.36"),
+    ]
+    y = _TOP - 56
+    for name, weight in holdings:
+        pdf.drawString(right, y, name)
+        pdf.drawRightString(_RIGHT, y, weight)
+        y -= 14
+
+    options = [
+        ("Northgate Bank, Written Call Options on April 2026 at CAD", "0.00", "205.00"),
+        ("Fairhaven Trust, Written Call Options on April 2026 at CAD", "0.00", "140.00"),
+        ("Cedarline Financial Corp., Written Call Options on April", "0.00", "2026 at CAD 195.00"),
+        ("Kestrel Bancorp, Written Call Options on April 2026 at CAD", "0.00", "92.00"),
+        ("Elmsworth Savings, Written Call Options on April 2026 at", "-0.01", "CAD 49.00"),
+        ("Pineview Asset Management, Written Call Options on April", "-0.01", "2026 at CAD 66.00"),
+    ]
+    for name, weight, strike in options:
+        pdf.drawString(right, y, name)
+        y -= 6
+        pdf.drawRightString(_RIGHT, y, weight)
+        y -= 10
+        pdf.drawString(right, y, strike)
+        y -= 14
+
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(_LEFT, y - 20, "The summary of investment portfolio may change due to")
+    pdf.drawString(_LEFT, y - 30, "ongoing portfolio transactions of the investment fund.")
+    pdf.save()
+    return path
+
+
+def write_purpose_wrapped_neighbours(path: Path) -> Path:
+    """Write a fictional disclosure with two adjacent wrapped bond names.
+
+    The first row's name tail sits right above the second row's name head; the
+    join must attach each fragment to its own row and never merge the two
+    holdings.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Quarterly Portfolio Disclosure")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 320.0
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Fictional Meridian Bond Fund")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 16, "As At June 30, 2026")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(right, _TOP - 16, "TOP 25 HOLDINGS")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(right, _TOP - 30, "% of Fund's Net")
+    pdf.drawString(right, _TOP - 42, "Asset Value")
+
+    y = _TOP - 56
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(right, y, "Fjord Shipping Holdings Ltd., Callable,")
+    y -= 6
+    pdf.drawRightString(_RIGHT, y, "3.20")
+    y -= 10
+    pdf.drawString(right, y, "2041/01/31")
+    y -= 14
+    pdf.drawString(right, y, "Kestrel Aerospace Inc., Callable, 4.100%,")
+    y -= 6
+    pdf.drawRightString(_RIGHT, y, "2.50")
+    y -= 10
+    pdf.drawString(right, y, "2038/05/01")
+    y -= 14
+    pdf.drawString(right, y, "Northgate Bank")
+    pdf.drawRightString(_RIGHT, y, "5.00")
+    y -= 14
+    pdf.drawString(right, y, "Pineview Software Corp.")
+    pdf.drawRightString(_RIGHT, y, "4.30")
+    pdf.save()
+    return path
+
+
 # Right-column x positions of the real Evolve layout: names at 360, the
 # sector weights right-aligned at 568, and the Top 25 weights right-aligned
 # at 336; the left/right split sits between 336 and 360.
