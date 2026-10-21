@@ -248,7 +248,7 @@ def test_fuzzy_proposals_empty_result_keeps_the_schema() -> None:
         ("Acme Corp.", "ACME"),
         ("Acme Limited", "ACME"),
         ("Compagnie Limitée", "COMPAGNIE"),
-        ("O'Hara & Sons Co.", "O HARA SONS"),
+        ("O'Hara & Sons Co.", "O HARA AND SONS"),
         ("Maple-Ridge   Resources", "MAPLE RIDGE RESOURCES"),
         ("3M Co.", "3M"),
         ("Holdings Inc.", "HOLDINGS INC"),
