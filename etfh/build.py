@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from etfh.secmaster.resolve import SecurityMaster
     from etfh.validate import QaFinding
 
-__all__ = ["CHANGE_THRESHOLD", "BuildResult", "build", "connect"]
+__all__ = ["CHANGE_THRESHOLD", "NAME_PROPOSAL_COLUMNS", "BuildResult", "build", "connect"]
 
 CHANGE_THRESHOLD = 0.001
 
@@ -100,6 +100,33 @@ _SOURCES_SCHEMA: dict[str, DataTypeClass | DataType] = {
     "issuer": pl.String,
     "kind": pl.String,
     "format": pl.String,
+}
+
+#: Columns of ``reports/name_proposals.csv`` (interfaces-04 §3, D54). The
+#: reviewed-name matcher that fills it in lives in ``etfh.secmaster.names``
+#: (issue #104); until it is wired in, the build writes the header only.
+NAME_PROPOSAL_COLUMNS: tuple[str, ...] = (
+    "normalized_name",
+    "example_name",
+    "country",
+    "n_funds",
+    "total_weight",
+    "candidate_security_id",
+    "candidate_name",
+    "score",
+    "confidence",
+)
+
+_NAME_PROPOSALS_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "normalized_name": pl.String,
+    "example_name": pl.String,
+    "country": pl.String,
+    "n_funds": pl.Int64,
+    "total_weight": pl.Float64,
+    "candidate_security_id": pl.String,
+    "candidate_name": pl.String,
+    "score": pl.Float64,
+    "confidence": pl.String,
 }
 
 _FILE_VERSIONS_SCHEMA: dict[str, DataTypeClass | DataType] = {
@@ -699,7 +726,20 @@ def _write_reports(out_dir: Path, holdings: pl.DataFrame) -> pl.DataFrame:
     known = holdings.select("security_id", "security_name")
     proposals = fuzzy_proposals(unmatched, known)
     proposals.write_csv(reports_dir / "fuzzy_proposals.csv")
+    _write_name_proposals(reports_dir)
     return unmatched
+
+
+def _write_name_proposals(reports_dir: Path) -> None:
+    """Write ``reports/name_proposals.csv`` with its contract header.
+
+    Name matches are only ever *proposals* for a human to approve (D54); the
+    build never applies them. The reviewed-name matcher lands with issue #104,
+    so the report is written header-only until it is wired in; the file is
+    always present so ``etfh review list`` has a well-defined input.
+    """
+    frame = pl.DataFrame(schema=_NAME_PROPOSALS_SCHEMA)
+    frame.write_csv(reports_dir / "name_proposals.csv")
 
 
 @lru_cache(maxsize=4)
