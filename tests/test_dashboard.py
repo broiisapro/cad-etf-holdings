@@ -11,16 +11,20 @@ from datetime import date
 from pathlib import Path
 from types import ModuleType
 
+import duckdb
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from etfh.dashboard import quality
 from tests._dashboard_helpers import (
     APP_PATH,
     AS_OF,
+    QUALITY_AS_OF,
     REPO_ROOT,
     build_synthetic_db,
     install_fake_analytics,
     make_empty_db,
+    make_quality_db,
     overlap_matrix,
 )
 
@@ -30,6 +34,11 @@ EXPECTED_OVERLAP_PATH = REPO_ROOT / "tests" / "fixtures" / "expected_overlap.jso
 @pytest.fixture(scope="module")
 def synthetic_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return build_synthetic_db(tmp_path_factory.mktemp("synthetic"))
+
+
+@pytest.fixture(scope="module")
+def quality_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return make_quality_db(tmp_path_factory.mktemp("quality") / "etfh.duckdb")
 
 
 def _run_app(monkeypatch, db_path: Path) -> AppTest:
@@ -141,31 +150,45 @@ ANALYTICS_FUNCTIONS = (
     "overlap_matrix",
     "changes",
 )
+QA_FUNCTIONS = ("summarize", "unmatched_shares")
 
 
-def test_app_only_calls_the_analytics_contract(tmp_path, monkeypatch) -> None:
-    calls: list[str] = []
+def test_app_only_calls_the_analytics_and_qa_contract(tmp_path, monkeypatch) -> None:
+    analytics_calls: list[str] = []
+    qa_calls: list[str] = []
     db = make_empty_db(tmp_path / "etfh.duckdb")
     with install_fake_analytics() as fake:
         for name in ANALYTICS_FUNCTIONS:
             original = getattr(fake, name)
 
             def wrapper(*args, _name=name, _original=original, **kwargs):
-                calls.append(_name)
+                analytics_calls.append(_name)
                 return _original(*args, **kwargs)
 
             setattr(fake, name, wrapper)
+        from etfh import qa
+
+        for name in QA_FUNCTIONS:
+            original_qa = getattr(qa, name)
+
+            def qa_wrapper(*args, _name=name, _original=original_qa, **kwargs):
+                qa_calls.append(_name)
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(qa, name, qa_wrapper)
         app = _run_app(monkeypatch, db)
 
     assert not app.exception
-    assert set(calls) == set(ANALYTICS_FUNCTIONS)
+    assert set(analytics_calls) == set(ANALYTICS_FUNCTIONS)
+    assert set(qa_calls) == set(QA_FUNCTIONS)
 
 
-def test_app_has_no_sql_calls() -> None:
-    source = APP_PATH.read_text(encoding="utf-8")
-    for forbidden in (".execute(", ".sql(", "duckdb.sql", "read_only=False"):
-        assert forbidden not in source
-    assert "read_only=True" in source
+def test_dashboard_has_no_sql_calls() -> None:
+    for path in sorted((REPO_ROOT / "etfh" / "dashboard").glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for forbidden in (".execute(", ".sql(", "duckdb.sql", "read_only=False"):
+            assert forbidden not in source, f"{forbidden} found in {path.name}"
+    assert "read_only=True" in APP_PATH.read_text(encoding="utf-8")
 
 
 def test_asof_picker_defaults_to_latest_available(tmp_path, monkeypatch) -> None:
@@ -222,3 +245,235 @@ def test_real_build_labels_partial_funds(monkeypatch, synthetic_db) -> None:
     assert any(
         "SYNF" in subheader.value and "2026-09-30" in subheader.value for subheader in app.subheader
     )
+
+
+def _run_quality_app(
+    monkeypatch: pytest.MonkeyPatch, db_path: Path, asof: date = QUALITY_AS_OF
+) -> AppTest:
+    """Run the app against the quality database with a pinned as-of date."""
+    monkeypatch.setenv("ETFH_DB", str(db_path))
+    app = AppTest.from_file(str(APP_PATH), default_timeout=60)
+    app.run()
+    app.date_input(key="asof").set_value(asof).run()
+    return app
+
+
+def _metric_values(app: AppTest) -> dict[str, str]:
+    return {metric.label: metric.value for metric in app.metric}
+
+
+@pytest.fixture
+def quality_con(quality_db: Path) -> Iterator[duckdb.DuckDBPyConnection]:
+    con = duckdb.connect(str(quality_db), read_only=True)
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+def test_fund_quality_reports_kind_partial_and_share(quality_con) -> None:
+    state = quality.fund_quality(quality_con, "HIGH", QUALITY_AS_OF)
+    assert state.as_of_date == QUALITY_AS_OF
+    assert (state.source_kind, state.source_format) == ("daily_holdings", "csv")
+    assert state.source_label == "Daily holdings (CSV)"
+    assert state.partial is False
+    assert state.coverage_label == "Full portfolio"
+    assert state.unmatched_share == pytest.approx(0.60)
+    assert state.unmatched_weight == pytest.approx(0.60)
+    assert state.total_weight == pytest.approx(1.0)
+    assert state.excluded_files == ()
+    assert state.understates_overlap is True
+
+
+def test_fund_quality_marks_quarterly_disclosure_partial(quality_con) -> None:
+    state = quality.fund_quality(quality_con, "QTR", QUALITY_AS_OF)
+    assert state.as_of_date == date(2026, 9, 30)
+    assert state.source_label == "Quarterly disclosure (PDF)"
+    assert state.partial is True
+    assert state.coverage_label == "Top holdings only"
+    assert state.unmatched_share == pytest.approx(0.50)
+
+
+def test_fund_quality_lists_excluded_files(quality_con) -> None:
+    state = quality.fund_quality(quality_con, "EXC", QUALITY_AS_OF)
+    assert state.as_of_date == date(2026, 10, 30)
+    assert state.unmatched_share == pytest.approx(0.0)
+    assert len(state.excluded_files) == 1
+    excluded = state.excluded_files[0]
+    assert excluded.as_of_date == QUALITY_AS_OF
+    assert excluded.source_id == "delta_daily"
+    assert excluded.checks == ("weight_sum",)
+    assert excluded.reason == "weight_sum"
+    assert excluded.as_of_label == "2026-11-02"
+
+
+def test_fund_quality_without_a_known_file(quality_con) -> None:
+    state = quality.fund_quality(quality_con, "LATE", QUALITY_AS_OF)
+    assert state.as_of_date is None
+    assert state.source_id is None
+    assert state.source_label == "Unknown"
+    assert state.unmatched_share is None
+    assert state.coverage_label == "Full portfolio"
+    assert state.excluded_files == ()
+
+
+def test_understated_note_threshold_is_strict() -> None:
+    def state(fund: str, share: float | None) -> quality.FundQuality:
+        return quality.FundQuality(
+            fund=fund,
+            asof=QUALITY_AS_OF,
+            as_of_date=QUALITY_AS_OF,
+            source_id="test",
+            source_kind="daily_holdings",
+            source_format="csv",
+            partial=False,
+            unmatched_share=share,
+            unmatched_weight=share,
+            total_weight=1.0,
+        )
+
+    assert quality.understated_note([state("AAA", 0.20)]) is None
+    assert quality.understated_note([state("AAA", None)]) is None
+    note = quality.understated_note([state("AAA", 0.21), state("BBB", 0.05)])
+    assert note is not None
+    assert "AAA has 21.00% of its weight unmatched" in note
+    assert "BBB" not in note
+
+
+def test_source_metadata_without_sources_table(tmp_path: Path) -> None:
+    path = make_empty_db(tmp_path / "empty.duckdb")
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        assert quality.source_metadata(con) == {}
+    finally:
+        con.close()
+
+
+def test_quality_panel_apptest(monkeypatch, quality_db: Path) -> None:
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "1")
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.selectbox(key="fund").select("HIGH").run()
+
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["Portfolio date"] == "2026-11-02"
+    assert metrics["Source"] == "Daily holdings (CSV)"
+    assert metrics["Coverage"] == "Full portfolio"
+    assert metrics["Unmatched weight share"] == "60.00%"
+    assert any("No excluded files for this fund" in caption.value for caption in app.caption)
+
+
+def test_quality_panel_lists_excluded_files_apptest(monkeypatch, quality_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.selectbox(key="fund").select("EXC").run()
+
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["Portfolio date"] == "2026-10-30"
+    warnings = [warning.value for warning in app.warning]
+    assert any(
+        "Excluded file: delta_daily as of 2026-11-02 (weight_sum)" in warning
+        for warning in warnings
+    )
+
+
+def test_quality_panel_quarterly_fund_apptest(monkeypatch, quality_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.selectbox(key="fund").select("QTR").run()
+
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["Portfolio date"] == "2026-09-30"
+    assert metrics["Source"] == "Quarterly disclosure (PDF)"
+    assert metrics["Coverage"] == "Top holdings only"
+    assert metrics["Unmatched weight share"] == "50.00%"
+    assert any("Top holdings only" in info.value for info in app.info)
+
+
+def test_quality_panel_without_data_apptest(monkeypatch, quality_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.selectbox(key="fund").select("LATE").run()
+
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["Portfolio date"] == "-"
+    assert metrics["Source"] == "Unknown"
+    assert metrics["Unmatched weight share"] == "n/a"
+    assert any("No included file is known" in caption.value for caption in app.caption)
+
+
+def test_overlap_warns_when_unmatched_weight_is_high(monkeypatch, quality_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.selectbox(key="overlap_fund_a").select("HIGH").run()
+    app.selectbox(key="overlap_fund_b").select("LOW").run()
+
+    assert not app.exception
+    warnings = [warning.value for warning in app.warning]
+    assert any("Overlap is understated: HIGH has 60.00%" in warning for warning in warnings)
+
+
+def test_overlap_has_no_note_when_unmatched_weight_is_low(monkeypatch, quality_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.selectbox(key="overlap_fund_a").select("LOW").run()
+    app.selectbox(key="overlap_fund_b").select("EXC").run()
+    app.multiselect(key="heatmap_funds").set_value(["LOW", "EXC", "LATE"]).run()
+
+    assert not app.exception
+    assert not any("Overlap is understated" in warning.value for warning in app.warning)
+
+
+def test_heatmap_warns_when_unmatched_weight_is_high(monkeypatch, quality_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, quality_db)
+    app.multiselect(key="heatmap_funds").set_value(["HIGH", "LOW"]).run()
+
+    assert not app.exception
+    assert any(
+        "Overlap is understated: HIGH has 60.00%" in warning.value for warning in app.warning
+    )
+    assert len(app.get("vega_lite_chart")) == 3
+
+
+def test_open_database_honours_thread_limit(tmp_path: Path, monkeypatch) -> None:
+    db = make_empty_db(tmp_path / "etfh.duckdb")
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "2")
+    with _app_module() as module:
+        con = module.open_database(db)
+        try:
+            assert con.execute("SELECT current_setting('threads')").fetchone() == (2,)
+        finally:
+            con.close()
+
+
+def test_open_database_rejects_invalid_thread_limit(tmp_path: Path, monkeypatch) -> None:
+    db = make_empty_db(tmp_path / "etfh.duckdb")
+    monkeypatch.setenv("ETFH_DUCKDB_THREADS", "0")
+    with _app_module() as module, pytest.raises(ValueError, match="ETFH_DUCKDB_THREADS"):
+        module.open_database(db)
+
+
+def test_real_build_quality_panel(monkeypatch, synthetic_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, synthetic_db, asof=AS_OF)
+    app.selectbox(key="fund").select("SYNF").run()
+
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["Portfolio date"] == "2026-09-30"
+    assert metrics["Source"] == "Synthetic (PDF)"
+    assert metrics["Coverage"] == "Top holdings only"
+    assert metrics["Unmatched weight share"] == "100.00%"
+
+    app.selectbox(key="fund").select("SYNA").run()
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["Source"] == "Synthetic (CSV)"
+    assert metrics["Unmatched weight share"] == "0.00%"
+
+
+def test_real_build_overlap_note(monkeypatch, synthetic_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, synthetic_db, asof=AS_OF)
+    app.selectbox(key="overlap_fund_a").select("SYNF").run()
+    app.selectbox(key="overlap_fund_b").select("SYNA").run()
+
+    assert not app.exception
+    warnings = [warning.value for warning in app.warning]
+    assert any("Overlap is understated: SYNF has 100.00%" in warning for warning in warnings)
