@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import date, datetime
 from pathlib import Path
@@ -24,6 +25,15 @@ from etfh.types import RawFile
 from tests._build_helpers import CONFIG_DIR, FIXTURES, RAW_ROOT
 
 runner = CliRunner()
+_WIDE = {"COLUMNS": "200"}  # keep Rich error panels from truncating in CI
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Error panels are coloured in CI; compare on the plain text."""
+    return _ANSI.sub("", text)
+
+
 COMMANDS = (
     "collect",
     "parse",
@@ -380,10 +390,10 @@ def test_qa_max_unmatched_share_out_of_range_exits_two(fixture_build: Path) -> N
     result = runner.invoke(
         app,
         ["qa", "--db", str(fixture_build / "etfh.duckdb"), "--max-unmatched-share", "1.5"],
+        env=_WIDE,
     )
     assert result.exit_code == 2
-    assert "must be between" in result.output
-    assert "0 and 1" in result.output
+    assert "must be between 0 and 1" in _plain(result.output)
 
 
 def test_overlap_json_matches_the_expected_fixture(fixture_build: Path) -> None:
@@ -899,9 +909,9 @@ def test_review_list_filters_by_confidence_and_limit(tmp_path: Path) -> None:
     assert "3 selected; showing 1" in limited.output
     assert "HYDRO ONE LTD" in limited.output
     assert "BANK OF NOVA SCOTIA" not in limited.output
-    bad = runner.invoke(app, ["review", "list", "--db", str(db), "--limit", "-1"])
+    bad = runner.invoke(app, ["review", "list", "--db", str(db), "--limit", "-1"], env=_WIDE)
     assert bad.exit_code == 2
-    assert "must be >= 0" in bad.output
+    assert "must be >= 0" in _plain(bad.output)
 
 
 def test_review_list_reports_a_missing_database_or_report(tmp_path: Path) -> None:
@@ -964,9 +974,10 @@ def test_review_approve_without_the_reviewer_option_writes_nothing(tmp_path: Pat
             "--overrides",
             str(overrides),
         ],
+        env=_WIDE,
     )
     assert result.exit_code == 2
-    assert "--reviewer" in result.output
+    assert "--reviewer" in _plain(result.output)
     assert not overrides.exists()
 
 
