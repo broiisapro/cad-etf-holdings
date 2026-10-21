@@ -27,7 +27,10 @@ usual rule.
 
 The build also writes an additive ``sources`` table (``source_id``, ``issuer``,
 ``kind``, ``format``) from the config it loaded, which analytics uses for the
-daily-over-quarterly priority and the ``partial`` flag (D53).
+daily-over-quarterly priority and the ``partial`` flag (D53), and the review
+reports ``unmatched.csv``, ``fuzzy_proposals.csv`` and ``name_proposals.csv``.
+Name proposals come from identifier-backed rows in this build only; approving
+one is a separate human action (D54).
 
 Every table is sorted on a documented key before writing (D15):
 
@@ -64,6 +67,7 @@ from etfh.schema import (
     DDL_HOLDINGS_CHANGES,
     DDL_QA_EVENTS,
 )
+from etfh.secmaster.names import name_proposals, reference_names
 from etfh.secmaster.reports import fuzzy_proposals, unmatched_report
 from etfh.storage import RawStore
 from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
@@ -102,9 +106,9 @@ _SOURCES_SCHEMA: dict[str, DataTypeClass | DataType] = {
     "format": pl.String,
 }
 
-#: Columns of ``reports/name_proposals.csv`` (interfaces-04 §3, D54). The
-#: reviewed-name matcher that fills it in lives in ``etfh.secmaster.names``
-#: (issue #104); until it is wired in, the build writes the header only.
+#: Columns of ``reports/name_proposals.csv`` (interfaces-04 §3, D54). Name
+#: matches are only proposals: the build writes them, a human approves them
+#: (``etfh review approve``) and only the reviewed overrides file changes an id.
 NAME_PROPOSAL_COLUMNS: tuple[str, ...] = (
     "normalized_name",
     "example_name",
@@ -116,18 +120,6 @@ NAME_PROPOSAL_COLUMNS: tuple[str, ...] = (
     "score",
     "confidence",
 )
-
-_NAME_PROPOSALS_SCHEMA: dict[str, DataTypeClass | DataType] = {
-    "normalized_name": pl.String,
-    "example_name": pl.String,
-    "country": pl.String,
-    "n_funds": pl.Int64,
-    "total_weight": pl.Float64,
-    "candidate_security_id": pl.String,
-    "candidate_name": pl.String,
-    "score": pl.Float64,
-    "confidence": pl.String,
-}
 
 _FILE_VERSIONS_SCHEMA: dict[str, DataTypeClass | DataType] = {
     "source_id": pl.String,
@@ -216,6 +208,7 @@ class BuildResult:
     n_changes: int
     n_qa_events: int
     n_unmatched: int
+    n_name_proposals: int = 0
     n_figi: int = 0
 
 
@@ -484,7 +477,7 @@ def build(
         "holdings_changes": holdings_changes,
     }
     db_path = _write_database(out_dir, frames)
-    unmatched = _write_reports(out_dir, holdings)
+    unmatched, n_name_proposals = _write_reports(out_dir, holdings)
     return BuildResult(
         out_dir=out_dir,
         db_path=db_path,
@@ -495,6 +488,7 @@ def build(
         n_changes=holdings_changes.height,
         n_qa_events=qa_events.height,
         n_unmatched=unmatched.height,
+        n_name_proposals=n_name_proposals,
         n_figi=n_figi,
     )
 
@@ -718,7 +712,7 @@ def _write_database(out_dir: Path, frames: Mapping[str, pl.DataFrame]) -> Path:
     return db_path
 
 
-def _write_reports(out_dir: Path, holdings: pl.DataFrame) -> pl.DataFrame:
+def _write_reports(out_dir: Path, holdings: pl.DataFrame) -> tuple[pl.DataFrame, int]:
     reports_dir = out_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     unmatched = unmatched_report(holdings)
@@ -726,20 +720,30 @@ def _write_reports(out_dir: Path, holdings: pl.DataFrame) -> pl.DataFrame:
     known = holdings.select("security_id", "security_name")
     proposals = fuzzy_proposals(unmatched, known)
     proposals.write_csv(reports_dir / "fuzzy_proposals.csv")
-    _write_name_proposals(reports_dir)
-    return unmatched
+    n_name_proposals = _write_name_proposals(reports_dir, holdings)
+    return unmatched, n_name_proposals
 
 
-def _write_name_proposals(reports_dir: Path) -> None:
-    """Write ``reports/name_proposals.csv`` with its contract header.
+def _write_name_proposals(reports_dir: Path, holdings: pl.DataFrame) -> int:
+    """Write ``reports/name_proposals.csv`` for the unmatched names (D54).
 
-    Name matches are only ever *proposals* for a human to approve (D54); the
-    build never applies them. The reviewed-name matcher lands with issue #104,
-    so the report is written header-only until it is wired in; the file is
-    always present so ``etfh review list`` has a well-defined input.
+    Candidates come from the identifier-backed rows in this build (never from
+    ids that a name override produced, D41), so the report can only propose
+    what the raw store actually evidences. The file is always written, with
+    its contract header even when there is nothing to propose; nothing here
+    changes an id or the overrides file.
     """
-    frame = pl.DataFrame(schema=_NAME_PROPOSALS_SCHEMA)
-    frame.write_csv(reports_dir / "name_proposals.csv")
+    unmatched = holdings.filter(
+        pl.col("security_id").is_null()
+        & ~pl.col("asset_class").str.to_lowercase().is_in(["cash", "fx", "derivative"])
+    )
+    reference = reference_names([holdings])
+    proposals = name_proposals(
+        unmatched.select("fund_ticker", "security_name", "country", "weight"),
+        reference,
+    )
+    proposals.write_csv(reports_dir / "name_proposals.csv")
+    return proposals.height
 
 
 @lru_cache(maxsize=4)

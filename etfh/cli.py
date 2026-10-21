@@ -30,13 +30,12 @@ Commands:
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, cast
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -55,7 +54,8 @@ from etfh.http import PoliteClient
 from etfh.parse.registry import find_parser
 from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
 from etfh.secmaster.openfigi import FigiLookup
-from etfh.secmaster.overrides import Override, load_overrides
+from etfh.secmaster.overrides import load_overrides
+from etfh.secmaster.review import append_overrides, approve
 from etfh.spotcheck import spotcheck as run_spotcheck
 from etfh.storage import RawStore
 from etfh.types import Decision, SourceKind
@@ -191,6 +191,7 @@ def build(
     typer.echo(f"changes {result.n_changes} rows")
     typer.echo(f"qa events {result.n_qa_events}")
     typer.echo(f"unmatched {result.n_unmatched}")
+    typer.echo(f"name proposals {result.n_name_proposals}")
     if openfigi:
         typer.echo(f"figi rows {result.n_figi}")
 
@@ -331,40 +332,6 @@ def export(
         typer.echo(f"wrote {path}")
 
 
-class _ReviewApi(Protocol):
-    """The reviewed-name functions the CLI needs (``etfh.secmaster.review``).
-
-    Declared as a protocol so the CLI can be tested against a contract fake
-    while the module is still being written, and so mypy checks the calls the
-    CLI makes.
-    """
-
-    def approve(
-        self,
-        proposals: pl.DataFrame,
-        *,
-        confidence: str | None = None,
-        names: Sequence[str] = (),
-        reviewer: str,
-        reviewed_on: date,
-    ) -> Sequence[Override]: ...
-
-    def append_overrides(self, path: Path, overrides: Sequence[Override]) -> int: ...
-
-
-def _review_api() -> _ReviewApi:
-    """Return the reviewed-name module (D54), or fail with a clear message."""
-    try:
-        module = importlib.import_module("etfh.secmaster.review")
-    except ModuleNotFoundError:
-        typer.echo(
-            "error: name review is not available in this build (etfh.secmaster.review is missing)",
-            err=True,
-        )
-        raise typer.Exit(code=2) from None
-    return cast(_ReviewApi, module)
-
-
 review_app = typer.Typer(
     help="Review name-match proposals and record approved overrides.",
     no_args_is_help=True,
@@ -450,18 +417,35 @@ def review_approve(
             err=True,
         )
         raise typer.Exit(code=2)
-    api = _review_api()
     reviewed_on = datetime.now(tz=_TORONTO).date()
-    approved = list(
-        api.approve(
+    try:
+        approved = approve(
             proposals,
             confidence=confidence,
             names=wanted,
             reviewer=reviewer,
             reviewed_on=reviewed_on,
         )
-    )
-    existing = _override_keys(overrides)
+    except ValueError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    existing = _existing_overrides(overrides)
+    conflicts = [
+        override
+        for override in approved
+        if (override.match_type, override.match_value) in existing
+        and existing[(override.match_type, override.match_value)] != override.security_id
+    ]
+    if conflicts:
+        typer.echo(
+            "error: a selected proposal was already reviewed as a different security id: "
+            + ", ".join(
+                f"{override.match_value} -> {existing[(override.match_type, override.match_value)]}"
+                for override in conflicts
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=2)
     new = [
         override
         for override in approved
@@ -479,7 +463,11 @@ def review_approve(
             typer.echo(f"  {override.match_type} {override.match_value} -> {override.security_id}")
         typer.echo(f"dry run: nothing written to {overrides}")
         return
-    added = api.append_overrides(overrides, new)
+    try:
+        added = append_overrides(overrides, approved)
+    except ValueError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
     typer.echo(
         f"approved {added} name override(s) for reviewer={reviewer!r} "
         f"reviewed_on={reviewed_on.isoformat()} in {overrides}"
@@ -588,11 +576,14 @@ def _load_proposals(path: Path) -> pl.DataFrame:
     return frame
 
 
-def _override_keys(path: Path) -> set[tuple[str, str]]:
-    """``(match_type, match_value)`` pairs already recorded in ``path``."""
+def _existing_overrides(path: Path) -> dict[tuple[str, str], str]:
+    """``(match_type, match_value) -> security_id`` already recorded in ``path``."""
     if not Path(path).is_file():
-        return set()
-    return {(override.match_type, override.match_value) for override in load_overrides(path)}
+        return {}
+    return {
+        (override.match_type, override.match_value): override.security_id
+        for override in load_overrides(path)
+    }
 
 
 def _parse_date(value: str, option: str) -> date:
