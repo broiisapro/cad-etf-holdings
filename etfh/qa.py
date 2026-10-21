@@ -2,7 +2,13 @@
 
 Reads ``file_versions``, ``qa_events`` and (when present) ``holdings`` from a
 DuckDB built by ``etfh build``; the additive ``sources`` table (D53) supplies
-the issuer and source kind when it exists.
+the issuer, source kind and format when it exists.
+
+The report keeps daily holdings and quarterly portfolio disclosures in
+separate quality sections: each gets its own per-issuer median unmatched weight
+share and its own worst-funds list (only funds with a share above zero, so a
+clean portfolio does not pad the list), and the shares are derived from the
+source kind, never from weight-sum heuristics.
 
 Rules the report and exit code encode:
 
@@ -10,7 +16,9 @@ Rules the report and exit code encode:
   but not excluded (or has no ``file_versions`` row at all) is additionally
   reported under ``inconsistent:`` and keeps exit code 1;
 - exit code 1 means the tables are missing or the database is inconsistent;
-- exit code 3 means a ``--max-unmatched-share`` threshold was exceeded;
+- exit code 3 means a ``--max-unmatched-share`` threshold was exceeded by an
+  included daily file (quarterly disclosures are partial by nature and never
+  trip it);
 - otherwise 0: every errored file is excluded and reported.
 """
 
@@ -27,6 +35,7 @@ __all__ = [
     "ExcludedFile",
     "InconsistentFile",
     "QaSummary",
+    "UnmatchedQuality",
     "UnmatchedShare",
     "exit_code",
     "render",
@@ -35,6 +44,12 @@ __all__ = [
 ]
 
 _DAILY_KIND = "daily_holdings"
+_QUARTERLY_KIND = "quarterly_disclosure"
+_PDF_FORMAT = "pdf"
+_QUALITY_DAILY = "daily"
+_QUALITY_QUARTERLY = "quarterly"
+# Fixed order: the report must not depend on dict or database row order.
+_QUALITY_KINDS = (_QUALITY_DAILY, _QUALITY_QUARTERLY)
 _MAX_WORST_FUNDS = 10
 
 
@@ -73,6 +88,15 @@ class UnmatchedShare:
 
 
 @dataclass(frozen=True, slots=True)
+class UnmatchedQuality:
+    """Unmatched-weight quality for one source kind (``daily``/``quarterly``)."""
+
+    kind: str
+    issuer_medians: tuple[tuple[str, float], ...] = ()
+    worst_funds: tuple[UnmatchedShare, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class QaSummary:
     """Totals, files and unmatched-weight measurements read from the database."""
 
@@ -84,8 +108,7 @@ class QaSummary:
     unmatched_rows: int = 0
     unmatched_examples: tuple[str, ...] = ()
     unmatched_shares: tuple[UnmatchedShare, ...] = ()
-    unmatched_issuer_medians: tuple[tuple[str, float], ...] = ()
-    unmatched_worst_funds: tuple[UnmatchedShare, ...] = ()
+    unmatched_quality: tuple[UnmatchedQuality, ...] = ()
     max_unmatched_share: float | None = None
     unmatched_over_threshold: tuple[UnmatchedShare, ...] = ()
     tables_missing: bool = False
@@ -150,24 +173,47 @@ def unmatched_shares(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     )
 
 
-def _source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, str]]:
-    """``source_id -> (issuer, kind)`` from the additive ``sources`` table.
+def _source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, str, str]]:
+    """``source_id -> (issuer, kind, format)`` from the additive ``sources`` table.
 
     When the table does not exist (older database), every source is treated as
     an issuer named after itself with kind ``daily_holdings``, so the report
-    and the threshold stay deterministic without guessing.
+    and the threshold stay deterministic without guessing. A legacy table
+    without the ``format`` column is read too; its format is then unknown.
     """
-    try:
-        rows = con.execute("SELECT source_id, issuer, kind FROM sources").fetchall()
-    except duckdb.Error:
+    queries = (
+        "SELECT source_id, issuer, kind, format FROM sources",
+        "SELECT source_id, issuer, kind, NULL AS format FROM sources",
+    )
+    rows: list[tuple[object, ...]] | None = None
+    for query in queries:
+        try:
+            rows = con.execute(query).fetchall()
+        except duckdb.Error:
+            continue
+        break
+    if rows is None:
         return {}
-    metadata: dict[str, tuple[str, str]] = {}
-    for source_id, issuer, kind in rows:
+    metadata: dict[str, tuple[str, str, str]] = {}
+    for source_id, issuer, kind, source_format in rows:
         metadata[str(source_id)] = (
             str(issuer) if issuer is not None else str(source_id),
             str(kind) if kind is not None else _DAILY_KIND,
+            str(source_format) if source_format is not None else "",
         )
     return metadata
+
+
+def _quality_of(metadata: dict[str, tuple[str, str, str]], source_id: str) -> str:
+    """``daily`` or ``quarterly`` for a source, from its recorded kind/format."""
+    _issuer, kind, source_format = metadata.get(source_id, (source_id, _DAILY_KIND, ""))
+    if kind == _QUARTERLY_KIND or source_format == _PDF_FORMAT:
+        return _QUALITY_QUARTERLY
+    return _QUALITY_DAILY
+
+
+def _issuer_of(metadata: dict[str, tuple[str, str, str]], source_id: str) -> str:
+    return metadata.get(source_id, (source_id, _DAILY_KIND, ""))[0]
 
 
 def _share_rows(frame: pl.DataFrame) -> list[UnmatchedShare]:
@@ -182,6 +228,16 @@ def _share_rows(frame: pl.DataFrame) -> list[UnmatchedShare]:
         )
         for row in frame.iter_rows(named=True)
     ]
+
+
+def _worst_rank(row: UnmatchedShare) -> tuple[float, str, str]:
+    """Deterministic tie-break for choosing one file per fund."""
+    return (row.share, row.as_of_date.isoformat(), row.source_id)
+
+
+def _worst_sort_key(row: UnmatchedShare) -> tuple[float, str, str, str]:
+    """Worst first; stable when shares tie."""
+    return (-row.share, row.fund_ticker, row.as_of_date.isoformat(), row.source_id)
 
 
 def summarize(
@@ -311,32 +367,39 @@ def summarize(
 
     shares = _share_rows(shares_frame)
     metadata = _source_metadata(con)
-    by_issuer: dict[str, list[float]] = {}
-    for row in shares:
-        issuer = metadata.get(row.source_id, (row.source_id, _DAILY_KIND))[0]
-        by_issuer.setdefault(issuer, []).append(row.share)
-    issuer_medians = tuple(
-        (issuer, float(median(values))) for issuer, values in sorted(by_issuer.items())
-    )
 
-    worst_by_fund: dict[str, UnmatchedShare] = {}
+    by_quality_issuer: dict[str, dict[str, list[float]]] = {kind: {} for kind in _QUALITY_KINDS}
+    worst_by_quality_fund: dict[str, dict[str, UnmatchedShare]] = {
+        kind: {} for kind in _QUALITY_KINDS
+    }
     for row in shares:
-        current = worst_by_fund.get(row.fund_ticker)
-        if current is None or (
-            row.share,
-            row.as_of_date.isoformat(),
-            row.source_id,
-        ) > (
-            current.share,
-            current.as_of_date.isoformat(),
-            current.source_id,
-        ):
-            worst_by_fund[row.fund_ticker] = row
-    worst_funds = tuple(
-        sorted(worst_by_fund.values(), key=lambda row: (-row.share, row.fund_ticker))[
-            :_MAX_WORST_FUNDS
-        ]
-    )
+        quality = _quality_of(metadata, row.source_id)
+        by_quality_issuer[quality].setdefault(_issuer_of(metadata, row.source_id), []).append(
+            row.share
+        )
+        current = worst_by_quality_fund[quality].get(row.fund_ticker)
+        if current is None or _worst_rank(row) > _worst_rank(current):
+            worst_by_quality_fund[quality][row.fund_ticker] = row
+
+    quality_summaries: list[UnmatchedQuality] = []
+    for quality in _QUALITY_KINDS:
+        issuer_medians = tuple(
+            (issuer, float(median(values)))
+            for issuer, values in sorted(by_quality_issuer[quality].items())
+        )
+        worst_funds = tuple(
+            sorted(
+                (row for row in worst_by_quality_fund[quality].values() if row.share > 0),
+                key=_worst_sort_key,
+            )[:_MAX_WORST_FUNDS]
+        )
+        quality_summaries.append(
+            UnmatchedQuality(
+                kind=quality,
+                issuer_medians=issuer_medians,
+                worst_funds=worst_funds,
+            )
+        )
 
     over_threshold: tuple[UnmatchedShare, ...] = ()
     if max_unmatched_share is not None:
@@ -344,7 +407,7 @@ def summarize(
             row
             for row in shares
             if row.share > max_unmatched_share
-            and metadata.get(row.source_id, ("", _DAILY_KIND))[1] == _DAILY_KIND
+            and _quality_of(metadata, row.source_id) == _QUALITY_DAILY
         )
 
     return QaSummary(
@@ -356,8 +419,7 @@ def summarize(
         unmatched_rows=int(unmatched_row[0]) if unmatched_row is not None else 0,
         unmatched_examples=tuple(f"{row[0]} {row[1]}" for row in examples),
         unmatched_shares=tuple(shares),
-        unmatched_issuer_medians=issuer_medians,
-        unmatched_worst_funds=worst_funds,
+        unmatched_quality=tuple(quality_summaries),
         max_unmatched_share=max_unmatched_share,
         unmatched_over_threshold=over_threshold,
     )
@@ -408,11 +470,24 @@ def render(summary: QaSummary) -> str:
         lines.append("unmatched securities: 0")
     if summary.unmatched_shares:
         lines.append("unmatched weight share (included files):")
-        lines.append("  issuer median:")
-        for issuer, value in summary.unmatched_issuer_medians:
-            lines.append(f"    {issuer} {value:.2%}")
-        lines.append("  worst funds:")
-        lines.extend(_render_share("    ", row) for row in summary.unmatched_worst_funds)
+        for quality in summary.unmatched_quality:
+            label = f"  {quality.kind} files"
+            if not quality.issuer_medians and not quality.worst_funds:
+                lines.append(f"{label}: none")
+                continue
+            lines.append(f"{label}:")
+            if quality.issuer_medians:
+                lines.append("    issuer median:")
+                lines.extend(
+                    f"      {issuer} {value:.2%}" for issuer, value in quality.issuer_medians
+                )
+            else:
+                lines.append("    issuer median: none")
+            if quality.worst_funds:
+                lines.append("    worst funds:")
+                lines.extend(_render_share("      ", row) for row in quality.worst_funds)
+            else:
+                lines.append("    worst funds: none")
     else:
         lines.append("unmatched weight share (included files): none")
     if summary.max_unmatched_share is not None:
