@@ -20,6 +20,7 @@ from tests._dashboard_helpers import (
     APP_PATH,
     AS_OF,
     QUALITY_AS_OF,
+    QUALITY_FUNDS,
     REPO_ROOT,
     build_synthetic_db,
     install_fake_analytics,
@@ -355,6 +356,7 @@ def test_quality_panel_apptest(monkeypatch, quality_db: Path) -> None:
     app.selectbox(key="fund").select("HIGH").run()
 
     assert not app.exception
+    assert app.selectbox(key="fund").options == QUALITY_FUNDS
     metrics = _metric_values(app)
     assert metrics["Portfolio date"] == "2026-11-02"
     assert metrics["Source"] == "Daily holdings (CSV)"
