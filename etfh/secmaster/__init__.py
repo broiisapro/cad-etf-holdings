@@ -17,9 +17,16 @@ from etfh.secmaster.identifiers import (
     normalize_exchange,
     normalize_ticker,
 )
+from etfh.secmaster.names import (
+    infer_kind,
+    name_proposals,
+    normalize_country,
+    normalize_name,
+    reference_names,
+)
 from etfh.secmaster.openfigi import FigiLookup
 from etfh.secmaster.overrides import Override, load_overrides
-from etfh.secmaster.reports import fuzzy_proposals, normalize_name, unmatched_report
+from etfh.secmaster.reports import fuzzy_proposals, unmatched_report
 from etfh.secmaster.resolve import SecurityMaster
 
 __all__ = [
@@ -30,10 +37,14 @@ __all__ = [
     "cusip_is_valid",
     "cusip_to_isin",
     "fuzzy_proposals",
+    "infer_kind",
     "isin_is_valid",
     "load_overrides",
+    "name_proposals",
+    "normalize_country",
     "normalize_exchange",
     "normalize_name",
     "normalize_ticker",
+    "reference_names",
     "unmatched_report",
 ]

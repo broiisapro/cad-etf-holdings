@@ -8,11 +8,10 @@ review file. A proposal becomes real only after a human copies it into
 
 from __future__ import annotations
 
-import re
-import unicodedata
-
 import polars as pl
 from rapidfuzz import fuzz
+
+from etfh.secmaster.names import normalize_name
 
 __all__ = ["fuzzy_proposals", "normalize_name", "unmatched_report"]
 
@@ -42,53 +41,7 @@ _PROPOSAL_SCHEMA = {
     "score": pl.Float64,
 }
 
-_CORPORATE_SUFFIXES = frozenset(
-    {
-        "AG",
-        "CO",
-        "COMPANY",
-        "CORP",
-        "CORPORATION",
-        "GMBH",
-        "HOLDING",
-        "HOLDINGS",
-        "INC",
-        "INCORPORATED",
-        "LIMITEE",
-        "LLC",
-        "LP",
-        "LLP",
-        "LTD",
-        "LIMITED",
-        "LTEE",
-        "NV",
-        "PLC",
-        "SA",
-        "TRUST",
-        "ULC",
-    }
-)
-
 _NON_SECURITY_PREFIXES = ("CASH:", "DERIV:")
-
-
-def normalize_name(name: str) -> str:
-    """Normalize a security name for fuzzy matching.
-
-    Upper-cases, drops accents, replaces punctuation with spaces and removes
-    trailing corporate suffixes (Inc, Corp, Ltd, Limited, Holdings, ...).
-    This only feeds rapidfuzz proposals; it is never used to merge rows.
-    """
-    decomposed = unicodedata.normalize("NFKD", name)
-    ascii_name = "".join(
-        character for character in decomposed if not unicodedata.combining(character)
-    )
-    tokens = re.sub(r"[^0-9A-Z]+", " ", ascii_name.upper()).split()
-    while tokens and tokens[-1] in _CORPORATE_SUFFIXES:
-        tokens.pop()
-    if tokens:
-        return " ".join(tokens)
-    return " ".join(re.sub(r"[^0-9A-Z]+", " ", ascii_name.upper()).split())
 
 
 def unmatched_report(frame: pl.DataFrame) -> pl.DataFrame:
