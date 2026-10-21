@@ -1,0 +1,47 @@
+{
+  "code": "PURC",
+  "name": "Purpose Lookalike Bullion Fund",
+  "urlName": "purpose-lookalike-bullion-fund",
+  "fundCode": "PURC",
+  "assetClass": [
+    {
+      "fields": {
+        "slug": "commodities",
+        "className": "Commodities",
+        "displayName": "Commodities"
+      }
+    }
+  ],
+  "portfolio": {
+    "dt": "2026-10-20",
+    "exposure": {},
+    "Level1": {
+      "asset_class_metals": {
+        "Gold Bars": 128450.375
+      }
+    },
+    "Level2": {
+      "corr_table": {
+        "Canadian Equity": {
+          "1 YEAR": "0.71",
+          "5 YEAR": "0.42",
+          "10 YEAR": "0.28"
+        },
+        "US Equity": {
+          "1 YEAR": "0.45",
+          "5 YEAR": "0.31",
+          "10 YEAR": "0.17"
+        }
+      }
+    },
+    "Level4": {
+      "holdings": [
+        {
+          "name": "Gold Bars",
+          "weight": "128,450 oz"
+        }
+      ]
+    },
+    "holdings_data": null
+  }
+}

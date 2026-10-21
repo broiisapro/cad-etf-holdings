@@ -13,7 +13,10 @@ from etfh.parse.bmo import PARSERS, BmoParser
 from etfh.parse.registry import find_parser
 from etfh.registry import load_sources
 from etfh.schema import ParsedHoldings
-from etfh.types import RawFile
+from etfh.secmaster.identifiers import isin_is_valid
+from etfh.secmaster.resolve import SecurityMaster
+from etfh.types import AssetClass, RawFile
+from etfh.validate import ValidationConfig, validate_file
 from tests._parse_helpers import make_raw
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "issuers" / "bmo"
@@ -69,13 +72,41 @@ def test_duplicate_isin_lines_are_kept_separate() -> None:
     ParsedHoldings.validate(frame)
     assert frame.height == 4
     assert float(frame["weight"].sum()) == pytest.approx(1.0, abs=1e-9)
-    duplicates = frame.filter(pl.col("isin") == "RU0000000001")
+    duplicates = frame.filter(pl.col("isin") == "RU0000000003")
     assert duplicates.height == 2
     assert duplicates["security_name"].unique().to_list() == ["Quarrystone Metals PAO"]
     assert set(duplicates["currency"].to_list()) == {"RUB", "USD"}
     assert duplicates["weight"].to_list() == pytest.approx([0.099, 0.001], abs=1e-12)
     assert duplicates["shares"].to_list() == [5000.0, 1500.0]
     assert duplicates["market_value"].to_list() == pytest.approx([100.0, 50.0])
+
+
+def test_every_fixture_isin_has_a_valid_check_digit() -> None:
+    frame = BmoParser().parse(_raw("duplicate_lines.xlsx", fund_ticker="DULK")).frame
+    isins = [value for value in frame["isin"].to_list() if value is not None]
+    assert len(isins) == 4
+    assert all(isin_is_valid(value) for value in isins)
+
+
+def test_duplicate_lines_reach_the_d51_info_check_end_to_end() -> None:
+    """The real fixture must exercise D51, not just the parser's row count."""
+    parsed = BmoParser().parse(_raw("duplicate_lines.xlsx", fund_ticker="DULK"))
+    parsed.frame = SecurityMaster().assign(parsed.frame)
+    findings = validate_file(
+        parsed,
+        source=load_sources(CONFIG_DIR / "sources.yaml")["bmo_daily"],
+        fund_asset_class=AssetClass.equity,
+        config=ValidationConfig.load(CONFIG_DIR / "validation.yaml"),
+    )
+    duplicates = [
+        finding
+        for finding in findings
+        if finding.check in {"duplicate_lines", "duplicate_security"}
+    ]
+    assert len(duplicates) == 1
+    assert duplicates[0].check == "duplicate_lines"
+    assert duplicates[0].severity == "info"
+    assert "same identifier form (ISIN)" in duplicates[0].detail
 
 
 def test_header_block_variants_are_found_by_name(tmp_path: Path) -> None:

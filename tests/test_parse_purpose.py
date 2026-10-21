@@ -21,6 +21,7 @@ FIXTURE = FIXTURE_DIR / "lookalike.json"
 OPTIONS = FIXTURE_DIR / "options.json"
 PARTIAL = FIXTURE_DIR / "partial.json"
 TOP_TEN = FIXTURE_DIR / "top_ten.json"
+COMMODITY = FIXTURE_DIR / "commodity.json"
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
@@ -80,6 +81,81 @@ def test_weight_decimals_note_tracks_the_printed_precision(tmp_path: Path) -> No
     parsed = PurposeParser().parse(_raw(path))
     assert "weight_decimals=3" in parsed.notes
     assert float(parsed.frame["weight"].sum()) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_physical_commodity_quantity_parses_as_one_holding() -> None:
+    parsed = PurposeParser().parse(_raw(COMMODITY, "PURC"))
+    assert parsed.as_of_date == date(2026, 10, 20)
+    assert "commodity_quantity=128,450 oz" in parsed.notes
+    assert "weight_decimals=2" in parsed.notes
+    assert "partial_list=true" not in parsed.notes
+    assert not any(note.startswith("unit_check=") for note in parsed.notes)
+    frame = parsed.frame
+    ParsedHoldings.validate(frame)
+    assert frame.height == 1
+    row = frame.to_dicts()[0]
+    assert row["security_name"] == "Gold Bars"
+    assert row["asset_class"] == "commodity"
+    assert row["weight"] == 1.0
+    # A physical holding has no security identifier and no fabricated ticker.
+    assert row["security_ticker"] is None
+    assert row["isin"] is None
+    assert row["cusip"] is None
+    assert row["exchange"] is None
+    assert row["shares"] is None
+    assert row["market_value"] is None
+    assert float(frame["weight"].sum()) == 1.0
+
+
+def test_commodity_branch_joins_repeated_lines_of_one_commodity(tmp_path: Path) -> None:
+    payload = _payload(COMMODITY)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    portfolio["Level4"]["holdings"].append({"name": "Gold Bars", "weight": "10,000 oz"})  # type: ignore[index]
+    path = _write(tmp_path, payload, "two_bars.json")
+    parsed = PurposeParser().parse(_raw(path, "PURC"))
+    assert parsed.frame.height == 1
+    assert "commodity_quantity=128,450 oz; 10,000 oz" in parsed.notes
+
+
+def test_a_weighted_row_keeps_the_file_out_of_the_commodity_branch(tmp_path: Path) -> None:
+    payload = _payload(COMMODITY)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    portfolio["Level4"]["holdings"].append(  # type: ignore[index]
+        {
+            "name": "Northvale Banking Corp.",
+            "geo": "Canada",
+            "sector": "Financials",
+            "weight": "5.00%",
+        }
+    )
+    path = _write(tmp_path, payload, "mixed.json")
+    parsed = PurposeParser().parse(_raw(path, "PURC"))
+    assert parsed.frame.height == 1
+    assert parsed.frame["security_name"][0] == "Northvale Banking Corp."
+    assert parsed.frame["weight"][0] == pytest.approx(0.05, abs=1e-12)
+    assert not any(note.startswith("commodity_quantity=") for note in parsed.notes)
+    # The quantity line is not a holding and the shortfall stays visible.
+    assert not any(note.startswith("partial_list") for note in parsed.notes)
+
+
+def test_mixed_physical_names_or_unreadable_rows_still_fail(tmp_path: Path) -> None:
+    payload = _payload(COMMODITY)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    portfolio["Level4"]["holdings"].append({"name": "Silver Bars", "weight": "9,000 oz"})  # type: ignore[index]
+    distinct = _write(tmp_path, payload, "distinct.json")
+    with pytest.raises(ValueError, match="no holdings rows found"):
+        PurposeParser().parse(_raw(distinct, "PURC"))
+
+    payload = _payload(COMMODITY)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    portfolio["Level4"]["holdings"].append({"name": "Suspense Account", "weight": "-"})  # type: ignore[index]
+    unreadable = _write(tmp_path, payload, "unreadable.json")
+    with pytest.raises(ValueError, match="no holdings rows found"):
+        PurposeParser().parse(_raw(unreadable, "PURC"))
 
 
 def test_parsed_frame_validates_against_schema() -> None:

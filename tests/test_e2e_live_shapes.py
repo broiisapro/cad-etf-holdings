@@ -6,7 +6,8 @@ under ``portfolio.holdings_data`` as a dict of named sections (the fund-of-funds
 look-alike structure offline: the section list is parsed, the source's own
 complete exposure breakdown marks the file ``partial_list`` (D52), and a
 document whose only row is a physical quantity (ounces, no portfolio weight)
-stays excluded and reported.
+parses to one commodity holding at 100% (wave 04 handles that shape instead of
+excluding it, so KILO is usable).
 """
 
 from __future__ import annotations
@@ -97,11 +98,17 @@ def test_sectioned_holdings_dict_is_parsed_and_marked_partial(tmp_path: Path) ->
     assert "declared_unit=percent" in parsed.notes
 
 
-def test_quantity_only_document_is_rejected_by_the_parser(tmp_path: Path) -> None:
+def test_quantity_only_document_parses_as_one_commodity_holding(tmp_path: Path) -> None:
     path = tmp_path / "quantity.json"
     path.write_text(json.dumps(_quantity_document()), encoding="utf-8")
-    with pytest.raises(ValueError, match="no holdings rows found"):
-        PurposeParser().parse(_raw_file(path, sha="b" * 64))
+    parsed = PurposeParser().parse(_raw_file(path, sha="b" * 64))
+    assert parsed.frame.height == 1
+    row = parsed.frame.to_dicts()[0]
+    assert row["security_name"] == "Gold Bars"
+    assert row["asset_class"] == "commodity"
+    assert row["weight"] == 1.0
+    assert row["security_ticker"] is None
+    assert "commodity_quantity=191,266 oz" in parsed.notes
 
 
 def _write_document(store: RawStore, document: dict[str, object], *, fetched_at: datetime) -> None:
@@ -127,14 +134,14 @@ def _build_mixed_store(tmp_path: Path) -> tuple[Path, BuildResult]:
     return tmp_path / "out", result
 
 
-def test_build_includes_a_partial_list_and_excludes_the_quantity_file(
+def test_build_includes_a_partial_list_and_a_commodity_file(
     tmp_path: Path,
 ) -> None:
     _out_dir, result = _build_mixed_store(tmp_path)
     assert result.n_file_versions == 2
-    assert result.n_included_files == 1
-    assert result.n_excluded_files == 1
-    assert result.n_holdings == 3
+    assert result.n_included_files == 2
+    assert result.n_excluded_files == 0
+    assert result.n_holdings == 4
     connection = duckdb.connect(str(result.db_path), read_only=True)
     try:
         versions = connection.execute(
@@ -146,9 +153,9 @@ def test_build_includes_a_partial_list_and_excludes_the_quantity_file(
         summary = qa.summarize(connection)
     finally:
         connection.close()
-    assert versions == [("excluded", 1), ("included", 1)]
+    assert versions == [("included", 2)]
     assert ("partial_list", "info", False) in events
-    assert ("parse_error", "error", True) in events
+    assert all(severity != "error" for _check, severity, _excluded in events)
     assert qa.exit_code(summary) == 0
 
 
@@ -177,4 +184,4 @@ def test_holdings_frame_keeps_the_normalized_shape(tmp_path: Path) -> None:
         "raw_file_sha256",
     ]
     assert frame["fund_ticker"].unique().to_list() == ["PDF"]
-    assert frame["weight"].sum() == pytest.approx(0.625)
+    assert frame["weight"].sum() == pytest.approx(1.625)
