@@ -120,6 +120,10 @@ def test_second_build_is_byte_identical(tmp_path: Path) -> None:
         left = (tmp_path / "a" / "parquet" / f"{table}.parquet").read_bytes()
         right = (tmp_path / "b" / "parquet" / f"{table}.parquet").read_bytes()
         assert left == right, table
+    for report in ("unmatched.csv", "fuzzy_proposals.csv", "name_proposals.csv"):
+        left = (tmp_path / "a" / "reports" / report).read_bytes()
+        right = (tmp_path / "b" / "reports" / report).read_bytes()
+        assert left == right, report
 
 
 def test_two_bad_files_are_excluded_from_holdings(
@@ -416,13 +420,19 @@ def test_every_table_is_written_in_its_documented_order(
         assert frame.equals(frame.sort(sort_key)), table
 
 
-def test_name_proposals_report_has_the_contract_header(
+def test_name_proposals_report_offers_reviewed_names(
     built: tuple[Path, BuildResult],
 ) -> None:
-    """The review input exists after every build (header-only until #104)."""
-    out_dir, _ = built
-    lines = (out_dir / "reports" / "name_proposals.csv").read_text(encoding="utf-8").splitlines()
-    assert lines == [",".join(NAME_PROPOSAL_COLUMNS)]
+    """The build proposes names for unmatched holdings but applies nothing."""
+    out_dir, result = built
+    frame = pl.read_csv(out_dir / "reports" / "name_proposals.csv")
+    assert frame.columns == list(NAME_PROPOSAL_COLUMNS)
+    assert result.n_name_proposals == frame.height > 0
+    assert set(frame["confidence"].to_list()) <= {"exact", "fuzzy"}
+    assert frame["candidate_security_id"].null_count() == 0
+    assert frame["normalized_name"].null_count() == 0
+    # proposals are review input only: the ids they name are not applied here
+    assert result.n_unmatched > 0
 
 
 class _FigiMaster:
