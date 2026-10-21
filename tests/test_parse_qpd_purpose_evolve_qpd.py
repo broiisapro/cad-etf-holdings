@@ -21,6 +21,7 @@ from tests._qpd_helpers import (
     write_evolve_lookalike,
     write_purpose_lookalike,
     write_purpose_options_lookalike,
+    write_purpose_overweight_lookalike,
     write_purpose_wrapped_neighbours,
 )
 
@@ -120,6 +121,31 @@ def test_purpose_wrapped_neighbours_are_not_glued_together(tmp_path: Path) -> No
         "Pineview Software Corp.",
     ]
     assert parsed.frame["weight"].to_list() == pytest.approx([0.032, 0.025, 0.05, 0.043])
+
+
+def test_purpose_position_above_100_percent_is_kept_and_reported(tmp_path: Path) -> None:
+    """KILO prints a 101.00% gold position offset by negative other net assets.
+
+    The frozen schema caps weight at 1.0, so the parser clamps the row to 100%
+    and records the printed value in a note; dropping the position would leave
+    only the 0.03% cash line.
+    """
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_purpose_overweight_lookalike(tmp_path / "purpose_overweight.pdf"),
+            source_id="purpose_qpd",
+            fund_ticker="KILO",
+            issuer="purpose",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    assert parsed.frame["security_name"].to_list() == [
+        "Gold Bars",
+        "Cash and Cash Equivalents",
+    ]
+    assert parsed.frame["weight"].to_list() == pytest.approx([1.0, 0.0003])
+    assert "weight_capped_percent=101" in parsed.notes
+    assert round(float(parsed.frame["weight"].sum()), 4) == 1.0003
 
 
 def test_evolve_lookalike_parses(tmp_path: Path) -> None:

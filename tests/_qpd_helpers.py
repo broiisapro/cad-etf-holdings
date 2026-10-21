@@ -622,6 +622,109 @@ def write_purpose_wrapped_neighbours(path: Path) -> Path:
     return path
 
 
+def write_vanguard_wrapped_lookalike(path: Path) -> Path:
+    """Write a fictional Vanguard-style disclosure with a wrapped fund name.
+
+    Mirrors VXC: the first holding's name wraps onto the line that carries the
+    weight, the first weight is printed with a ``%`` sign and later ones
+    without (their right edge sits about six points further left), and the
+    unlabelled listed total and footnotes follow the table.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 330.0
+
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP, "Quarterly Portfolio Disclosure | June 30, 2026")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 16, "Vanguard Fictional All Cap ETF")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 30, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(_LEFT, _TOP - 50, "Sector Allocation")
+    pdf.drawString(right, _TOP - 50, "Top 25 Holdings")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "As at June 30, 2026")
+    pdf.drawString(right, _TOP - 62, "As at June 30, 2026")
+    pdf.drawString(_LEFT, _TOP - 74, "% of")
+    pdf.drawRightString(_RIGHT, _TOP - 74, "% of Underlying Fund")
+    pdf.drawString(_RIGHT - 90, _TOP - 86, "Underlying Fund")
+
+    sectors = [("Financials", "32.9%"), ("Energy", "18.0")]
+    y = _TOP - 100
+    for name, weight in sectors:
+        pdf.drawString(_LEFT, y, name)
+        pdf.drawRightString(290.0, y, weight)
+        y -= 14
+
+    pdf.drawString(right, y, "Vanguard Fictional Large-Cap ETF*")
+    pdf.drawRightString(_RIGHT, y, "12.5%")
+    y -= 10
+    pdf.drawString(right, y, "Vanguard Fictional Developed All Cap ex North America")
+    y -= 10
+    pdf.drawString(right, y, "Index ETF**")
+    pdf.drawRightString(_RIGHT - 6.6, y, "26.4")
+    y -= 10
+    pdf.drawString(right, y, "Vanguard Fictional Emerging Markets ETF*")
+    pdf.drawRightString(_RIGHT - 6.6, y, "11.0")
+    y -= 10
+    pdf.drawString(right, y, "Cash")
+    pdf.drawRightString(_RIGHT - 6.6, y, "0.3")
+    y -= 10
+    pdf.drawString(right, y, "50.2")
+    y -= 10
+    pdf.drawString(right, y, "Total net asset value $12,345,678,901")
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(_LEFT, y - 12, "* U.S.-domiciled fictional ETF")
+    pdf.drawString(_LEFT, y - 22, "** Canada-domiciled fictional ETF")
+    pdf.save()
+    return path
+
+
+def write_purpose_overweight_lookalike(path: Path) -> Path:
+    """Write a fictional Purpose-style disclosure with a position above 100% NAV.
+
+    Mirrors KILO: a gold position of 101.00% is offset by negative other net
+    assets, so the printed weight itself exceeds 100 while the fund totals 100.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Quarterly Portfolio Disclosure")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 320.0
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Fictional Meridian Gold Fund")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 16, "As At March 31, 2026")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(right, _TOP - 16, "TOP 25 HOLDINGS")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(right, _TOP - 30, "% of Fund's Net")
+    pdf.drawString(right, _TOP - 42, "Asset Value")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 64, "SECTOR MIX")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 76, "Gold Holdings 101.00")
+    pdf.drawString(_LEFT, _TOP - 90, "Cash and Cash Equivalents 0.03")
+    pdf.drawString(_LEFT, _TOP - 104, "Net Other Assets -1.03")
+    pdf.drawString(_LEFT, _TOP - 118, "Total Net Asset Value 100.00")
+
+    y = _TOP - 56
+    pdf.drawString(right, y, "Gold Bars")
+    pdf.drawRightString(_RIGHT, y, "101.00")
+    y -= 14
+    pdf.drawString(right, y, "Cash and Cash Equivalents")
+    pdf.drawRightString(_RIGHT, y, "0.03")
+    pdf.save()
+    return path
+
+
 # Right-column x positions of the real Evolve layout: names at 360, the
 # sector weights right-aligned at 568, and the Top 25 weights right-aligned
 # at 336; the left/right split sits between 336 and 360.
