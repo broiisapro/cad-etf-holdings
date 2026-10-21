@@ -99,10 +99,11 @@ and the dashboard must show the result, and `etfh qa` must pass on a live build.
 ## Deviations
 
 - **Global name overrides are applied after identifiers,** not before (D8, D23,
-  D54). Without this, the live demo changed 35 identified rows — including
-  `GOOG` → `GOOGL` and two distinct Cogeco bonds — because a global override
-  also matched rows that already had their own ISIN, ticker or composite code.
-  Fund-specific name overrides still win over everything, as before.
+  D54). Without this, the live demo changed 35 identified rows — including an
+  equity share class rewritten as another class and two distinct bonds of one
+  issuer — because a global override also matched rows that already had their
+  own ISIN, ticker or composite code. Fund-specific name overrides still win
+  over everything, as before.
 - **Purpose's physical commodity feed (KILO)** is parsed as one commodity
   holding with weight 1.0 rather than excluded (#100).
 - **BMO quarterly disclosures could not be exercised** in this environment:
