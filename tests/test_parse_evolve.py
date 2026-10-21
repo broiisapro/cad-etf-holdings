@@ -33,6 +33,7 @@ def test_parses_lookalike_csv() -> None:
     assert parsed.as_of_date == date(2026, 10, 7)
     assert parsed.published_at is None
     assert parsed.notes[0] == "declared_unit=fraction"
+    assert "weight_decimals=6" in parsed.notes
     assert not any(note.startswith("unit_check=") for note in parsed.notes)
     assert "exchange_codes=CN,LN,US" in parsed.notes
     frame = parsed.frame
@@ -46,22 +47,32 @@ def test_parses_lookalike_csv() -> None:
     assert names[0] == "Northolt Instruments PLC"
 
 
-def test_exchange_codes_are_passed_through_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    import etfh.parse.evolve as evolve
+def test_single_exchange_codes_become_mics_and_composite_codes_stay_on_the_ticker() -> None:
+    parsed = EvolveParser().parse(_raw())
+    frame = parsed.frame
+    by_name = {row["security_name"]: row for row in frame.to_dicts()}
+    assert by_name["Northolt Instruments PLC"]["exchange"] == "XLON"
+    assert by_name["Northolt Instruments PLC"]["security_ticker"] == "NORL"
+    # US and CN aggregate several venues: no MIC, code kept on the ticker (D57).
+    assert by_name["Xenon Quarry Ventures Inc"]["exchange"] is None
+    assert by_name["Xenon Quarry Ventures Inc"]["security_ticker"] == "XQVI US"
+    assert by_name["Brookstone Railway Systems Ltd"]["exchange"] is None
+    assert by_name["Brookstone Railway Systems Ltd"]["security_ticker"] == "BRKS CN"
+    # The raw codes are still reported so the mapping table can grow.
+    assert "exchange_codes=CN,LN,US" in parsed.notes
 
-    seen: list[str | None] = []
 
-    def recorder(label: str | None) -> str | None:
-        seen.append(label)
-        return f"MIC:{label}"
-
-    monkeypatch.setattr(evolve, "normalize_exchange", recorder)
-    frame = EvolveParser().parse(_raw()).frame
-    by_name = {row["security_name"]: row["exchange"] for row in frame.to_dicts()}
-    assert by_name["Northolt Instruments PLC"] == "MIC:LN"
-    assert by_name["Xenon Quarry Ventures Inc"] == "MIC:US"
-    assert by_name["Brookstone Railway Systems Ltd"] == "MIC:CN"
-    assert sorted(set(seen)) == ["CN", "LN", "US"]
+def test_unknown_market_code_keeps_the_bare_ticker(tmp_path: Path) -> None:
+    path = tmp_path / "unknown_code.csv"
+    path.write_text(
+        "TICKER,PORTFOLIO_MWEIGHT,POSITION,SECURITY_NAME,GICS_SECTOR_NAME,COUNTRY\n"
+        '"ZQTE XY EQUITY",1.0,1,"Zeta Quarry Testing Inc",Industrials,"Canada"\n',
+        encoding="utf-8",
+    )
+    frame = EvolveParser().parse(_raw(path)).frame
+    assert frame["exchange"][0] is None
+    assert frame["security_ticker"][0] == "ZQTE"
+    assert "exchange_codes=XY" in EvolveParser().parse(_raw(path)).notes
 
 
 def test_cash_and_derivative_rows() -> None:
@@ -88,12 +99,31 @@ def test_derivative_tickers_keep_the_option_descriptor() -> None:
         "XQVI US 10/16/26 C30",
         "XQVA US 10/16/26 C30",
     }
+    by_ticker = {row["security_ticker"]: row["exchange"] for row in derivative.to_dicts()}
+    # Derivatives keep the venue MIC when the code names one venue, and the
+    # composite code stays inside the descriptor.
+    assert by_ticker["NORL LN 10/16/26 C125"] == "XLON"
+    assert by_ticker["XQVI US 10/16/26 C30"] is None
     # Two option lines share the security name; the descriptors keep them apart.
     same_name = derivative.filter(
         pl.col("security_name") == "Xenon Quarry Ventures Inc - CALL Option"
     )
     assert same_name.height == 2
     assert same_name["security_ticker"].n_unique() == 2
+
+
+def test_weight_decimals_counts_scientific_notation_as_decimal_places(tmp_path: Path) -> None:
+    path = tmp_path / "scientific.csv"
+    path.write_text(
+        "TICKER,PORTFOLIO_MWEIGHT,POSITION,SECURITY_NAME,GICS_SECTOR_NAME,COUNTRY\n"
+        '"AAAA US EQUITY",6.00000E-01,1,"Alpha Lake Corp",Industrials,"Canada"\n'
+        '"BBBB US EQUITY",4.00000E-01,1,"Beta Ridge Corp",Industrials,"Canada"\n',
+        encoding="utf-8",
+    )
+    parsed = EvolveParser().parse(_raw(path))
+    # 6.00000E-01 is 0.600000: five mantissa decimals plus one exponent place.
+    assert "weight_decimals=6" in parsed.notes
+    assert float(parsed.frame["weight"].sum()) == pytest.approx(1.0, abs=1e-12)
 
 
 def test_company_names_are_not_misread_as_derivatives(tmp_path: Path) -> None:
