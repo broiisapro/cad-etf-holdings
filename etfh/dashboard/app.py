@@ -1,8 +1,9 @@
 """Streamlit dashboard for the point-in-time Canadian ETF holdings dataset.
 
 The app opens the DuckDB file named by ``ETFH_DB`` (default
-``./build/etfh.duckdb``) in read-only mode and delegates every query to
-:mod:`etfh.analytics`; it never issues SQL itself.
+``./build/etfh.duckdb``) in read-only mode, through :func:`etfh.build.connect`
+so ``ETFH_DUCKDB_THREADS`` applies, and delegates every query to
+:mod:`etfh.analytics` and :mod:`etfh.qa`; it never issues SQL itself.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
 from etfh import analytics
+from etfh.build import connect
+from etfh.dashboard import quality
 
 DEFAULT_DB_PATH = "./build/etfh.duckdb"
 CHANGE_WINDOWS: dict[str, int] = {
@@ -37,6 +40,11 @@ def db_path() -> Path:
 def today() -> date:
     """Current date in America/Toronto (the dataset's reference timezone)."""
     return datetime.now(tz=ZoneInfo("America/Toronto")).date()
+
+
+def open_database(path: Path) -> duckdb.DuckDBPyConnection:
+    """Open ``path`` read-only, honouring ``ETFH_DUCKDB_THREADS`` (D49)."""
+    return connect(path, read_only=True)
 
 
 def percent(value: float) -> str:
@@ -105,19 +113,49 @@ def render_breakdown(
         st.altair_chart(breakdown_chart(data, by.title()), width="stretch")
 
 
+def render_quality(state: quality.FundQuality) -> None:
+    """Data-quality panel: portfolio date, source, coverage and exclusions."""
+    columns = st.columns(4)
+    columns[0].metric(
+        "Portfolio date",
+        state.as_of_date.isoformat() if state.as_of_date is not None else "-",
+    )
+    columns[1].metric("Source", state.source_label)
+    columns[2].metric("Coverage", state.coverage_label)
+    columns[3].metric(
+        "Unmatched weight share",
+        "n/a" if state.unmatched_share is None else percent(state.unmatched_share),
+    )
+    if state.as_of_date is None:
+        st.caption("No included file is known for this fund as of the selected date.")
+    elif state.unmatched_share is None:
+        st.caption("Unmatched weight is not measured for this fund version.")
+    if state.excluded_files:
+        for excluded in state.excluded_files:
+            st.warning(
+                f"Excluded file: {excluded.source_id} as of {excluded.as_of_label} "
+                f"({excluded.reason})."
+            )
+    else:
+        st.caption("No excluded files for this fund.")
+
+
 def render_fund(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> None:
-    """Holdings, concentration metrics, breakdowns and recent changes for one fund."""
+    """Holdings, data quality, breakdowns and recent changes for one fund."""
     metrics = analytics.concentration(con, fund, asof)
     heading = fund if metrics.as_of_date is None else f"{fund} — {metrics.as_of_date}"
     st.subheader(heading)
     if metrics.partial:
-        st.info("Top holdings only: this fund is covered by a quarterly disclosure.")
+        st.info("Top holdings only: this source publishes only part of the portfolio.")
     columns = st.columns(3)
     columns[0].metric("Holdings", metrics.n_holdings)
     columns[1].metric("Top 10 weight", percent(metrics.top10_weight))
     columns[2].metric("HHI", f"{metrics.hhi:.4f}")
 
     holdings = analytics.holdings_asof(con, fund, asof)
+    st.subheader("Data quality")
+    render_quality(quality.fund_quality(con, fund, asof, holdings=holdings))
+
     if holdings.is_empty():
         st.caption("No holdings known as of this date.")
     else:
@@ -148,7 +186,12 @@ def render_overlap(con: duckdb.DuckDBPyConnection, funds: list[str], asof: date)
     result = analytics.overlap(con, fund_a, fund_b, asof)
     st.metric("Overlap", percent(result.overlap))
     if result.partial:
-        st.info("Top holdings only: at least one fund is a quarterly disclosure.")
+        st.info("Top holdings only: at least one fund publishes only part of its portfolio.")
+    note = quality.understated_note(
+        list(quality.fund_qualities(con, [fund_a, fund_b], asof).values())
+    )
+    if note:
+        st.warning(note)
     st.subheader("Common holdings")
     if result.common.is_empty():
         st.caption("No common securities as of this date.")
@@ -172,6 +215,9 @@ def render_heatmap(con: duckdb.DuckDBPyConnection, funds: list[str], asof: date)
     if matrix.is_empty():
         st.caption("No overlap data as of this date.")
         return
+    note = quality.understated_note(list(quality.fund_qualities(con, chosen, asof).values()))
+    if note:
+        st.warning(note)
     st.altair_chart(heatmap_chart(matrix), width="stretch")
 
 
@@ -222,8 +268,8 @@ def main() -> None:
         st.stop()
 
     try:
-        con = duckdb.connect(str(path), read_only=True)
-    except duckdb.Error as exc:
+        con = open_database(path)
+    except (duckdb.Error, ValueError) as exc:
         st.error(f"Could not open {path} read-only: {exc}")
         st.stop()
 
