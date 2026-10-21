@@ -426,8 +426,8 @@ def review_approve(
     """Record approved name proposals as global name overrides (D54).
 
     Approval is always explicit: either a whole confidence class
-    (``--confidence exact``) or one or more normalized names (``--name``).
-    Proposals are never applied by the build itself.
+    (--confidence exact) or one or more normalized names (--name). Proposals
+    are never applied by the build itself.
     """
     reviewer = reviewer.strip()
     if not reviewer:
