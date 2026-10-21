@@ -12,7 +12,7 @@ import duckdb
 import polars as pl
 import pytest
 
-from etfh.build import BuildResult, build, connect
+from etfh.build import NAME_PROPOSAL_COLUMNS, BuildResult, build, connect
 from etfh.storage import RawStore
 from tests._build_helpers import CONFIG_DIR, RAW_ROOT, build_fixture_db, copy_raw_files
 
@@ -414,6 +414,15 @@ def test_every_table_is_written_in_its_documented_order(
     for table, sort_key in keys.items():
         frame = pl.read_parquet(out_dir / "parquet" / f"{table}.parquet")
         assert frame.equals(frame.sort(sort_key)), table
+
+
+def test_name_proposals_report_has_the_contract_header(
+    built: tuple[Path, BuildResult],
+) -> None:
+    """The review input exists after every build (header-only until #104)."""
+    out_dir, _ = built
+    lines = (out_dir / "reports" / "name_proposals.csv").read_text(encoding="utf-8").splitlines()
+    assert lines == [",".join(NAME_PROPOSAL_COLUMNS)]
 
 
 class _FigiMaster:

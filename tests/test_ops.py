@@ -37,16 +37,17 @@ def _sandbox(tmp_path: Path, *, build_exit: int = 0, qa_exit: int = 0) -> tuple[
 
 
 def _run_collect(
-    repo: Path, tmp_path: Path, bin_dir: Path | None = None
+    repo: Path, tmp_path: Path, bin_dir: Path | None = None, *, path: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     if bin_dir is None:
         bin_dir = tmp_path / "bin"
+    env_path = path if path is not None else f"{bin_dir}:/usr/bin:/bin"
     return subprocess.run(
         ["/bin/bash", str(repo / "ops" / "run_collect.sh")],
         capture_output=True,
         text=True,
         check=False,
-        env={"HOME": str(tmp_path), "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        env={"HOME": str(tmp_path), "PATH": env_path},
     )
 
 
@@ -117,6 +118,38 @@ def test_run_collect_fails_clearly_without_a_user_agent(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "ETFH_USER_AGENT is not set" in result.stderr
     assert not calls.exists()
+
+
+def test_run_collect_prepends_the_usual_uv_locations_to_path() -> None:
+    text = (OPS_DIR / "run_collect.sh").read_text(encoding="utf-8")
+    assert (
+        'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"'
+        in text
+    )
+
+
+def test_run_collect_fails_clearly_when_uv_is_missing(tmp_path: Path) -> None:
+    repo, calls = _sandbox(tmp_path)
+    (tmp_path / "bin" / "uv").unlink()
+    result = _run_collect(repo, tmp_path)
+    assert result.returncode == 2
+    assert "uv is not on PATH" in result.stderr
+    assert not calls.exists()
+
+
+def test_run_collect_finds_uv_in_the_user_local_bin(tmp_path: Path) -> None:
+    repo, calls = _sandbox(tmp_path)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    (tmp_path / "bin" / "uv").rename(local_bin / "uv")
+    (repo / ".env").write_text(
+        'ETFH_USER_AGENT="etfh-tests/1 (tests@example.com)"\n', encoding="utf-8"
+    )
+    result = _run_collect(repo, tmp_path, path="/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text(encoding="utf-8").splitlines()[0] == (
+        f"run etfh collect --date today --raw {repo}/raw"
+    )
 
 
 def test_run_collect_loads_env_and_runs_collect_build_qa(tmp_path: Path) -> None:
