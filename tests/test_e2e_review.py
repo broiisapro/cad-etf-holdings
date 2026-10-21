@@ -178,20 +178,21 @@ def test_a_global_name_override_never_rewrites_an_identified_row() -> None:
     )
     frame = pl.DataFrame(
         {
-            "fund_ticker": ["NAME", "ISIN", "TICKER", "CASH"],
+            "fund_ticker": ["NAME", "ISIN", "TICKER", "COMPOSITE", "CASH"],
             "security_name": [
+                "Northwind Materials Inc.",
                 "Northwind Materials Inc.",
                 "Northwind Materials Inc.",
                 "Northwind Materials Inc.",
                 "Cash and Cash Equivalents",
             ],
-            "security_ticker": [None, None, "NWM", None],
-            "exchange": [None, None, "XTSE", None],
-            "isin": [None, "CA600000AA15", None, None],
-            "cusip": [None, None, None, None],
-            "asset_class": ["equity", "equity", "equity", "cash"],
-            "country": ["CA", "CA", "CA", "CA"],
-            "currency": ["CAD", "CAD", "CAD", "CAD"],
+            "security_ticker": [None, None, "NWM", "NWM US", None],
+            "exchange": [None, None, "XTSE", None, None],
+            "isin": [None, "CA600000AA15", None, None, None],
+            "cusip": [None, None, None, None, None],
+            "asset_class": ["equity", "equity", "equity", "equity", "cash"],
+            "country": ["CA", "CA", "CA", "CA", "CA"],
+            "currency": ["CAD", "CAD", "CAD", "CAD", "CAD"],
         }
     )
     assigned = SecurityMaster([override]).assign(frame)
@@ -199,6 +200,7 @@ def test_a_global_name_override_never_rewrites_an_identified_row() -> None:
         "FIGI:BBG000000001",
         "ISIN:CA600000AA15",
         "TKR:XTSE:NWM",
+        None,
         "CASH:CAD",
     ]
 
