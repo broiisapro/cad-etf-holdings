@@ -1,7 +1,12 @@
-# Validation tolerances for per-file holdings checks (D18, D38).
+# Validation tolerances for per-file holdings checks (D18, D38, D56).
 #
-# `weight_sum_tolerance` is the allowed absolute deviation of a daily holdings
-# file's weight total from 1.0, per fund asset class (weights are fractions).
+# `weight_sum_tolerance` is the floor of the allowed absolute deviation of a
+# holdings file's weight total from 1.0, per fund asset class (weights are
+# fractions). The check adds the file's own rounding bound -- rows x half of
+# the smallest unit printed, inferred from the parser's `weight_decimals` and
+# `declared_unit` notes (2 decimals for percent and 4 for fraction when
+# absent) -- and caps the result at 0.02. A file above 1 + that tolerance is an
+# error (`weight_sum_over_one`), daily or quarterly, partial or not.
 # `qpd_total_tolerance` is the same bound for the difference between a quarterly
 # disclosure's table sum and the total printed in the document (0.005 = 0.5 pp).
 # `future_as_of_days` allows an as-of date this many days after the fetch date
