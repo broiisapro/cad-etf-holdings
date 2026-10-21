@@ -1,10 +1,17 @@
-"""Human-reviewed identifier overrides (D23, D41).
+"""Human-reviewed identifier overrides (D23, D41, D54).
 
 ``config/security_overrides.csv`` is the only place where a reviewed fuzzy
 match or a hand-fixed identifier becomes a real ``security_id``. The file is
 loaded into validated :class:`Override` records; a malformed row fails loudly
 at load (D25). Overrides are time-invariant evidence: they are applied to any
 frame the security master is asked to resolve, never learned from other files.
+
+Name overrides come in two forms. ``<fund_ticker>|<exact security_name>``
+applies to one fund, and ``*|<name>`` is global: it matches the normalized
+name (see :func:`etfh.secmaster.names.normalize_name`) of a row in any fund.
+The file keeps the reviewed text as written; normalization happens when the
+security master builds its lookup table. ``etfh review approve`` writes the
+already-normalized form after a human approves a proposal.
 """
 
 from __future__ import annotations
@@ -18,10 +25,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from etfh.secmaster.identifiers import cusip_is_valid, isin_is_valid, normalize_ticker
+from etfh.secmaster.names import infer_kind, normalize_name
 
 __all__ = ["Override", "load_overrides"]
 
 MatchType = Literal["isin", "cusip", "ticker", "name"]
+
+_GLOBAL_FUND = "*"
 
 _COLUMNS = ("match_type", "match_value", "security_id", "reviewer", "reviewed_on", "note")
 _MIC_PATTERN = re.compile(r"^[A-Z0-9]{4}$")
@@ -32,8 +42,11 @@ class Override(BaseModel):
 
     ``match_type`` is one of ``isin``, ``cusip``, ``ticker`` or ``name``.
     Ticker match values are ``MIC:TICKER``; name match values are
-    ``<fund_ticker>|<exact security_name>``. ``reviewer`` and ``reviewed_on``
-    are required: an override is only as good as the human who signed it.
+    ``<fund_ticker>|<exact security_name>`` for one fund, or ``*|<name>`` for
+    a global, human-approved name match. Global values are matched against the
+    row's normalized name; the reviewed text is kept as written.
+    ``reviewer`` and ``reviewed_on`` are required: an override is only as good
+    as the human who signed it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -74,8 +87,13 @@ class Override(BaseModel):
             security_name = security_name.strip()
             if not separator or not fund_ticker or not security_name:
                 raise ValueError(
-                    f"name match_value must be <fund_ticker>|<security_name>: {value!r}"
+                    f"name match_value must be <fund_ticker>|<security_name> or "
+                    f"*|<normalized name>: {value!r}"
                 )
+            if fund_ticker == _GLOBAL_FUND:
+                if not normalize_name(security_name, kind=infer_kind(security_name)):
+                    raise ValueError(f"global name match_value has no name tokens: {value!r}")
+                return f"{_GLOBAL_FUND}|{security_name}"
             return f"{fund_ticker}|{security_name}"
         return value
 
