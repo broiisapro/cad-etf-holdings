@@ -117,6 +117,7 @@ class QpdRules:
     """
 
     name: str = "generic"
+    wrapped_names: bool = False
     as_of_patterns: tuple[str, ...] = (
         rf"\bas\s+(?:at|of)\s+({_DATE_TOKEN})",
         rf"\bfor\s+the\s+(?:quarter|period|year|six\s+months)\s+ended\s+({_DATE_TOKEN})",
@@ -230,13 +231,15 @@ BMO_RULES = replace(
 # Purpose puts the Top 25 Holdings down the right column and the sector and
 # asset mixes down the left. The listed holdings have no stated total, so the
 # table is scoped to "TOP 25 HOLDINGS" and treated as a partial list. Long
-# bond names wrap and can push the weight onto its own line, hence the orphan
-# weight join and the skip patterns for the header and footer fragments.
+# bond and option names wrap over several lines and can push the weight onto
+# its own line; the wrapped-name pass joins those fragments by column position
+# so a strike price printed inside the name never becomes a weight.
 PURPOSE_RULES = replace(
     DEFAULT_RULES,
     name="purpose",
     column_scope="right",
     orphan_weight_join=True,
+    wrapped_names=True,
     sector_grouping=False,
     section_start_patterns=(r"^top\s*25\s+holdings\b",),
     partial_section_pattern=r"^top\s*25\s+holdings\b",
@@ -287,6 +290,20 @@ class _Row:
     name: str
     weight: float
     sector: str
+    decimals: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Segment:
+    """One horizontal run of words in a PDF line, with its position.
+
+    ``top`` and ``x1`` are None for rows rebuilt from a table extractor, where
+    no coordinates are available and the text-only heuristics apply.
+    """
+
+    text: str
+    top: float | None = None
+    x1: float | None = None
 
 
 @dataclass(slots=True)
@@ -339,6 +356,30 @@ def _number_value(raw: str) -> float | None:
 
 _NUMERIC_SEGMENT = re.compile(r"^\(?\s*-?\d[\d\s.,]*\s*%?\)?$")
 _TRAILING_WEIGHT = re.compile(r"^(?P<name>.+?)\s+(?P<value>\(?\s*-?\d[\d\s.,]*\s*%?\)?)$")
+
+
+def _float_text(text: str) -> str:
+    """Normalize a display number to the form ``_number_value`` parses."""
+    value = _clean(text).replace("\u2212", "-")
+    if value.startswith("(") and value.endswith(")"):
+        value = value[1:-1].strip()
+    if value.endswith("%"):
+        value = value[:-1].strip()
+    return value.replace(" ", "")
+
+
+def _decimal_places(text: str) -> int:
+    """Number of decimals printed in a display number, 0 when it has none.
+
+    A comma followed by one or two digits is a decimal comma; other commas are
+    thousands separators (the same reading :func:`_number_value` uses).
+    """
+    value = _float_text(text).lstrip("-")
+    if "." in value:
+        return len(value.rsplit(".", 1)[1])
+    if "," in value and not re.search(r",\d{3}(?:,|$)", value):
+        return len(value.rsplit(",", 1)[1])
+    return 0
 
 
 def _weight_value(text: str) -> float | None:
@@ -504,7 +545,22 @@ def _ignored_segment(text: str, rules: QpdRules) -> bool:
     )
 
 
-def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules) -> list[_Row]:
+def _segment_text(segment: _Segment | str) -> str:
+    return segment.text if isinstance(segment, _Segment) else segment
+
+
+def _line_text(segments: Sequence[_Segment]) -> str:
+    return _clean(" ".join(segment.text for segment in segments))
+
+
+def _line_top(segments: Sequence[_Segment]) -> float | None:
+    tops = [segment.top for segment in segments if segment.top is not None]
+    return min(tops) if tops else None
+
+
+def _entries_from_segments(
+    segments: Sequence[_Segment | str], sector: str, rules: QpdRules
+) -> list[_Row]:
     """Parse name/weight segments left-to-right into rows.
 
     A segment that is only a number closes the accumulated name; a segment
@@ -515,7 +571,7 @@ def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules
     rows: list[_Row] = []
     name_parts: list[str] = []
     for raw_segment in segments:
-        segment = _clean(raw_segment)
+        segment = _clean(_segment_text(raw_segment))
         if not segment or segment in _NULL_SEGMENTS or _ignored_segment(segment, rules):
             continue
         if name_parts:
@@ -526,6 +582,7 @@ def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules
                         name=_clean_name(" ".join(name_parts), rules),
                         weight=standalone,
                         sector=sector,
+                        decimals=_decimal_places(segment),
                     )
                 )
                 name_parts = []
@@ -539,6 +596,7 @@ def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules
                     name=_clean_name(" ".join(name_parts), rules),
                     weight=trailing,
                     sector=sector,
+                    decimals=_decimal_places(segment),
                 )
             )
             name_parts = []
@@ -547,40 +605,48 @@ def _entries_from_segments(segments: Sequence[str], sector: str, rules: QpdRules
     return rows
 
 
-def _segments_from_words(words: Sequence[dict[str, Any]], gap: float) -> list[str]:
-    segments: list[str] = []
-    current: list[str] = []
+def _segments_from_words(words: Sequence[dict[str, Any]], gap: float) -> list[_Segment]:
+    segments: list[_Segment] = []
+    current: list[dict[str, Any]] = []
     previous_x1: float | None = None
     for word in sorted(words, key=lambda item: float(item["x0"])):
         x0 = float(word["x0"])
         if current and previous_x1 is not None and x0 - previous_x1 > gap:
-            segments.append(" ".join(current))
+            segments.append(_segment_from_words(current))
             current = []
-        current.append(str(word["text"]))
+        current.append(word)
         previous_x1 = float(word["x1"])
     if current:
-        segments.append(" ".join(current))
+        segments.append(_segment_from_words(current))
     return segments
 
 
-def _group_page_lines(page: Any, gap: float) -> list[list[str]]:
+def _segment_from_words(words: Sequence[dict[str, Any]]) -> _Segment:
+    return _Segment(
+        text=" ".join(str(word["text"]) for word in words),
+        top=min(float(word["top"]) for word in words),
+        x1=max(float(word["x1"]) for word in words),
+    )
+
+
+def _group_page_lines(page: Any, gap: float) -> list[list[_Segment]]:
     words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
     return _group_words(words, gap)
 
 
-def _group_words(words: Sequence[dict[str, Any]], gap: float) -> list[list[str]]:
+def _group_words(words: Sequence[dict[str, Any]], gap: float) -> list[list[_Segment]]:
     """Group positioned words into lines and split each line into segments."""
     lines: dict[float, list[dict[str, Any]]] = {}
     for word in words:
         top = round(float(word["top"]), 1)
         lines.setdefault(top, []).append(word)
-    grouped: list[list[str]] = []
+    grouped: list[list[_Segment]] = []
     for top in sorted(lines):
         grouped.append(_segments_from_words(lines[top], gap))
     return grouped
 
 
-def _lines_from_page(page: Any, rules: QpdRules) -> list[list[str]]:
+def _lines_from_page(page: Any, rules: QpdRules) -> list[list[_Segment]]:
     words = page.extract_words(
         use_text_flow=False,
         keep_blank_chars=False,
@@ -596,15 +662,15 @@ def _lines_from_page(page: Any, rules: QpdRules) -> list[list[str]]:
     if not words:
         return []
     midpoint = float(page.width) / 2.0
-    grouped: list[list[str]] = []
+    grouped: list[list[_Segment]] = []
     for side in (False, True):
         selected = [word for word in words if (float(word["x0"]) >= midpoint) is side]
         grouped.extend(_group_words(selected, rules.column_gap))
     return grouped
 
 
-def _ends_with_weight(segments: Sequence[str], rules: QpdRules) -> bool:
-    cleaned = [_clean(segment) for segment in segments if _clean(segment)]
+def _ends_with_weight(segments: Sequence[_Segment], rules: QpdRules) -> bool:
+    cleaned = [_clean(segment.text) for segment in segments if _clean(segment.text)]
     if not cleaned:
         return False
     last = cleaned[-1]
@@ -614,20 +680,24 @@ def _ends_with_weight(segments: Sequence[str], rules: QpdRules) -> bool:
     return trailing is not None
 
 
-def _join_orphan_weights(lines: Sequence[Sequence[str]], rules: QpdRules) -> list[list[str]]:
+def _join_orphan_weights(
+    lines: Sequence[Sequence[_Segment]], rules: QpdRules
+) -> list[list[_Segment]]:
     """Attach a weight printed alone on its own line to the name above it.
 
     Some issuers wrap a long security name so that the weight lands on its own
     line between the name and its continuation (Purpose bond funds). Merging
-    that line back keeps the row and its weight instead of dropping both.
+    that line back keeps the row and its weight instead of dropping both. The
+    segment keeps its position so the wrapped-name pass can still tell a
+    weight cell from a printed strike price.
     """
-    merged: list[list[str]] = []
+    merged: list[list[_Segment]] = []
     for segments in lines:
-        cleaned = [_clean(segment) for segment in segments if _clean(segment)]
+        cleaned = [segment for segment in segments if _clean(segment.text)]
         if (
             rules.orphan_weight_join
             and len(cleaned) == 1
-            and _weight_value(cleaned[0]) is not None
+            and _weight_value(cleaned[0].text) is not None
             and merged
             and not _ends_with_weight(merged[-1], rules)
         ):
@@ -637,15 +707,104 @@ def _join_orphan_weights(lines: Sequence[Sequence[str]], rules: QpdRules) -> lis
     return merged
 
 
-def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extraction:
+def _weight_column_x1(lines: Sequence[Sequence[_Segment]]) -> float | None:
+    """Right edge of the weight cell column on one page, when it is printed.
+
+    Weight cells are right-aligned, so the rightmost numeric segment that is a
+    plausible weight marks the column. Continuation lines print strike prices
+    and coupons inside the name column, well to the left of it.
+    """
+    edges = [
+        segment.x1
+        for line in lines
+        for segment in line
+        if segment.x1 is not None and _weight_value(segment.text) is not None
+    ]
+    return max(edges) if edges else None
+
+
+def _is_weight_cell(segment: _Segment, column_x1: float) -> bool:
+    return (
+        segment.x1 is not None
+        and segment.x1 >= column_x1 - 1.5
+        and _weight_value(segment.text) is not None
+    )
+
+
+def _line_has_weight(segments: Sequence[_Segment], column_x1: float) -> bool:
+    return any(_is_weight_cell(segment, column_x1) for segment in segments)
+
+
+def _weight_line_tops(lines: Sequence[Sequence[_Segment]], column_x1: float) -> list[float]:
+    """Top positions of the weight cells themselves.
+
+    An orphan weight that was merged back into its name line keeps the top it
+    was printed at, which is what decides whether a later bare line is the
+    tail of that row or the head of the next one.
+    """
+    tops: list[float] = []
+    for segments in lines:
+        tops.extend(
+            segment.top
+            for segment in segments
+            if segment.top is not None and _is_weight_cell(segment, column_x1)
+        )
+    return sorted(tops)
+
+
+_SENTENCE_BREAK = re.compile(r"[.!?]\s+\w")
+
+
+def _is_name_fragment(text: str) -> bool:
+    """True when a bare line can be part of a security name.
+
+    Wrapped names are short fragments. A sentence (two sentences on one line,
+    or a long run of prose) is a footer or a note, not a name, and must never
+    be glued to the row above it.
+    """
+    words = text.split()
+    if _SENTENCE_BREAK.search(text) and len(words) > 4:
+        return False
+    return len(words) <= 12 or any(character.isdigit() for character in text)
+
+
+def _nearest_weight_is_below(top: float, weight_tops: Sequence[float]) -> bool:
+    """True when the closest weight cell belongs to the next row.
+
+    A line without a weight cell is either the first part of a wrapped name
+    (the weight follows on a later line) or the tail of the previous row (the
+    weight was printed before it). The vertical distance to the adjacent weight
+    cells decides; a tie counts as a tail, which keeps a stray continuation
+    attached to the row it follows.
+    """
+    below = [candidate for candidate in weight_tops if candidate > top]
+    above = [candidate for candidate in weight_tops if candidate < top]
+    if not below:
+        return False
+    if not above:
+        return True
+    return min(below) - top < top - max(above)
+
+
+def _prepend_text(segments: Sequence[_Segment], prefix: str) -> list[_Segment]:
+    if not segments:
+        return []
+    first, *rest = segments
+    return [_Segment(f"{prefix} {first.text}".strip(), first.top, first.x1), *rest]
+
+
+def _rows_from_lines(lines: Sequence[Sequence[_Segment]], rules: QpdRules) -> _Extraction:
     rows: list[_Row] = []
     sector: str | None = None
     partial_section = False
     active = not rules.section_start_patterns
     if rules.orphan_weight_join:
         lines = _join_orphan_weights(lines, rules)
+    weight_column = _weight_column_x1(lines) if rules.wrapped_names else None
+    weight_tops = _weight_line_tops(lines, weight_column) if weight_column is not None else []
+    pending_parts: list[str] = []
     for index, segments in enumerate(lines):
-        text = _clean(" ".join(segments))
+        text = _line_text(segments)
         if not text:
             continue
         if rules.section_start_patterns and any(
@@ -653,6 +812,7 @@ def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extrac
         ):
             active = True
             sector = None
+            pending_parts = []
             if rules.partial_section_pattern and re.search(
                 rules.partial_section_pattern, text, re.IGNORECASE
             ):
@@ -662,11 +822,32 @@ def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extrac
             re.search(pattern, text, re.IGNORECASE) for pattern in rules.section_end_patterns
         ):
             active = False
+            pending_parts = []
             continue
         if not active or _is_header(text, rules) or _is_skippable(text, rules):
             continue
         if _is_total_line(text, rules):
             continue
+        if weight_column is not None and not _line_has_weight(segments, weight_column):
+            if rules.sector_grouping and _sector_candidate(text):
+                has_following_holding = any(
+                    _line_has_weight(following, weight_column)
+                    for following in lines[index + 1 : index + 3]
+                )
+                if has_following_holding:
+                    sector = text
+                    continue
+            top = _line_top(segments)
+            if not _is_name_fragment(text):
+                continue
+            if top is not None and _nearest_weight_is_below(top, weight_tops):
+                pending_parts.append(text)
+            elif rows:
+                rows[-1] = replace(rows[-1], name=_clean_name(f"{rows[-1].name} {text}", rules))
+            continue
+        if pending_parts:
+            segments = _prepend_text(segments, " ".join(pending_parts))
+            pending_parts = []
         parsed = _entries_from_segments(segments, sector or "Unknown", rules)
         if parsed:
             for row in parsed:
@@ -685,9 +866,9 @@ def _rows_from_lines(lines: Sequence[Sequence[str]], rules: QpdRules) -> _Extrac
 
 
 def _rows_from_table(table: Sequence[Sequence[str | None]], rules: QpdRules) -> _Extraction:
-    lines: list[list[str]] = []
+    lines: list[list[_Segment]] = []
     for raw_row in table:
-        segments = [_clean(cell) for cell in raw_row if cell is not None and _clean(cell)]
+        segments = [_Segment(_clean(cell)) for cell in raw_row if cell is not None and _clean(cell)]
         if segments:
             lines.append(segments)
     return _rows_from_lines(lines, rules)
@@ -821,7 +1002,13 @@ class QpdPdfParser:
                 "raw_file_sha256": pl.String,
             },
         )
-        notes = ["declared_unit=percent", "partial_list=true"]
+        notes = ["declared_unit=percent"]
+        decimals = max(
+            (row.decimals for row in rows if row.decimals is not None),
+            default=2,
+        )
+        notes.append(f"weight_decimals={decimals}")
+        notes.append("partial_list=true")
         if stated_total is not None and not omit_stated_total:
             stated_total_fraction = stated_total / 100.0
             notes.append(f"stated_total_fraction={stated_total_fraction:.10g}")
