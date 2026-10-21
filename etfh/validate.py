@@ -5,6 +5,16 @@ frame already carries the ``security_id`` column assigned by the security
 master. The checks return :class:`QaFinding` records; the build writes them to
 ``qa_events`` and excludes the file from derived tables when any finding has
 severity ``error``.
+
+Weight totals are checked with a rounding-aware tolerance (D56):
+:func:`tolerance_for` starts from the fund asset class's tolerance in
+``config/validation.yaml`` and adds the largest rounding error a sum of the
+file's printed weights can carry (half the smallest printed weight unit per
+row). The configured tolerance is a floor for genuine composition drift and the
+rounding allowance is measurement error, so the two are added; the result is
+capped at :data:`TOLERANCE_CAP` (0.02) so a damaged file can never hide behind
+a large row count. Any file whose weights sum above ``1 + tolerance`` is an
+error regardless of source kind or ``partial_list`` (``weight_sum_over_one``).
 """
 
 from __future__ import annotations
@@ -24,22 +34,33 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from etfh.registry import Source
 from etfh.schema import ParsedHoldings
 from etfh.types import AssetClass, FileFormat, ParsedFile, SourceKind
+from etfh.units import WeightUnit
 
 __all__ = [
     "QaFinding",
     "Severity",
+    "TOLERANCE_CAP",
     "ValidationConfig",
     "is_excluded",
+    "tolerance_for",
     "validate_file",
 ]
 
 Severity = Literal["error", "warning", "info"]
+
+#: Ceiling for the rounding-aware weight-sum tolerance (D56).
+TOLERANCE_CAP = 0.02
 
 _TORONTO = ZoneInfo("America/Toronto")
 _NON_SECURITY_ASSET_CLASSES = ("cash", "fx", "derivative")
 _NON_SECURITY_ID_PREFIXES = ("CASH:", "DERIV:")
 _UNIT_CHECK_PREFIX = "unit_check="
 _UNIT_SUGGESTION_MARKER = "; total matches unit "
+_DECLARED_UNIT_KEY = "declared_unit"
+_WEIGHT_DECIMALS_KEY = "weight_decimals"
+# Interfaces wave 04 section 4: when a parser does not state the number of
+# decimals it printed, assume the usual precision for its declared unit.
+_DEFAULT_WEIGHT_DECIMALS = {WeightUnit.percent.value: 2, WeightUnit.fraction.value: 4}
 
 
 class ValidationConfig(BaseModel):
@@ -167,6 +188,57 @@ def _note_value(notes: Sequence[str], key: str) -> str | None:
     return None
 
 
+def _weight_decimals(notes: Sequence[str]) -> int:
+    """The decimals the file prints weights with (``weight_decimals=<n>``).
+
+    Falls back to the usual precision for the declared unit (2 for percent,
+    4 for fraction) when a parser does not record the note, and to the same
+    defaults when the note is not a non-negative integer.
+    """
+    raw = _note_value(notes, _WEIGHT_DECIMALS_KEY)
+    if raw is not None:
+        try:
+            decimals = int(raw)
+        except ValueError:
+            decimals = -1
+        if decimals >= 0:
+            return decimals
+    unit = _note_value(notes, _DECLARED_UNIT_KEY)
+    return _DEFAULT_WEIGHT_DECIMALS.get(unit or WeightUnit.fraction.value, 4)
+
+
+def _smallest_weight_unit(notes: Sequence[str], decimals: int) -> float:
+    """The smallest weight change one printed digit can express, as a fraction."""
+    scale = 100.0 if _note_value(notes, _DECLARED_UNIT_KEY) == WeightUnit.percent.value else 1.0
+    return 10.0**-decimals / scale
+
+
+def tolerance_for(
+    frame: pl.DataFrame,
+    notes: Sequence[str],
+    asset_class: AssetClass,
+    config: ValidationConfig,
+) -> float:
+    """The allowed absolute deviation of a file's weight sum from 1.0 (D56).
+
+    The configured per-asset-class tolerance is a floor for genuine
+    composition drift. On top of it, a file that prints ``n`` rounded weights
+    can sum up to ``n`` half-units away from its true total; that rounding
+    bound is added, using the smallest unit inferred from the parser's
+    ``declared_unit``/``weight_decimals`` notes. The result is capped at
+    :data:`TOLERANCE_CAP` so a damaged file cannot hide behind a large row
+    count.
+
+    ``frame`` supplies the row count; ``notes`` the unit and printed
+    precision. Both checks that compare a total with 1.0 use this function
+    (``weight_sum`` and ``weight_sum_over_one``).
+    """
+    base = config.weight_sum_tolerance[asset_class]
+    decimals = _weight_decimals(notes)
+    rounding = frame.height * _smallest_weight_unit(notes, decimals) / 2.0
+    return min(TOLERANCE_CAP, base + rounding)
+
+
 def _check_numeric(parsed: ParsedFile) -> list[QaFinding]:
     """Weights must be present and finite."""
     if _weight_dtype(parsed.frame) is None:
@@ -186,6 +258,13 @@ def _check_numeric(parsed: ParsedFile) -> list[QaFinding]:
     ]
 
 
+def _tolerance_detail(parsed: ParsedFile, *, asset_class: AssetClass, tolerance: float) -> str:
+    return (
+        f"asset_class={asset_class.value}, rows={parsed.frame.height}, "
+        f"weight_decimals={_weight_decimals(parsed.notes)}, tolerance={tolerance:g}"
+    )
+
+
 def _check_weight_sum(
     parsed: ParsedFile,
     *,
@@ -193,7 +272,7 @@ def _check_weight_sum(
     fund_asset_class: AssetClass,
     config: ValidationConfig,
 ) -> list[QaFinding]:
-    """Daily files must sum to 1 within the fund's asset-class tolerance (D38).
+    """Daily files must sum to 1 within the rounding-aware tolerance (D38, D56).
 
     A file whose parser records ``partial_list=true`` publishes only part of
     the portfolio with evidence from the source; its weight sum becomes a
@@ -201,7 +280,7 @@ def _check_weight_sum(
     """
     if _is_quarterly(source) or _weight_dtype(parsed.frame) is None:
         return []
-    tolerance = config.weight_sum_tolerance[fund_asset_class]
+    tolerance = tolerance_for(parsed.frame, parsed.notes, fund_asset_class, config)
     total = _finite_weight_sum(parsed.frame)
     delta = abs(total - 1.0)
     if delta <= tolerance:
@@ -209,11 +288,41 @@ def _check_weight_sum(
     partial = _note_value(parsed.notes, "partial_list") == "true"
     detail = (
         f"sum={total:.4f} expected=1±{tolerance:g} "
-        f"(asset_class={fund_asset_class.value}, delta={delta:.4f})"
+        f"({_tolerance_detail(parsed, asset_class=fund_asset_class, tolerance=tolerance)}, "
+        f"delta={delta:.4f})"
     )
     if partial:
         detail += "; partial_list=true: the source publishes part of the portfolio"
     return [QaFinding("weight_sum", "warning" if partial else "error", detail)]
+
+
+def _check_weight_sum_over_one(
+    parsed: ParsedFile,
+    *,
+    fund_asset_class: AssetClass,
+    config: ValidationConfig,
+) -> list[QaFinding]:
+    """No file may sum above ``1 + tolerance``, partial or quarterly (D56).
+
+    Quarterly disclosures are top-holdings lists and normally sum well below
+    1.0, so this check is what catches a parser that mixes units or includes
+    non-holding rows (for example a disclosure whose weights summed to 3.07).
+    """
+    if _weight_dtype(parsed.frame) is None:
+        return []
+    tolerance = tolerance_for(parsed.frame, parsed.notes, fund_asset_class, config)
+    total = _finite_weight_sum(parsed.frame)
+    limit = 1.0 + tolerance
+    if total <= limit:
+        return []
+    return [
+        QaFinding(
+            "weight_sum_over_one",
+            "error",
+            f"sum={total:.4f} exceeds 1+tolerance={limit:.4f} "
+            f"({_tolerance_detail(parsed, asset_class=fund_asset_class, tolerance=tolerance)})",
+        )
+    ]
 
 
 def _check_qpd_stated_total(
@@ -432,6 +541,9 @@ def validate_file(
     findings.extend(_check_numeric(parsed))
     findings.extend(
         _check_weight_sum(parsed, source=source, fund_asset_class=fund_asset_class, config=config)
+    )
+    findings.extend(
+        _check_weight_sum_over_one(parsed, fund_asset_class=fund_asset_class, config=config)
     )
     findings.extend(_check_qpd_stated_total(parsed, source=source, config=config))
     findings.extend(_check_duplicate_security(parsed))
