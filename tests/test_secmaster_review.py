@@ -399,6 +399,39 @@ def test_global_name_override_matches_normalized_names_in_any_fund() -> None:
     ]
 
 
+def test_a_global_name_override_matches_a_bond_and_not_the_equity() -> None:
+    """Bond normalization is used on both sides, so mid-name legal forms agree."""
+    override = Override(
+        match_type="name",
+        match_value="*|XYZ Corp 5% 2031",
+        security_id="ISIN:CA600030AA84",
+        reviewer="Moksh",
+        reviewed_on=REVIEWED_ON,
+    )
+    frame = holdings_frame(
+        [
+            {
+                "fund_ticker": "PURB",
+                "security_name": "XYZ 5.00% 2031 Bond",
+                "asset_class": "fixed_income",
+                "country": "CA",
+                "currency": "CAD",
+            },
+            {
+                "fund_ticker": "PURB",
+                "security_name": "XYZ Corp",
+                "asset_class": "equity",
+                "country": "CA",
+                "currency": "CAD",
+            },
+        ]
+    )
+    assert SecurityMaster([override]).assign(frame)["security_id"].to_list() == [
+        "ISIN:CA600030AA84",
+        None,
+    ]
+
+
 def test_a_fund_specific_name_override_wins_over_a_global_one() -> None:
     global_override = Override(
         match_type="name",

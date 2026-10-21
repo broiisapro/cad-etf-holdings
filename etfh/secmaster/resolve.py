@@ -355,7 +355,9 @@ class SecurityMaster:
         fund_override = self._by_name.get(name_key)
         if fund_override is not None:
             return fund_override
-        return self._by_global_name.get(normalize_name(security_name))
+        return self._by_global_name.get(
+            normalize_name(security_name, kind=infer_kind(security_name))
+        )
 
 
 def _clean(value: str | None) -> str | None:

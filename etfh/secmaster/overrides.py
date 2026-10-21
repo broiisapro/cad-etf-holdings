@@ -42,9 +42,9 @@ class Override(BaseModel):
 
     ``match_type`` is one of ``isin``, ``cusip``, ``ticker`` or ``name``.
     Ticker match values are ``MIC:TICKER``; name match values are
-    ``<fund_ticker>|<exact security_name>`` for one fund, or
-    ``*|<normalized name>`` for a global, human-approved name match, which is
-    normalized on load so the resolver and the review tool share one key.
+    ``<fund_ticker>|<exact security_name>`` for one fund, or ``*|<name>`` for
+    a global, human-approved name match. Global values are matched against the
+    row's normalized name; the reviewed text is kept as written.
     ``reviewer`` and ``reviewed_on`` are required: an override is only as good
     as the human who signed it.
     """
