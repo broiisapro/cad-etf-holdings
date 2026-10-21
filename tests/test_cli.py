@@ -19,11 +19,127 @@ from etfh.cli import app
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.registry import Source, TermsNotAllowedError, load_sources
+from etfh.secmaster.overrides import Override
 from etfh.types import RawFile
 from tests._build_helpers import CONFIG_DIR, FIXTURES, RAW_ROOT
 
 runner = CliRunner()
-COMMANDS = ("collect", "parse", "build", "qa", "overlap", "changes", "spotcheck", "export")
+COMMANDS = (
+    "collect",
+    "parse",
+    "build",
+    "qa",
+    "overlap",
+    "changes",
+    "spotcheck",
+    "export",
+    "review",
+)
+
+_PROPOSAL_HEADER = (
+    "normalized_name,example_name,country,n_funds,total_weight,"
+    "candidate_security_id,candidate_name,score,confidence\n"
+)
+_PROPOSALS = (
+    _PROPOSAL_HEADER
+    + "HYDRO ONE LTD,Hydro One Ltd,CA,2,0.0345,ISIN:CA448811AA17,Hydro One Ltd,100.0,exact\n"
+    + "BANK OF NOVA SCOTIA,Bank of Nova Scotia (The),CA,1,0.012,"
+    + "ISIN:CA0641491075,The Bank of Nova Scotia,100.0,exact\n"
+    + "TORONTO DOMINION,Toronto-Dominion Bank,CA,1,0.021,"
+    + "ISIN:CA8911605092,Toronto-Dominion Bank,94.2,fuzzy\n"
+)
+
+
+class FakeReviewApi:
+    """Contract fake for ``etfh.secmaster.review`` (issues #104/#105).
+
+    Mirrors the interfaces-04 §3 signatures: ``approve`` selects proposals by
+    confidence class or by normalized name, and ``append_overrides`` appends
+    the new keys to a CSV. The real module replaces it in tests once merged.
+    """
+
+    def __init__(self) -> None:
+        self.approved_calls: list[dict[str, object]] = []
+        self.appended: list[list[Override]] = []
+
+    def approve(
+        self,
+        proposals: Any,
+        *,
+        confidence: str | None = None,
+        names: Any = (),
+        reviewer: str,
+        reviewed_on: Any,
+    ) -> list[Override]:
+        self.approved_calls.append(
+            {
+                "confidence": confidence,
+                "names": tuple(names),
+                "reviewer": reviewer,
+                "reviewed_on": reviewed_on,
+            }
+        )
+        import polars as pl
+
+        selected = proposals
+        if confidence is not None:
+            selected = selected.filter(pl.col("confidence") == confidence)
+        else:
+            selected = selected.filter(pl.col("normalized_name").is_in(list(names)))
+        return [
+            Override(
+                match_type="name",
+                match_value=f"*|{row['normalized_name']}",
+                security_id=row["candidate_security_id"],
+                reviewer=reviewer,
+                reviewed_on=reviewed_on,
+                note=f"confidence={row['confidence']}",
+            )
+            for row in selected.iter_rows(named=True)
+        ]
+
+    def append_overrides(self, path: Path, overrides: Any) -> int:
+        import csv
+
+        self.appended.append(list(overrides))
+        rows = list(overrides)
+        if not rows:
+            return 0
+        write_header = not path.exists()
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            if write_header:
+                writer.writerow(
+                    ("match_type", "match_value", "security_id", "reviewer", "reviewed_on", "note")
+                )
+            for override in rows:
+                writer.writerow(
+                    (
+                        override.match_type,
+                        override.match_value,
+                        override.security_id,
+                        override.reviewer,
+                        override.reviewed_on.isoformat(),
+                        override.note,
+                    )
+                )
+        return len(rows)
+
+
+def _review_db(tmp_path: Path, proposals: str = _PROPOSALS) -> Path:
+    """A fake build directory for the review commands.
+
+    ``etfh review list|approve`` only read ``reports/name_proposals.csv`` next
+    to the database and never open the database, so an empty file at the
+    database path is enough to exercise the CLI.
+    """
+    db = tmp_path / "etfh.duckdb"
+    db.write_bytes(b"")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "name_proposals.csv").write_text(proposals, encoding="utf-8")
+    return db
+
 
 _SOURCES_YAML = """
 sources:
@@ -199,6 +315,75 @@ def test_qa_exits_zero_with_the_two_bad_files_excluded(fixture_build: Path) -> N
     assert "SYND" in result.output
     assert "weight_sum" in result.output
     assert "duplicate_security" in result.output
+
+
+def test_qa_max_unmatched_share_exits_three_for_a_daily_file(tmp_path: Path) -> None:
+    """The CLI option is wired to ``etfh.qa``: exit 3 when a daily file exceeds it.
+
+    The build uses a security master that resolves nothing, so every daily
+    file's unmatched weight share is 100% while the quarterly SYNF file stays
+    out of the check (it is a top-holdings list). The synthetic sources are
+    declared ``daily_holdings`` in a copy of the config so the threshold sees
+    them as daily files.
+    """
+
+    class NullSecurityMaster:
+        def assign(self, frame: Any) -> Any:
+            import polars as pl
+
+            return frame.with_columns(pl.lit(None, dtype=pl.String).alias("security_id"))
+
+    from etfh.build import build
+    from tests._build_helpers import fake_validator
+
+    config = _daily_kind_config(tmp_path)
+    out_dir = tmp_path / "out"
+    result_build = build(
+        RAW_ROOT,
+        out_dir,
+        config_dir=config,
+        security_master=NullSecurityMaster(),
+        validator=fake_validator,
+    )
+    assert result_build.n_included_files == 13
+    result = runner.invoke(
+        app,
+        ["qa", "--db", str(out_dir / "etfh.duckdb"), "--max-unmatched-share", "0.5"],
+    )
+    assert result.exit_code == 3, result.output
+    assert "unmatched threshold 50.00% exceeded by" in result.output
+    assert "SYNF" not in result.output.split("unmatched threshold")[1]
+
+
+def _daily_kind_config(tmp_path: Path) -> Path:
+    """A config copy whose synthetic sources are declared ``daily_holdings``."""
+    config = tmp_path / "config"
+    shutil.copytree(CONFIG_DIR, config)
+    data = yaml.safe_load((config / "sources.yaml").read_text(encoding="utf-8"))
+    for entry in data["sources"]:
+        if entry["id"] in {"syn_csv", "syn_json", "syn_xlsx"}:
+            entry["kind"] = "daily_holdings"
+    (config / "sources.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return config
+
+
+def test_qa_max_unmatched_share_ignores_quarterly_files(fixture_build: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["qa", "--db", str(fixture_build / "etfh.duckdb"), "--max-unmatched-share", "0.5"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "unmatched threshold 50.00%: no included daily file exceeds it" in result.output
+
+
+def test_qa_max_unmatched_share_out_of_range_exits_two(fixture_build: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["qa", "--db", str(fixture_build / "etfh.duckdb"), "--max-unmatched-share", "1.5"],
+    )
+    assert result.exit_code == 2
+    assert "must be between" in result.output
+    assert "0 and 1" in result.output
 
 
 def test_overlap_json_matches_the_expected_fixture(fixture_build: Path) -> None:
@@ -689,3 +874,270 @@ def test_overlap_json_weights_are_four_decimal_strings(fixture_build: Path) -> N
     for entry in payload["common"]:
         assert entry["weight_a"] == f"{float(entry['weight_a']):.4f}"
         assert entry["weight_b"] == f"{float(entry['weight_b']):.4f}"
+
+
+def test_review_list_prints_the_proposals_in_file_order(tmp_path: Path) -> None:
+    db = _review_db(tmp_path)
+    result = runner.invoke(app, ["review", "list", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert f"name proposals {db.parent / 'reports' / 'name_proposals.csv'}" in result.output
+    assert "3 proposal(s); 3 selected; showing 3" in result.output
+    lines = result.output.splitlines()
+    assert "HYDRO ONE LTD -> ISIN:CA448811AA17" in lines[2]
+    assert "BANK OF NOVA SCOTIA -> ISIN:CA0641491075" in lines[3]
+    assert "TORONTO DOMINION -> ISIN:CA8911605092" in lines[4]
+
+
+def test_review_list_filters_by_confidence_and_limit(tmp_path: Path) -> None:
+    db = _review_db(tmp_path)
+    exact = runner.invoke(app, ["review", "list", "--db", str(db), "--confidence", "exact"])
+    assert exact.exit_code == 0, exact.output
+    assert "2 selected; showing 2" in exact.output
+    assert "TORONTO DOMINION" not in exact.output
+    limited = runner.invoke(app, ["review", "list", "--db", str(db), "--limit", "1"])
+    assert limited.exit_code == 0, limited.output
+    assert "3 selected; showing 1" in limited.output
+    assert "HYDRO ONE LTD" in limited.output
+    assert "BANK OF NOVA SCOTIA" not in limited.output
+    bad = runner.invoke(app, ["review", "list", "--db", str(db), "--limit", "-1"])
+    assert bad.exit_code == 2
+    assert "must be >= 0" in bad.output
+
+
+def test_review_list_reports_a_missing_database_or_report(tmp_path: Path) -> None:
+    missing_db = runner.invoke(app, ["review", "list", "--db", str(tmp_path / "nope.duckdb")])
+    assert missing_db.exit_code == 2
+    assert "database not found" in missing_db.output
+    empty = tmp_path / "build"
+    empty.mkdir()
+    (empty / "etfh.duckdb").write_bytes(b"")
+    missing_report = runner.invoke(app, ["review", "list", "--db", str(empty / "etfh.duckdb")])
+    assert missing_report.exit_code == 2
+    assert "name proposals not found" in missing_report.output
+
+
+def test_review_list_rejects_an_unknown_confidence_value(tmp_path: Path) -> None:
+    db = _review_db(
+        tmp_path,
+        _PROPOSAL_HEADER + "ODD NAME,Odd,CA,1,0.1,ISIN:CA448811AA17,Odd,100.0,guessed\n",
+    )
+    result = runner.invoke(app, ["review", "list", "--db", str(db)])
+    assert result.exit_code == 2
+    assert "unknown confidence value(s): guessed" in result.output
+
+
+def test_review_approve_requires_a_reviewer(tmp_path: Path) -> None:
+    db = _review_db(tmp_path)
+    overrides = tmp_path / "security_overrides.csv"
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--confidence",
+            "exact",
+            "--reviewer",
+            "",
+            "--overrides",
+            str(overrides),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--reviewer is required and must not be empty" in result.output
+    assert not overrides.exists()
+
+
+def test_review_approve_without_the_reviewer_option_writes_nothing(tmp_path: Path) -> None:
+    db = _review_db(tmp_path)
+    overrides = tmp_path / "security_overrides.csv"
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--confidence",
+            "exact",
+            "--overrides",
+            str(overrides),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--reviewer" in result.output
+    assert not overrides.exists()
+
+
+def test_review_approve_needs_a_selector(tmp_path: Path) -> None:
+    db = _review_db(tmp_path)
+    result = runner.invoke(app, ["review", "approve", "--db", str(db), "--reviewer", "Tester"])
+    assert result.exit_code == 2
+    assert "pass --confidence exact|fuzzy or at least one --name" in result.output
+
+
+def test_review_approve_rejects_a_name_without_a_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _review_db(tmp_path)
+    api = FakeReviewApi()
+    monkeypatch.setattr("etfh.cli._review_api", lambda: api)
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--name",
+            "NOT A PROPOSAL",
+            "--reviewer",
+            "Tester",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "no proposal for 'NOT A PROPOSAL'" in result.output
+    assert api.approved_calls == []
+
+
+def test_review_approve_dry_run_prints_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _review_db(tmp_path)
+    api = FakeReviewApi()
+    monkeypatch.setattr("etfh.cli._review_api", lambda: api)
+    overrides = tmp_path / "security_overrides.csv"
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--confidence",
+            "exact",
+            "--reviewer",
+            "Dry Runner",
+            "--overrides",
+            str(overrides),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "dry run: would add 2 of 2 name override(s)" in result.output
+    assert "reviewer='Dry Runner'" in result.output
+    assert "name *|HYDRO ONE LTD -> ISIN:CA448811AA17" in result.output
+    assert "name *|BANK OF NOVA SCOTIA -> ISIN:CA0641491075" in result.output
+    assert "nothing written" in result.output
+    assert not overrides.exists()
+    assert api.appended == []
+    assert api.approved_calls[0]["confidence"] == "exact"
+    assert (
+        api.approved_calls[0]["reviewed_on"] == datetime.now(tz=ZoneInfo("America/Toronto")).date()
+    )
+
+
+def test_review_approve_appends_the_selected_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _review_db(tmp_path)
+    api = FakeReviewApi()
+    monkeypatch.setattr("etfh.cli._review_api", lambda: api)
+    overrides = tmp_path / "security_overrides.csv"
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--confidence",
+            "fuzzy",
+            "--reviewer",
+            "Tester",
+            "--overrides",
+            str(overrides),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "approved 1 name override(s) for reviewer='Tester'" in result.output
+    assert "name *|TORONTO DOMINION -> ISIN:CA8911605092" in result.output
+    text = overrides.read_text(encoding="utf-8").splitlines()
+    assert text[0] == "match_type,match_value,security_id,reviewer,reviewed_on,note"
+    assert len(text) == 2
+    assert text[1].startswith("name,*|TORONTO DOMINION,ISIN:CA8911605092,Tester,")
+    # a second run must not duplicate what the file already holds
+    again = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--confidence",
+            "fuzzy",
+            "--reviewer",
+            "Tester",
+            "--overrides",
+            str(overrides),
+        ],
+    )
+    assert again.exit_code == 0, again.output
+    assert "already had an override" in again.output
+    assert overrides.read_text(encoding="utf-8").splitlines() == text
+
+
+def test_review_approve_by_name_selects_one_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _review_db(tmp_path)
+    api = FakeReviewApi()
+    monkeypatch.setattr("etfh.cli._review_api", lambda: api)
+    overrides = tmp_path / "security_overrides.csv"
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--name",
+            "BANK OF NOVA SCOTIA",
+            "--reviewer",
+            "Tester",
+            "--overrides",
+            str(overrides),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert api.approved_calls[0]["names"] == ("BANK OF NOVA SCOTIA",)
+    assert api.approved_calls[0]["confidence"] is None
+    assert "name *|BANK OF NOVA SCOTIA -> ISIN:CA0641491075" in result.output
+    assert "*|HYDRO ONE LTD" not in result.output
+
+
+def test_review_approve_reports_an_unavailable_review_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _review_db(tmp_path)
+
+    def missing_module(name: str) -> Any:
+        raise ModuleNotFoundError(f"No module named {name!r}")
+
+    monkeypatch.setattr("etfh.cli.importlib.import_module", missing_module)
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "approve",
+            "--db",
+            str(db),
+            "--confidence",
+            "exact",
+            "--reviewer",
+            "Tester",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "name review is not available in this build" in result.output

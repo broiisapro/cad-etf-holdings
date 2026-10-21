@@ -9,8 +9,15 @@ Commands:
 - ``build --raw DIR --out DIR [--config DIR] [--openfigi [--figi-cache DIR]]``
   rebuilds the DuckDB and exports; ``--openfigi`` assigns cached composite
   FIGI ids to the rows that map.
-- ``qa --db PATH`` prints the QA report and exits 0 only when every errored
-  file is excluded and reported.
+- ``qa --db PATH [--max-unmatched-share X]`` prints the QA report and exits 0
+  only when every errored file is excluded and reported; the optional
+  threshold makes it exit 3 when an included daily file's unmatched weight
+  share exceeds ``X``.
+- ``review list --db PATH [--confidence exact|fuzzy] [--limit N]`` lists the
+  name-match proposals the build wrote next to the database.
+- ``review approve --db PATH (--confidence exact|fuzzy | --name NAME ...)
+  --reviewer NAME [--overrides PATH] [--dry-run]`` records the human-approved
+  proposals as global name overrides (D54); ``--reviewer`` is mandatory.
 - ``overlap A B --asof D --db PATH [--json]`` prints pairwise overlap; ``--json``
   prints the same shape as ``tests/fixtures/expected_overlap.json`` with
   four-decimal weight strings.
@@ -23,12 +30,13 @@ Commands:
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -47,6 +55,7 @@ from etfh.http import PoliteClient
 from etfh.parse.registry import find_parser
 from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
 from etfh.secmaster.openfigi import FigiLookup
+from etfh.secmaster.overrides import Override, load_overrides
 from etfh.spotcheck import spotcheck as run_spotcheck
 from etfh.storage import RawStore
 from etfh.types import Decision, SourceKind
@@ -55,6 +64,20 @@ __all__ = ["app"]
 
 _TORONTO = ZoneInfo("America/Toronto")
 _DEFAULT_FIGI_CACHE = Path.home() / ".cache" / "etfh" / "openfigi"
+_DEFAULT_OVERRIDES = Path("config") / "security_overrides.csv"
+
+_NAME_PROPOSAL_SCHEMA = {
+    "normalized_name": pl.String,
+    "example_name": pl.String,
+    "country": pl.String,
+    "n_funds": pl.Int64,
+    "total_weight": pl.Float64,
+    "candidate_security_id": pl.String,
+    "candidate_name": pl.String,
+    "score": pl.Float64,
+    "confidence": pl.String,
+}
+_CONFIDENCE_CLASSES = ("exact", "fuzzy")
 
 _PARSED_SCHEMA = {
     "fund_ticker": pl.String,
@@ -173,11 +196,23 @@ def build(
 
 
 @app.command()
-def qa(db: Annotated[Path, typer.Option("--db", help="built DuckDB file")]) -> None:
-    """Report validation results and excluded files."""
+def qa(
+    db: Annotated[Path, typer.Option("--db", help="built DuckDB file")],
+    max_unmatched_share: Annotated[
+        float | None,
+        typer.Option(
+            "--max-unmatched-share",
+            help="exit 3 when a daily file's unmatched weight share exceeds this fraction",
+        ),
+    ] = None,
+) -> None:
+    """Report validation results, excluded files and unmatched weight."""
     connection = _connect(db)
     try:
-        summary = qa_module.summarize(connection)
+        try:
+            summary = qa_module.summarize(connection, max_unmatched_share=max_unmatched_share)
+        except ValueError as error:
+            raise typer.BadParameter(str(error), param_hint="--max-unmatched-share") from None
         code = qa_module.exit_code(summary)
     finally:
         connection.close()
@@ -296,6 +331,168 @@ def export(
         typer.echo(f"wrote {path}")
 
 
+class _ReviewApi(Protocol):
+    """The reviewed-name functions the CLI needs (``etfh.secmaster.review``).
+
+    Declared as a protocol so the CLI can be tested against a contract fake
+    while the module is still being written, and so mypy checks the calls the
+    CLI makes.
+    """
+
+    def approve(
+        self,
+        proposals: pl.DataFrame,
+        *,
+        confidence: str | None = None,
+        names: Sequence[str] = (),
+        reviewer: str,
+        reviewed_on: date,
+    ) -> Sequence[Override]: ...
+
+    def append_overrides(self, path: Path, overrides: Sequence[Override]) -> int: ...
+
+
+def _review_api() -> _ReviewApi:
+    """Return the reviewed-name module (D54), or fail with a clear message."""
+    try:
+        module = importlib.import_module("etfh.secmaster.review")
+    except ModuleNotFoundError:
+        typer.echo(
+            "error: name review is not available in this build (etfh.secmaster.review is missing)",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
+    return cast(_ReviewApi, module)
+
+
+review_app = typer.Typer(
+    help="Review name-match proposals and record approved overrides.",
+    no_args_is_help=True,
+)
+
+
+@review_app.command(name="list")
+def review_list(
+    db: Annotated[Path, typer.Option("--db", help="built DuckDB file")],
+    confidence: Annotated[
+        Literal["exact", "fuzzy"] | None,
+        typer.Option("--confidence", help="only this confidence class"),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="print at most this many proposals")
+    ] = None,
+) -> None:
+    """List the name-match proposals written next to the built database."""
+    if limit is not None and limit < 0:
+        raise typer.BadParameter("must be >= 0", param_hint="--limit")
+    proposals_path = _name_proposals_path(db)
+    proposals = _load_proposals(proposals_path)
+    total = proposals.height
+    if confidence is not None:
+        proposals = proposals.filter(pl.col("confidence") == confidence)
+    selected = proposals.height
+    if limit is not None:
+        proposals = proposals.head(limit)
+    typer.echo(f"name proposals {proposals_path}")
+    typer.echo(f"{total} proposal(s); {selected} selected; showing {proposals.height}")
+    for row in proposals.iter_rows(named=True):
+        country = row["country"] if row["country"] is not None else "-"
+        typer.echo(
+            f"  {row['confidence']:<5} {row['score']:5.1f}  n_funds={row['n_funds']} "
+            f"weight={row['total_weight']:.2%} country={country}  {row['normalized_name']}"
+            f" -> {row['candidate_security_id']}"
+        )
+
+
+@review_app.command(name="approve")
+def review_approve(
+    db: Annotated[Path, typer.Option("--db", help="built DuckDB file")],
+    reviewer: Annotated[str, typer.Option("--reviewer", help="who reviewed the matches")],
+    confidence: Annotated[
+        Literal["exact", "fuzzy"] | None,
+        typer.Option("--confidence", help="approve every proposal of this confidence class"),
+    ] = None,
+    names: Annotated[
+        list[str] | None,
+        typer.Option("--name", help="approve one normalized name; repeatable"),
+    ] = None,
+    overrides: Annotated[
+        Path, typer.Option("--overrides", help="reviewed overrides CSV to append to")
+    ] = _DEFAULT_OVERRIDES,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="print what would be added and write nothing")
+    ] = False,
+) -> None:
+    """Record approved name proposals as global name overrides (D54).
+
+    Approval is always explicit: either a whole confidence class
+    (``--confidence exact``) or one or more normalized names (``--name``).
+    Proposals are never applied by the build itself.
+    """
+    reviewer = reviewer.strip()
+    if not reviewer:
+        typer.echo("error: --reviewer is required and must not be empty", err=True)
+        raise typer.Exit(code=2)
+    wanted = tuple(name.strip() for name in (names or []) if name.strip())
+    if confidence is None and not wanted:
+        typer.echo(
+            "error: pass --confidence exact|fuzzy or at least one --name to approve",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    proposals_path = _name_proposals_path(db)
+    proposals = _load_proposals(proposals_path)
+    unknown = [name for name in wanted if name not in set(proposals["normalized_name"].to_list())]
+    if unknown:
+        typer.echo(
+            f"error: no proposal for {', '.join(repr(name) for name in unknown)} "
+            f"in {proposals_path}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    api = _review_api()
+    reviewed_on = datetime.now(tz=_TORONTO).date()
+    approved = list(
+        api.approve(
+            proposals,
+            confidence=confidence,
+            names=wanted,
+            reviewer=reviewer,
+            reviewed_on=reviewed_on,
+        )
+    )
+    existing = _override_keys(overrides)
+    new = [
+        override
+        for override in approved
+        if (override.match_type, override.match_value) not in existing
+    ]
+    if not approved:
+        typer.echo("nothing to approve: the selection matches no proposal")
+        return
+    if dry_run:
+        typer.echo(
+            f"dry run: would add {len(new)} of {len(approved)} name override(s) "
+            f"for reviewer={reviewer!r} reviewed_on={reviewed_on.isoformat()}"
+        )
+        for override in new:
+            typer.echo(f"  {override.match_type} {override.match_value} -> {override.security_id}")
+        typer.echo(f"dry run: nothing written to {overrides}")
+        return
+    added = api.append_overrides(overrides, new)
+    typer.echo(
+        f"approved {added} name override(s) for reviewer={reviewer!r} "
+        f"reviewed_on={reviewed_on.isoformat()} in {overrides}"
+    )
+    for override in new:
+        typer.echo(f"  {override.match_type} {override.match_value} -> {override.security_id}")
+    if added < len(approved):
+        typer.echo(f"{len(approved) - added} selected proposal(s) already had an override")
+
+
+app.add_typer(review_app, name="review")
+
+
 def _collect_pair(
     fund: Fund,
     source_id: str,
@@ -357,6 +554,45 @@ def _overlap_json(result: OverlapResult) -> str:
         ],
     }
     return json.dumps(payload, indent=2)
+
+
+def _name_proposals_path(db: Path) -> Path:
+    """The proposals report that ``etfh build`` writes next to the database."""
+    if not Path(db).is_file():
+        typer.echo(f"error: database not found: {db}", err=True)
+        raise typer.Exit(code=2)
+    path = Path(db).parent / "reports" / "name_proposals.csv"
+    if not path.is_file():
+        typer.echo(
+            f"error: name proposals not found: {path} (run etfh build --out {Path(db).parent})",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return path
+
+
+def _load_proposals(path: Path) -> pl.DataFrame:
+    """Read the proposals report, failing clearly on an unexpected shape."""
+    try:
+        frame = pl.read_csv(path, schema=_NAME_PROPOSAL_SCHEMA)
+    except pl.exceptions.PolarsError as error:
+        typer.echo(f"error: cannot read name proposals {path}: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    unknown = sorted(set(frame["confidence"].to_list()) - set(_CONFIDENCE_CLASSES))
+    if unknown:
+        typer.echo(
+            f"error: {path} has unknown confidence value(s): {', '.join(map(str, unknown))}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return frame
+
+
+def _override_keys(path: Path) -> set[tuple[str, str]]:
+    """``(match_type, match_value)`` pairs already recorded in ``path``."""
+    if not Path(path).is_file():
+        return set()
+    return {(override.match_type, override.match_value) for override in load_overrides(path)}
 
 
 def _parse_date(value: str, option: str) -> date:
