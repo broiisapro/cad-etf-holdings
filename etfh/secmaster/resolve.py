@@ -41,6 +41,7 @@ from etfh.secmaster.identifiers import (
     normalize_exchange,
     normalize_ticker,
 )
+from etfh.secmaster.names import infer_kind, normalize_name
 from etfh.secmaster.openfigi import CacheKey, FigiLookup
 from etfh.secmaster.overrides import Override
 
@@ -71,7 +72,8 @@ class SecurityMaster:
     Resolution order per row:
 
     1. reviewed overrides, most specific first (``isin``, ``cusip``,
-       ``ticker``, ``name``);
+       ``ticker``, then a fund-specific ``name``, then a global
+       ``*|<normalized name>`` name override);
     2. cash rows → ``CASH:<CCY>`` (``CASH:XXX`` without a stated currency);
     3. fx and derivative rows → ``DERIV:<fund_ticker>:<normalized ticker>``,
        else ``DERIV:<fund_ticker>:<normalized name>``; colliding rows in the
@@ -115,6 +117,7 @@ class SecurityMaster:
         self._by_cusip: dict[str, str] = {}
         self._by_ticker: dict[str, str] = {}
         self._by_name: dict[tuple[str, str], str] = {}
+        self._by_global_name: dict[str, str] = {}
         for override in self.overrides:
             if override.match_type == "isin":
                 self._by_isin[override.match_value] = override.security_id
@@ -124,7 +127,12 @@ class SecurityMaster:
                 self._by_ticker[override.match_value] = override.security_id
             else:
                 fund_ticker, security_name = override.match_value.split("|", 1)
-                self._by_name[(fund_ticker, security_name)] = override.security_id
+                if fund_ticker == "*":
+                    key = normalize_name(security_name, kind=infer_kind(security_name))
+                    if key:
+                        self._by_global_name[key] = override.security_id
+                else:
+                    self._by_name[(fund_ticker, security_name)] = override.security_id
 
     def assign(self, frame: pl.DataFrame) -> pl.DataFrame:
         """Return ``frame`` with a nullable Utf8 ``security_id`` column added.
@@ -344,7 +352,10 @@ class SecurityMaster:
             if key in self._by_ticker:
                 return self._by_ticker[key]
         name_key = (fund_ticker.strip(), security_name.strip())
-        return self._by_name.get(name_key)
+        fund_override = self._by_name.get(name_key)
+        if fund_override is not None:
+            return fund_override
+        return self._by_global_name.get(normalize_name(security_name))
 
 
 def _clean(value: str | None) -> str | None:
