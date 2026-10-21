@@ -1,4 +1,4 @@
-"""Assign a stable ``security_id`` to every holding row (D23, D33, D41).
+"""Assign a stable ``security_id`` to every holding row (D23, D33, D41, D57).
 
 Resolution uses only time-invariant evidence: the row's own provided ISIN or
 CUSIP, its exchange-qualified ticker, the human-reviewed overrides file and
@@ -8,6 +8,14 @@ earlier file's rows resolve.
 
 The same ticker on two exchanges never merges: a row without a known exchange
 cannot form the ``TKR:<MIC>:<TICKER>`` key and stays unmatched instead.
+
+Issuers that publish a Bloomberg-style exchange suffix keep it inside
+``security_ticker`` when the code is not a single venue (D57, interfaces-04
+§1): ``"AAPL US"`` with a null ``exchange``. :meth:`SecurityMaster.assign`
+splits a trailing known code off such a ticker. A single-venue code becomes a
+MIC and resolves to ``TKR:<MIC>:<TICKER>``; a country-composite code (``US``,
+``CN``, ...) is never a venue, so the row stays unmatched and the code is used
+only as OpenFIGI's ``exchCode``.
 
 Non-security rows get explicit ids (D33): cash rows ``CASH:<CCY>`` (or
 ``CASH:XXX``, ISO 4217's "no currency", when the file states no currency) and
@@ -51,6 +59,7 @@ _REQUIRED_COLUMNS = (
 )
 
 _MIC_PATTERN = re.compile(r"^[A-Z0-9]{4}$")
+_TRAILING_TOKEN = re.compile(r"^(?P<head>.+?)\s+(?P<tail>\S+)$")
 _CASH_CLASSES = frozenset({"cash"})
 _DERIVATIVE_CLASSES = frozenset({"fx", "derivative"})
 _NO_CURRENCY = "XXX"
@@ -70,20 +79,25 @@ class SecurityMaster:
     4. provided valid ISIN → ``ISIN:<isin>``;
     5. provided valid CUSIP → ``ISIN:<derived>`` for CA/US, else
        ``CUSIP:<cusip>``;
-    6. normalized MIC + ticker → ``TKR:<MIC>:<TICKER>``;
+    6. normalized MIC + ticker → ``TKR:<MIC>:<TICKER>``. A ticker with a
+       trailing single-venue exchange code and no ``exchange`` is split first
+       (``"NWM CT"`` → ``TKR:XTSE:NWM``); a country-composite code (``"AAPL
+       US"``) is not a venue and stays unmatched;
     7. otherwise null; the row appears in the unmatched report.
 
     Invalid provided identifiers are ignored and counted in
     :attr:`invalid_identifier_count` for the most recent :meth:`assign` call,
     never used.
 
-    When a :class:`~etfh.secmaster.openfigi.FigiLookup` is passed (D47),
+    When a :class:`~etfh.secmaster.openfigi.FigiLookup` is passed (D47, D55),
     :meth:`prefetch` can batch all lookups of a build, and :meth:`assign`
-    replaces the D23 id of every non-cash, non-derivative row whose ISIN,
-    MIC+ticker or composite code+ticker maps to exactly one composite FIGI with
-    ``FIGI:<composite>``. Ambiguous mappings keep the D23 id and are counted;
-    reviewed overrides are never replaced. With ``figi=None`` the result is
-    identical to the no-lookup behaviour.
+    expresses every mappable ``ISIN:`` or ``TKR:`` id as
+    ``FIGI:<composite>``: provided and CUSIP-derived ISINs, ISINs and tickers
+    that came from a reviewed override, and rows that are otherwise unmatched
+    but carry a MIC+ticker or a country-composite code+ticker. Rows whose id
+    is not ISIN- or ticker-based (``CUSIP:``, anything else) keep it, as do
+    rows that map to several distinct composites or not at all. With
+    ``figi=None`` the result is identical to the no-lookup behaviour.
     """
 
     def __init__(
@@ -115,14 +129,42 @@ class SecurityMaster:
     def assign(self, frame: pl.DataFrame) -> pl.DataFrame:
         """Return ``frame`` with a nullable Utf8 ``security_id`` column added.
 
-        The row count and row order are preserved exactly. With a ``figi``
-        lookup, every non-cash, non-derivative row whose ISIN (provided or
-        structurally derived from a CA/US CUSIP), MIC+ticker or composite
-        code+ticker maps to exactly one composite FIGI gets ``FIGI:<composite>``
-        instead of its D23 id; ambiguous mappings keep the D23 id and are
-        counted (D47). Reviewed overrides always win. With ``figi=None`` the
-        result depends only on the frame and the overrides, as before.
+        The row count and row order are preserved exactly. A trailing
+        single-venue exchange code on ``security_ticker`` becomes a MIC
+        (D57). With a ``figi`` lookup, every ``ISIN:`` or ``TKR:`` id that
+        OpenFIGI maps to exactly one composite FIGI becomes ``FIGI:<composite>``,
+        including ids that came from a reviewed override; ambiguous or
+        unmapped rows keep the D23 id and are counted (D47, D55). With
+        ``figi=None`` the result depends only on the frame and the overrides.
         """
+        security_ids, invalid = self._resolve_frame(frame)
+        self.invalid_identifier_count = invalid
+        if self.figi is not None:
+            security_ids = self._apply_figi(frame, security_ids)
+        return frame.with_columns(pl.Series("security_id", security_ids, dtype=pl.String))
+
+    def prefetch(self, frames: Iterable[pl.DataFrame]) -> None:
+        """Warm the FIGI cache for all keys the given frames will need.
+
+        Batching all lookups of a build into one pass keeps the request count
+        (and the OpenFIGI rate limit) under control. Keys follow the same
+        rules as :meth:`assign`, so an id that came from a reviewed override
+        ISIN or ticker is looked up too (D55). A no-op when no
+        :class:`~etfh.secmaster.openfigi.FigiLookup` was passed. Callers may
+        still call :meth:`assign` without prefetching; missing keys are then
+        looked up lazily.
+        """
+        if self.figi is None:
+            return
+        keys: list[CacheKey] = []
+        for frame in frames:
+            security_ids, _ = self._resolve_frame(frame)
+            keys.extend(key for _, key in self._figi_candidates(frame, security_ids))
+        if keys:
+            self.figi.lookup_many(keys)
+
+    def _resolve_frame(self, frame: pl.DataFrame) -> tuple[list[str | None], int]:
+        """D23 ids and the invalid-identifier count for one frame, in order."""
         missing = [column for column in _REQUIRED_COLUMNS if column not in frame.columns]
         if missing:
             raise ValueError(f"holdings frame is missing columns: {', '.join(missing)}")
@@ -170,35 +212,12 @@ class SecurityMaster:
                     security_id = f"{security_id}#{seen}"
             security_ids.append(security_id)
             invalid += row_invalid
-        self.invalid_identifier_count = invalid
-        if self.figi is not None:
-            security_ids = self._apply_figi(frame, security_ids)
-        return frame.with_columns(pl.Series("security_id", security_ids, dtype=pl.String))
-
-    def prefetch(self, frames: Iterable[pl.DataFrame]) -> None:
-        """Warm the FIGI cache for all keys the given frames will need.
-
-        Batching all lookups of a build into one pass keeps the request count
-        (and the OpenFIGI rate limit) under control. A no-op when no
-        :class:`~etfh.secmaster.openfigi.FigiLookup` was passed. Callers may
-        still call :meth:`assign` without prefetching; missing keys are then
-        looked up lazily.
-        """
-        if self.figi is None:
-            return
-        keys: list[CacheKey] = []
-        for frame in frames:
-            missing = [column for column in _REQUIRED_COLUMNS if column not in frame.columns]
-            if missing:
-                raise ValueError(f"holdings frame is missing columns: {', '.join(missing)}")
-            keys.extend(key for _, key in self._figi_candidates(frame))
-        if keys:
-            self.figi.lookup_many(keys)
+        return security_ids, invalid
 
     def _apply_figi(self, frame: pl.DataFrame, security_ids: list[str | None]) -> list[str | None]:
-        """Replace D23 ids with ``FIGI:<composite>`` where the evidence maps."""
+        """Express mappable ``ISIN:``/``TKR:`` ids as ``FIGI:<composite>`` (D55)."""
         assert self.figi is not None
-        candidates = self._figi_candidates(frame)
+        candidates = self._figi_candidates(frame, security_ids)
         assigned = 0
         ambiguous = 0
         unmapped = 0
@@ -218,13 +237,18 @@ class SecurityMaster:
         self.figi_unmapped_count = unmapped
         return security_ids
 
-    def _figi_candidates(self, frame: pl.DataFrame) -> list[tuple[int, CacheKey]]:
+    def _figi_candidates(
+        self, frame: pl.DataFrame, security_ids: list[str | None]
+    ) -> list[tuple[int, CacheKey]]:
         """Rows eligible for a FIGI id, with their lookup key, in frame order.
 
-        Eligible rows are not cash, fx or derivative rows and are not matched
-        by a reviewed override (overrides win, D23). The key priority is the
-        row's ISIN (provided or derived from a valid CA/US CUSIP), then
-        MIC+ticker, then Bloomberg composite code+ticker (D47).
+        Eligible rows are not cash, fx or derivative rows. An ``ISIN:`` id
+        (provided, CUSIP-derived or from an override) is looked up by ISIN, a
+        ``TKR:`` id (identifier or override) by MIC+ticker. A row with no D23
+        id falls back to its own evidence: a valid provided or derived ISIN,
+        then MIC+ticker, then Bloomberg composite code+ticker (D47, D57). Any
+        other id — ``CUSIP:`` or an override that is neither ISIN nor ticker —
+        is already an explicit decision and is left alone.
         """
         assert self.figi is not None
         candidates: list[tuple[int, CacheKey]] = []
@@ -234,35 +258,17 @@ class SecurityMaster:
         cusips = frame["cusip"].to_list()
         asset_classes = frame["asset_class"].to_list()
         countries = frame["country"].to_list()
-        fund_tickers = frame["fund_ticker"].to_list()
-        names = frame["security_name"].to_list()
         for index in range(frame.height):
             normalized_class = (asset_classes[index] or "").strip().lower()
             if normalized_class in _CASH_CLASSES or normalized_class in _DERIVATIVE_CLASSES:
                 continue
-            provided_isin = _clean(isins[index])
-            provided_cusip = _clean(cusips[index])
-            ticker = normalize_ticker(tickers[index])
-            mic = _mic(exchanges[index])
-            if (
-                self._match_override(
-                    fund_ticker=fund_tickers[index],
-                    security_name=names[index],
-                    isin=provided_isin,
-                    cusip=provided_cusip,
-                    mic=mic,
-                    ticker=ticker,
-                )
-                is not None
-            ):
-                continue
-            key = _figi_key(
-                isin=provided_isin,
-                cusip=provided_cusip,
+            key = _figi_key_for_resolved_id(
+                security_ids[index],
+                isin=_clean(isins[index]),
+                cusip=_clean(cusips[index]),
                 country=countries[index],
-                ticker=ticker,
+                ticker=tickers[index],
                 exchange=exchanges[index],
-                mic=mic,
             )
             if key is not None:
                 candidates.append((index, key))
@@ -283,8 +289,7 @@ class SecurityMaster:
     ) -> tuple[str | None, int]:
         provided_isin = _clean(isin)
         provided_cusip = _clean(cusip)
-        mic = _mic(exchange)
-        ticker = normalize_ticker(security_ticker)
+        ticker, mic, _ = _ticker_parts(security_ticker, exchange)
 
         override = self._match_override(
             fund_ticker=fund_ticker,
@@ -360,6 +365,36 @@ def _mic(exchange: str | None) -> str | None:
     return cleaned if _MIC_PATTERN.match(cleaned) else None
 
 
+def _ticker_parts(
+    security_ticker: str | None, exchange: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """Split a ticker's trailing exchange code into ``(ticker, MIC, composite)``.
+
+    Parsers hand back a Bloomberg-style ``"<TICKER> <CODE>"`` when the issuer
+    publishes no separate exchange column and the code is not a single venue
+    (D57, interfaces-04 §1). Only a trailing token that is a known single
+    exchange maps to a MIC; a known country-composite code is returned for
+    the FIGI lookup only. Anything else — including a ticker that legitimately
+    contains spaces — is left whole. A separate ``exchange`` always wins; the
+    suffix is then just part of the ticker and
+    :func:`~etfh.secmaster.identifiers.normalize_ticker` strips it.
+    """
+    if security_ticker is None:
+        return None, _mic(exchange), composite_code(exchange)
+    if exchange is None:
+        match = _TRAILING_TOKEN.match(security_ticker.strip())
+        if match is not None:
+            head = match.group("head")
+            tail = match.group("tail")
+            mic = normalize_exchange(tail)
+            if mic is not None:
+                return normalize_ticker(head), mic, None
+            composite = composite_code(tail)
+            if composite is not None:
+                return normalize_ticker(head), None, composite
+    return normalize_ticker(security_ticker), _mic(exchange), composite_code(exchange)
+
+
 def _derivative_key(fund_ticker: str, ticker: str | None, security_name: str) -> str:
     """Base ``DERIV:`` id for one fx/derivative row.
 
@@ -375,32 +410,41 @@ def _derivative_key(fund_ticker: str, ticker: str | None, security_name: str) ->
     return f"DERIV:{fund_ticker}:{normalized}"
 
 
-def _figi_key(
+def _figi_key_for_resolved_id(
+    security_id: str | None,
     *,
     isin: str | None,
     cusip: str | None,
     country: str | None,
     ticker: str | None,
     exchange: str | None,
-    mic: str | None,
 ) -> CacheKey | None:
-    """The single highest-priority FIGI evidence for one row (D47).
+    """The single FIGI lookup key for one row, or ``None`` (D47, D55, D57).
 
-    An ISIN wins (provided, or structurally derived from a valid CA/US CUSIP,
-    which is the same evidence the D23 id uses); then MIC+ticker; then a
-    Bloomberg country-composite code+ticker. Rows without any usable evidence
-    return ``None`` and keep their D23 id.
+    A resolved ``ISIN:`` or ``TKR:`` id is mapped as such, whatever evidence
+    produced it — provided identifier, CUSIP derivation or reviewed override.
+    A row with no id falls back to its own evidence: a valid provided or
+    derived ISIN, then MIC+ticker, then a Bloomberg composite code+ticker
+    (which is how an unmatched ``"AAPL US"`` row can still join the FIGI id
+    space). Any other id is an explicit decision and is never looked up.
     """
+    if security_id is not None:
+        if security_id.startswith("ISIN:"):
+            return ("ID_ISIN", security_id[len("ISIN:") :], None, None)
+        if security_id.startswith("TKR:"):
+            _, id_mic, id_ticker = security_id.split(":", 2)
+            return ("TICKER", id_ticker, id_mic, None)
+        return None
     if isin is not None and isin_is_valid(isin):
         return ("ID_ISIN", isin, None, None)
     if cusip is not None and cusip_is_valid(cusip):
         derived = cusip_to_isin(cusip, country or "")
         if derived is not None:
             return ("ID_ISIN", derived, None, None)
-    if ticker is not None:
-        if mic is not None:
-            return ("TICKER", ticker, mic, None)
-        composite = composite_code(exchange)
-        if composite is not None:
-            return ("TICKER", ticker, None, composite)
+    split_ticker, split_mic, split_composite = _ticker_parts(ticker, exchange)
+    if split_ticker is not None:
+        if split_mic is not None:
+            return ("TICKER", split_ticker, split_mic, None)
+        if split_composite is not None:
+            return ("TICKER", split_ticker, None, split_composite)
     return None
