@@ -22,9 +22,20 @@ Funds that publish a section list instead of ``Level4.holdings`` (for example a
 fund-of-funds "Holding Breakdown" under ``portfolio.holdings_data``) are read
 from that list; the sections are concatenated in document order.
 
+A physical-commodity fund publishes a quantity with a mass unit instead of a
+weight (KILO shows ``"Gold Bars"`` with ``"191,450 oz"``, corroborated by the
+``Level1`` ``asset_class_metals`` quantity). Such a portfolio is one asset, so
+the file parses to one holding with ``asset_class = "commodity"`` and weight
+1.0; the raw quantity text is kept in the ``commodity_quantity=`` note and no
+identifier is invented. The rule only fires when every named row in the file is
+such a quantity (no row states a weight): a mixed or partially unparseable file
+still fails loudly rather than hiding a parsing gap behind a fabricated weight.
+
 The note ``weight_decimals=<n>`` records the finest precision printed for a
 weight in the document (percentages are printed to two decimals today), so
-validation can derive a rounding-aware weight-sum tolerance (D56).
+validation can derive a rounding-aware weight-sum tolerance (D56). For a
+physical-commodity file, whose weight is assigned rather than printed, the
+note carries the two-decimal percent default.
 """
 
 from __future__ import annotations
@@ -87,6 +98,12 @@ _DERIVATIVE_WORD = re.compile(
     r"\b(?:option|futures?|forwards?|swaps?|warrants?|rights?)\b", re.IGNORECASE
 )
 _FX_WORD = re.compile(r"\b(?:fx|foreign exchange)\b", re.IGNORECASE)
+# A physical holding states a quantity with a mass unit instead of a weight,
+# e.g. "191,450 oz" for a bullion trust. Mass units only: no other unit shape
+# has been observed, and guessing one would fabricate a weight.
+_PHYSICAL_QUANTITY = re.compile(
+    r"^[\d.,]+\s*(?:troy\s+)?(?:oz|ozt|lbs?|kg|g|tonnes?|t)$", re.IGNORECASE
+)
 # Percentages are printed to two decimals, so a complete list can round to
 # within a few hundredths of 100. A shortfall beyond this is real.
 _COMPLETE_TOLERANCE = 0.05
@@ -114,6 +131,11 @@ def _weight_decimals(values: Iterable[object]) -> int:
     """Finest number of decimals printed for the weights in one file (D56)."""
     printed = [decimals for decimals in map(_printed_decimals, values) if decimals is not None]
     return max(printed) if printed else 0
+
+
+def _is_physical_quantity(text: str | None) -> bool:
+    """Whether a weight cell states a mass quantity instead of a weight."""
+    return text is not None and _PHYSICAL_QUANTITY.fullmatch(text.strip()) is not None
 
 
 def _date_value(value: Any) -> date | None:
@@ -255,6 +277,7 @@ class PurposeParser:
         fund_class = _fund_asset_class(payload)
         holdings = _holding_rows(payload)
         rows: list[dict[str, Any]] = []
+        quantities: list[tuple[str, str]] = []
         unparsed_weights = 0
         weight_cells: list[object] = []
         for holding in holdings:
@@ -264,8 +287,11 @@ class PurposeParser:
             if name is None or name.lower() in _TOTAL_NAMES:
                 continue
             weight_cell = holding.get("weight")
-            weight = parse_number(_text(weight_cell))
+            weight_text = _text(weight_cell)
+            weight = parse_number(weight_text)
             if weight is None:
+                if _is_physical_quantity(weight_text):
+                    quantities.append((name, weight_text or ""))
                 # A named row without a parseable weight may be a parsing gap;
                 # it must not be silently hidden behind partial_list (D52).
                 unparsed_weights += 1
@@ -291,14 +317,45 @@ class PurposeParser:
                 }
             )
         if not rows:
-            raise ValueError(f"{raw.path}: no holdings rows found")
+            if (
+                quantities
+                and len(quantities) == unparsed_weights
+                and len({name for name, _ in quantities}) == 1
+            ):
+                # A physical-commodity portfolio: one asset, one holding at
+                # 100%. No identifier is invented; the quantity stays in a note.
+                rows.append(
+                    {
+                        "security_name": quantities[0][0],
+                        "security_ticker": None,
+                        "exchange": None,
+                        "isin": None,
+                        "cusip": None,
+                        "asset_class": "commodity",
+                        "sector": "Unknown",
+                        "country": "Unknown",
+                        "currency": None,
+                        "weight": 100.0,
+                        "shares": None,
+                        "market_value": None,
+                    }
+                )
+                commodity_note = f"commodity_quantity={'; '.join(text for _, text in quantities)}"
+            else:
+                raise ValueError(f"{raw.path}: no holdings rows found")
+        else:
+            commodity_note = None
         declared = WeightUnit.percent
         weights = [row["weight"] for row in rows]
         unit_check = check_unit(pl.Series("weight", weights, dtype=pl.Float64), declared)
         notes = [
             f"declared_unit={declared.value}",
-            f"weight_decimals={_weight_decimals(weight_cells)}",
+            # A commodity weight is assigned, not printed; use the documented
+            # two-decimal percent default for the rounding note.
+            f"weight_decimals={_weight_decimals(weight_cells) if weight_cells else 2}",
         ]
+        if commodity_note is not None:
+            notes.append(commodity_note)
         if unit_check.suggested is not None:
             # The total matches the other unit: a real unit contradiction.
             notes.append(f"unit_check={unit_check.detail()}")
