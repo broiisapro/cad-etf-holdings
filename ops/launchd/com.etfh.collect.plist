@@ -1,13 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Daily local collection schedule for cad-etf-holdings.
+  Scheduled collection for cad-etf-holdings.
 
   This file is a template: __REPO__ is the absolute path of the repository
   checkout and __HOME__ is the installing user's home directory. Run
   ops/install_launchd.sh to substitute both placeholders, write the result to
   ~/Library/LaunchAgents/com.etfh.collect.plist and print the launchctl
-  bootstrap command. The job runs ops/run_collect.sh every day at 19:15
-  local time; its stdout and stderr go to ~/Library/Logs/etfh/.
+  bootstrap command.
+
+  launchd runs ops/collect_guard.sh every 30 minutes and at login; the guard
+  starts ops/run_collect.sh at most once per local day (first chance after
+  18:00, or immediately after a missed day, D64), so a sleeping or restarted
+  laptop still collects. The job's stdout and stderr go to
+  ~/Library/Logs/etfh/.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -17,22 +22,17 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>__REPO__/ops/run_collect.sh</string>
+        <string>__REPO__/ops/collect_guard.sh</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__REPO__</string>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>19</integer>
-        <key>Minute</key>
-        <integer>15</integer>
-    </dict>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>__HOME__/Library/Logs/etfh/collect.log</string>
     <key>StandardErrorPath</key>
     <string>__HOME__/Library/Logs/etfh/collect.err.log</string>
-    <key>RunAtLoad</key>
-    <false/>
 </dict>
 </plist>
