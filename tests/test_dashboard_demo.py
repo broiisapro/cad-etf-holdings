@@ -36,9 +36,7 @@ def test_demo_fixtures_are_committed() -> None:
     assert (demo.DEMO_CONFIG_DIR / "sources.yaml").is_file()
 
 
-def test_demo_build_is_offline_and_complete(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_demo_build_is_offline_and_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     def no_network(*args: object, **kwargs: object) -> None:
         raise AssertionError("demo build attempted network access")
 

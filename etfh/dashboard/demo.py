@@ -42,7 +42,7 @@ def _find_repo_root() -> Path:
     the working directory (which Cloud always sets to the repository root).
     """
     here = Path(__file__).resolve()
-    for parent in (here.parent, *here.parents):
+    for parent in here.parents:
         if (parent / "tests" / "fixtures" / "raw_synthetic").is_dir() and (
             parent / "config" / "sources.yaml"
         ).is_file():
@@ -92,14 +92,9 @@ class DemoError(RuntimeError):
 class DemoDatabase:
     """The temporary database built from the synthetic fixtures."""
 
-    path: Path
+    db_path: Path
     raw_dir: Path
     _tempdir: tempfile.TemporaryDirectory[str] = field(repr=False, compare=False)
-
-    @property
-    def db_path(self) -> Path:
-        """The DuckDB file the dashboard should open."""
-        return self.path
 
 
 def is_demo(
@@ -141,7 +136,7 @@ def build_demo_database(
     except Exception as exc:  # pragma: no cover - defensive cleanup
         tempdir.cleanup()
         raise DemoError(f"Could not build the synthetic demo database: {exc}") from exc
-    return DemoDatabase(path=out_dir / "etfh.duckdb", raw_dir=raw_dir, _tempdir=tempdir)
+    return DemoDatabase(db_path=out_dir / "etfh.duckdb", raw_dir=raw_dir, _tempdir=tempdir)
 
 
 @st.cache_resource(show_spinner="Building the synthetic demo database…")
