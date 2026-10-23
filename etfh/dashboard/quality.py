@@ -5,8 +5,8 @@ and :mod:`etfh.analytics`:
 
 - the selected portfolio date and the partial flag from
   :func:`etfh.analytics.concentration`;
-- the unmatched non-cash weight share from :func:`etfh.qa.unmatched_shares`
-  (the same definition ``etfh qa`` reports);
+- the unmatched non-cash weight share from :func:`etfh.qa.unmatched_shares`,
+  selected as of the panel's date (the same definition ``etfh qa`` reports);
 - the excluded files for a fund from :func:`etfh.qa.summarize`.
 
 The only other read is the build's additive ``sources`` metadata table (D53),
@@ -123,10 +123,10 @@ def source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str | Non
     return metadata
 
 
-def _share_frame(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
-    """``etfh.qa.unmatched_shares`` or an empty frame when the tables are missing."""
+def _share_frame(con: duckdb.DuckDBPyConnection, asof: date) -> pl.DataFrame:
+    """``etfh.qa.unmatched_shares`` as of ``asof``, or an empty frame on error."""
     try:
-        return qa.unmatched_shares(con)
+        return qa.unmatched_shares(con, asof)
     except duckdb.Error:
         return pl.DataFrame(
             schema={
@@ -240,7 +240,7 @@ def fund_quality(
         con,
         fund,
         asof,
-        shares=_share_frame(con),
+        shares=_share_frame(con, asof),
         metadata=source_metadata(con),
         excluded=_excluded_by_fund(con),
         holdings=holdings,
@@ -253,7 +253,7 @@ def fund_qualities(
     asof: date,
 ) -> dict[str, FundQuality]:
     """Quality for several funds, reading the shared QA tables once."""
-    shares = _share_frame(con)
+    shares = _share_frame(con, asof)
     metadata = source_metadata(con)
     excluded = _excluded_by_fund(con)
     return {
