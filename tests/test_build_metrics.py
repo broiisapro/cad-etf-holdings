@@ -478,3 +478,75 @@ def test_default_validator_excludes_a_metrics_file_with_negative_shares(
     assert "shares_nonnegative" in events["check"].to_list()
     assert set(events["severity"].to_list()) == {"error"}
     assert set(events["excluded"].to_list()) == {True}
+
+
+def test_a_metrics_source_file_is_never_parsed_as_holdings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broad PDF/CSV holdings parser must not touch a metrics source's files."""
+    import etfh.build as build_module
+
+    config_dir = make_metrics_config(tmp_path)
+    raw_root = tmp_path / "raw"
+    write_metrics_raw(
+        raw_root,
+        metrics_payload(_TWO_DAYS),
+        fetched_at=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+
+    class BroadHoldingsParser:
+        def can_parse(self, raw: Any) -> bool:
+            return True
+
+        def parse(self, raw: Any) -> Any:
+            raise AssertionError("the holdings path must not run for a metrics source")
+
+    monkeypatch.setattr(build_module, "find_parser", lambda raw, source: BroadHoldingsParser())
+    out_dir = tmp_path / "out"
+    result = build_metrics_db(
+        out_dir,
+        raw_root=raw_root,
+        config_dir=config_dir,
+        metrics_parsers=[FakeMetricsParser()],
+        monkeypatch=monkeypatch,
+    )
+    db_path = out_dir / "etfh.duckdb"
+    assert result.n_holdings == 0
+    assert result.n_fund_metrics == 2
+    versions = _query(db_path, "SELECT source_id, status FROM file_versions")
+    assert versions.rows() == [
+        (METRICS_SOURCE_ID, "included"),
+        (METRICS_SOURCE_ID, "included"),
+    ]
+    assert _query(db_path, "SELECT COUNT(*) AS n FROM qa_events")["n"][0] == 0
+
+
+def test_a_metrics_source_without_a_parser_is_reported_as_no_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = make_metrics_config(tmp_path)
+    raw_root = tmp_path / "raw"
+    write_metrics_raw(
+        raw_root,
+        metrics_payload(_TWO_DAYS),
+        fetched_at=datetime(2026, 10, 31, 12, tzinfo=UTC),
+        as_of_hint=date(2026, 10, 30),
+    )
+    out_dir = tmp_path / "out"
+    result = build_metrics_db(
+        out_dir,
+        raw_root=raw_root,
+        config_dir=config_dir,
+        metrics_parsers=[],
+        monkeypatch=monkeypatch,
+    )
+    db_path = out_dir / "etfh.duckdb"
+    assert result.n_fund_metrics == 0
+    assert result.n_excluded_files == 1
+    versions = _query(db_path, "SELECT source_id, as_of_date, status FROM file_versions")
+    assert versions.rows() == [(METRICS_SOURCE_ID, date(2026, 10, 30), "excluded")]
+    events = _query(
+        db_path,
+        'SELECT source_id, "check", severity, excluded FROM qa_events',
+    )
+    assert events.rows() == [(METRICS_SOURCE_ID, "no_parser", "error", True)]
