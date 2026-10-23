@@ -15,17 +15,28 @@ rounding allowance is measurement error, so the two are added; the result is
 capped at :data:`TOLERANCE_CAP` (0.02) so a damaged file can never hide behind
 a large row count. Any file whose weights sum above ``1 + tolerance`` is an
 error regardless of source kind or ``partial_list`` (``weight_sum_over_one``).
+
+:func:`validate_metrics` applies the same finding contract to the additive
+fund-metrics files (D66, FR-2.1): the frame must match
+``etfh.schema.ParsedFundMetrics`` and every date must be plausible relative to
+the fetch date. AUM is cross-checked against NAV times shares outstanding, but
+only as a warning: issuers round the three figures independently and a mismatch
+is evidence, not proof, of a parsing error. An error in a metrics file excludes
+that metrics file only; holdings files are never affected (interfaces wave 06).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
+from importlib import import_module
+from math import isfinite
 from pathlib import Path
 from typing import Literal, Self, cast
 from zoneinfo import ZoneInfo
 
+import pandera.polars as pa
 import polars as pl
 import yaml
 from pandera.errors import SchemaError, SchemaErrors
@@ -44,6 +55,7 @@ __all__ = [
     "is_excluded",
     "tolerance_for",
     "validate_file",
+    "validate_metrics",
 ]
 
 Severity = Literal["error", "warning", "info"]
@@ -551,4 +563,249 @@ def validate_file(
     findings.extend(_check_future_as_of(parsed, config=config))
     findings.extend(_check_unit_contradiction(parsed))
     findings.extend(_check_negative_weight(parsed))
+    return findings
+
+
+# --- fund metrics (D66, interfaces wave 06 §4) ---------------------------------
+
+_METRICS_NUMERIC_COLUMNS = ("nav_per_unit", "shares_outstanding", "aum")
+_METRICS_EXAMPLES = 3
+
+
+def _metrics_model() -> type[pa.DataFrameModel]:
+    """The additive fund-metrics contract from :mod:`etfh.schema` (D66).
+
+    Resolved on use: the holdings checks stay usable without the additive
+    metrics models, and the schema module remains the single owner of the
+    frozen column contract.
+    """
+    module = import_module("etfh.schema")
+    return cast("type[pa.DataFrameModel]", module.__dict__["ParsedFundMetrics"])
+
+
+def _numeric_column(frame: pl.DataFrame, name: str) -> pl.Series | None:
+    """The column when it exists with a numeric dtype, else ``None``.
+
+    A missing or mistyped column is already a ``schema`` error; the individual
+    checks stay silent about it instead of raising.
+    """
+    dtype = frame.schema.get(name)
+    if dtype is None or not dtype.is_numeric():
+        return None
+    return frame[name]
+
+
+def _render_values(values: Sequence[float]) -> str:
+    return ", ".join(f"{value:g}" for value in values)
+
+
+def _check_metrics_schema(parsed: ParsedFile, *, source: Source) -> list[QaFinding]:
+    """The frame must match ``ParsedFundMetrics`` (D66).
+
+    Nullable fields are optional to Pandera, so the model's column set is
+    checked explicitly first: a metrics frame that omits a contract column is a
+    schema error even when the remaining rows are valid.
+    """
+    model = _metrics_model()
+    expected = tuple(model.to_schema().columns)
+    missing = [name for name in expected if name not in parsed.frame.columns]
+    if missing:
+        return [
+            QaFinding(
+                "schema",
+                "error",
+                f"fund metrics frame for source {source.id} is missing column(s): "
+                f"{', '.join(missing)}",
+            )
+        ]
+    try:
+        model.validate(parsed.frame, lazy=True)
+    except (SchemaError, SchemaErrors) as error:
+        return [
+            QaFinding(
+                "schema",
+                "error",
+                f"fund metrics frame for source {source.id} does not match "
+                f"ParsedFundMetrics: {_schema_failure_detail(error)}",
+            )
+        ]
+    return []
+
+
+def _check_nav_positive(parsed: ParsedFile) -> list[QaFinding]:
+    """Every stated NAV per unit must be positive and finite; null stays allowed."""
+    nav = _numeric_column(parsed.frame, "nav_per_unit")
+    if nav is None:
+        return []
+    present = nav.drop_nulls()
+    invalid = present.filter(~present.is_finite() | (present <= 0))
+    if invalid.is_empty():
+        return []
+    examples = invalid.unique().sort().to_list()[:_METRICS_EXAMPLES]
+    return [
+        QaFinding(
+            "nav_positive",
+            "error",
+            f"{invalid.len()} of {present.len()} nav_per_unit value(s) are not positive: "
+            f"{_render_values(examples)}",
+        )
+    ]
+
+
+def _check_shares_nonnegative(parsed: ParsedFile) -> list[QaFinding]:
+    """Every stated share count must be non-negative and finite; null stays allowed."""
+    shares = _numeric_column(parsed.frame, "shares_outstanding")
+    if shares is None:
+        return []
+    present = shares.drop_nulls()
+    invalid = present.filter(~present.is_finite() | (present < 0))
+    if invalid.is_empty():
+        return []
+    examples = invalid.unique().sort().to_list()[:_METRICS_EXAMPLES]
+    return [
+        QaFinding(
+            "shares_nonnegative",
+            "error",
+            f"{invalid.len()} of {present.len()} shares_outstanding value(s) are negative or "
+            f"non-finite: {_render_values(examples)}",
+        )
+    ]
+
+
+def _check_aum_consistency(parsed: ParsedFile, *, config: ValidationConfig) -> list[QaFinding]:
+    """AUM should equal NAV x shares outstanding; a gap is a warning, not an error.
+
+    Issuers round NAV, shares and AUM independently, and some publish only two
+    of the three; a relative difference above ``aum_tolerance`` therefore
+    records evidence for a human to look at without excluding the file. Rows
+    with a missing figure or with their own NAV/shares finding are skipped here.
+    An AUM of zero with a positive NAV x shares has no relative difference to
+    measure and is reported as undefined.
+    """
+    frame = parsed.frame
+    if any(_numeric_column(frame, name) is None for name in _METRICS_NUMERIC_COLUMNS):
+        return []
+    offenders: list[tuple[str, str, str]] = []
+    for row in frame.iter_rows(named=True):
+        nav = row["nav_per_unit"]
+        shares = row["shares_outstanding"]
+        aum = row["aum"]
+        if nav is None or shares is None or aum is None:
+            continue
+        nav_value, shares_value, aum_value = float(nav), float(shares), float(aum)
+        if not all(isfinite(value) for value in (nav_value, shares_value, aum_value)):
+            continue
+        if nav_value <= 0 or shares_value < 0 or aum_value < 0:
+            continue
+        expected = nav_value * shares_value
+        if aum_value == 0.0:
+            if expected == 0.0:
+                continue
+            difference = "relative=undefined (aum=0)"
+        else:
+            relative = abs(aum_value - expected) / aum_value
+            if relative <= config.aum_tolerance:
+                continue
+            difference = f"relative={relative:.2%}"
+        as_of = row["as_of_date"]
+        as_of_text = as_of.isoformat() if isinstance(as_of, date) else "-"
+        description = (
+            f"as_of={as_of_text} fund={row['fund_ticker']} aum={aum_value:.4f} "
+            f"nav*shares={expected:.4f} ({difference})"
+        )
+        offenders.append((as_of_text, str(row["fund_ticker"]), description))
+    if not offenders:
+        return []
+    offenders.sort()
+    shown = "; ".join(description for _as_of, _fund, description in offenders[:_METRICS_EXAMPLES])
+    remaining = len(offenders) - _METRICS_EXAMPLES
+    suffix = f"; {remaining} more" if remaining > 0 else ""
+    return [
+        QaFinding(
+            "aum_consistency",
+            "warning",
+            f"{len(offenders)} row(s) differ from NAV x shares by more than "
+            f"aum_tolerance={config.aum_tolerance:g}: {shown}{suffix}",
+        )
+    ]
+
+
+def _check_metrics_future_as_of(parsed: ParsedFile, *, config: ValidationConfig) -> list[QaFinding]:
+    """No row's as-of date may be after the fetch date in America/Toronto (D30).
+
+    A metrics file can carry a history, so every stated date is checked, not
+    just the file's latest one.
+    """
+    fetch_date = parsed.raw.fetched_at.astimezone(_TORONTO).date()
+    limit = fetch_date + timedelta(days=config.future_as_of_days)
+    dates: set[date] = {parsed.as_of_date}
+    if parsed.frame.schema.get("as_of_date") == pl.Date:
+        dates.update(parsed.frame["as_of_date"].drop_nulls().to_list())
+    late = sorted(day for day in dates if day > limit)
+    if not late:
+        return []
+    rendered = ", ".join(day.isoformat() for day in late[:_METRICS_EXAMPLES])
+    remaining = len(late) - _METRICS_EXAMPLES
+    suffix = f" (+{remaining} more)" if remaining > 0 else ""
+    return [
+        QaFinding(
+            "future_as_of",
+            "error",
+            f"as_of_date={rendered}{suffix} is after fetch date {fetch_date.isoformat()} "
+            f"in America/Toronto (future_as_of_days={config.future_as_of_days})",
+        )
+    ]
+
+
+def _check_duplicate_date(parsed: ParsedFile) -> list[QaFinding]:
+    """One (fund, as-of date) key may appear only once per metrics file (D66)."""
+    frame = parsed.frame
+    if "fund_ticker" not in frame.columns or frame.schema.get("as_of_date") != pl.Date:
+        return []
+    keys = frame.select("fund_ticker", "as_of_date").drop_nulls()
+    duplicates = (
+        keys.group_by(["fund_ticker", "as_of_date"])
+        .len()
+        .filter(pl.col("len") > 1)
+        .sort(["fund_ticker", "as_of_date"])
+    )
+    if duplicates.is_empty():
+        return []
+    rendered = ", ".join(
+        f"{row['fund_ticker']} {row['as_of_date'].isoformat()} x{row['len']}"
+        for row in duplicates.head(_METRICS_EXAMPLES).iter_rows(named=True)
+    )
+    remaining = duplicates.height - _METRICS_EXAMPLES
+    suffix = f"; {remaining} more" if remaining > 0 else ""
+    return [
+        QaFinding(
+            "duplicate_date",
+            "error",
+            f"{duplicates.height} (fund, as_of_date) key(s) appear more than once: "
+            f"{rendered}{suffix}",
+        )
+    ]
+
+
+def validate_metrics(
+    parsed: ParsedFile,
+    *,
+    source: Source,
+    config: ValidationConfig,
+) -> list[QaFinding]:
+    """Run all applicable checks over one parsed fund-metrics file, in a fixed order.
+
+    ``source`` is the metrics source (``kind: fund_metrics``) whose frame this
+    is, which may differ from ``parsed.raw.source_id`` when a metrics parser
+    reads another source's stored files (``purpose_metrics`` from
+    ``purpose_daily``). An error excludes that metrics file only: the build
+    records holdings and metrics findings separately.
+    """
+    findings: list[QaFinding] = []
+    findings.extend(_check_metrics_schema(parsed, source=source))
+    findings.extend(_check_nav_positive(parsed))
+    findings.extend(_check_shares_nonnegative(parsed))
+    findings.extend(_check_aum_consistency(parsed, config=config))
+    findings.extend(_check_metrics_future_as_of(parsed, config=config))
+    findings.extend(_check_duplicate_date(parsed))
     return findings

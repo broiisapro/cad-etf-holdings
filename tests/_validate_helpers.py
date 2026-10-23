@@ -5,6 +5,10 @@ mirrors the interfaces.md conventions (notes, declared units, security ids)
 closely enough to exercise every validation check without depending on parser
 code that may not be merged yet. Fixture numbers are never re-derived here:
 every weight, name and identifier comes from the stored fixture file.
+
+The fund-metrics helpers at the end of the file build synthetic metrics frames
+for :func:`etfh.validate.validate_metrics`; they follow the column contract of
+``ParsedFundMetrics`` (interfaces wave 06 §2) and never read an issuer file.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from time import strptime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pandera.polars as pa
 import pdfplumber
 import polars as pl
 from openpyxl import load_workbook
@@ -327,3 +332,84 @@ def parse_fixture(raw: RawFile) -> ParsedFile:
     if raw.ext == "pdf":
         return _parse_pdf(raw)
     raise ValueError(f"{raw.path}: unsupported fixture format {raw.ext!r}")
+
+
+# --- fund metrics (interfaces wave 06 §2) --------------------------------------
+
+METRICS_STRING_COLUMNS = ("fund_ticker", "currency", "source_id", "raw_file_sha256")
+METRICS_NUMERIC_COLUMNS = ("nav_per_unit", "shares_outstanding", "aum")
+
+
+def metrics_row(**overrides: object) -> dict[str, object]:
+    """One consistent fund-metrics row: AUM is exactly NAV x shares."""
+    row: dict[str, object] = {
+        "fund_ticker": "SYNM",
+        "as_of_date": date(2026, 10, 29),
+        "nav_per_unit": 25.0,
+        "shares_outstanding": 1_000_000.0,
+        "aum": 25_000_000.0,
+        "currency": "CAD",
+        "source_id": "syn_metrics",
+        "raw_file_sha256": "a" * 64,
+    }
+    row.update(overrides)
+    return row
+
+
+def metrics_frame(rows: list[dict[str, object]] | None = None) -> pl.DataFrame:
+    """A frame with the ``ParsedFundMetrics`` columns and dtypes."""
+    schema: dict[str, Any] = {name: pl.String for name in METRICS_STRING_COLUMNS}
+    schema.update({"as_of_date": pl.Date, **{name: pl.Float64 for name in METRICS_NUMERIC_COLUMNS}})
+    return pl.DataFrame(rows if rows is not None else [metrics_row()], schema_overrides=schema)
+
+
+def parsed_metrics(
+    frame: pl.DataFrame | None = None,
+    *,
+    as_of: date | None = None,
+    fetched_at: datetime | None = None,
+    notes: list[str] | None = None,
+) -> ParsedFile:
+    """A ``ParsedFile`` carrying a metrics frame from a purpose-daily raw file.
+
+    The raw side is deliberately a ``purpose_daily`` JSON file: the
+    ``purpose_metrics`` parser reads those stored files instead of fetching its
+    own (interfaces wave 06 §1).
+    """
+    raw = RawFile(
+        source_id="purpose_daily",
+        issuer="purpose",
+        fund_ticker="SYNM",
+        as_of_hint=date(2026, 10, 29),
+        fetched_at=fetched_at or datetime(2026, 10, 29, 22, 0, tzinfo=UTC),
+        url="https://example.test/funds/SYNM/holdings.json",
+        path=Path("raw/purpose/SYNM/2026-10-29/20261029T220000Z.json"),
+        sha256="a" * 64,
+        content_type="application/json",
+        ext="json",
+    )
+    return ParsedFile(
+        raw=raw,
+        as_of_date=as_of or date(2026, 10, 29),
+        published_at=None,
+        frame=metrics_frame() if frame is None else frame,
+        notes=list(notes or []),
+    )
+
+
+class ContractParsedFundMetrics(pa.DataFrameModel):
+    """Stand-in for the additive ``ParsedFundMetrics`` model (D66).
+
+    Only used by tests while ``etfh.schema.ParsedFundMetrics`` is not on the
+    branch yet (it is owned by a parallel change); as soon as the real model is
+    importable the tests use it, so this file never becomes a second schema.
+    """
+
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date
+    nav_per_unit: float | None = pa.Field(nullable=True, gt=0)
+    shares_outstanding: float | None = pa.Field(nullable=True, ge=0)
+    aum: float | None = pa.Field(nullable=True, ge=0)
+    currency: str | None = pa.Field(nullable=True)
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    raw_file_sha256: str = pa.Field(str_matches=r"^[0-9a-f]{64}$")
