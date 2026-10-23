@@ -256,13 +256,18 @@ def render(con: duckdb.DuckDBPyConnection, *, demo_mode: bool = False) -> None:
         render_heatmap(con, funds, asof)
 
 
-def main() -> None:
-    """Entry point: check the database, open it read-only and render."""
+def main(*, force_demo: bool = False) -> None:
+    """Entry point: check the database, open it read-only and render.
+
+    ``force_demo`` is used by the repository-root ``streamlit_app.py`` entry
+    point so the public Community Cloud deployment always runs on synthetic
+    data without needing an environment variable.
+    """
     st.set_page_config(page_title="Canadian ETF holdings", layout="wide")
     st.title("Canadian ETF holdings")
     st.caption("Point-in-time overlap and concentration across published ETF portfolios.")
 
-    demo_mode = demo.is_demo()
+    demo_mode = force_demo or demo.is_demo()
     if demo_mode:
         st.info(demo.DEMO_BANNER)
         try:
