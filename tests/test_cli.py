@@ -12,6 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+import polars as pl
 import pytest
 import yaml
 from typer.testing import CliRunner
@@ -20,7 +21,7 @@ from etfh.cli import app
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.registry import Source, TermsNotAllowedError, load_sources
-from etfh.types import RawFile
+from etfh.types import Decision, RawFile
 from tests._build_helpers import CONFIG_DIR, FIXTURES, RAW_ROOT
 
 runner = CliRunner()
@@ -35,11 +36,14 @@ def _plain(text: str) -> str:
 
 COMMANDS = (
     "collect",
+    "collect-aum",
     "parse",
     "build",
     "qa",
     "overlap",
     "changes",
+    "flows",
+    "backfill-qpd",
     "spotcheck",
     "export",
     "review",
@@ -1060,3 +1064,455 @@ def test_review_approve_refuses_to_change_a_reviewed_decision(tmp_path: Path) ->
     assert "ISIN:CA0000000001" in result.output
     # the reviewed decision is untouched
     assert overrides.read_text(encoding="utf-8").count("\n") == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 CLI (issue #154): collect-aum, flows, backfill-qpd, qa --asof
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsSource:
+    """A ``Source`` stand-in for the metrics commands.
+
+    ``kind`` is a plain string because ``SourceKind.fund_metrics`` is owned by
+    the registry workstream; the CLI compares kinds by value (D66).
+    """
+
+    def __init__(
+        self,
+        source_id: str,
+        *,
+        kind: str = "fund_metrics",
+        issuer: str = "fake",
+        decision: Decision = Decision.allowed_with_conditions,
+        supported: bool = True,
+    ) -> None:
+        self.id = source_id
+        self.issuer = issuer
+        self.kind = kind
+        self.supported = supported
+        self.terms = SimpleNamespace(decision=decision)
+
+
+def _fake_fund(ticker: str, source_ids: tuple[str, ...]) -> Any:
+    return SimpleNamespace(ticker=ticker, source_ids=source_ids)
+
+
+def test_collect_aum_touches_metrics_sources_only_and_reports_derivations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = {
+        "fake_daily": _FakeMetricsSource("fake_daily", kind="daily_holdings"),
+        "purpose_metrics": _FakeMetricsSource("purpose_metrics", issuer="purpose"),
+        "bmo_metrics": _FakeMetricsSource("bmo_metrics", issuer="bmo"),
+    }
+    funds = [
+        _fake_fund("PDF", ("purpose_metrics", "fake_daily")),
+        _fake_fund("ZEM", ("bmo_metrics",)),
+    ]
+    collector = FakeCollector("bmo_metrics")
+    lookups: list[str] = []
+
+    def fake_collector_for(source: Any) -> Any:
+        lookups.append(source.id)
+        return collector if source.id == "bmo_metrics" else None
+
+    monkeypatch.setattr("etfh.cli.load_sources", lambda path: sources)
+    monkeypatch.setattr("etfh.cli.load_funds", lambda path, loaded: funds)
+    monkeypatch.setattr("etfh.cli.collector_for", fake_collector_for)
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    result = runner.invoke(
+        app,
+        [
+            "collect-aum",
+            "--date",
+            "2026-11-02",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--config",
+            str(tmp_path / "config"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip().splitlines() == [
+        "derived: purpose_metrics from purpose_daily",
+        "unchanged source=bmo_metrics fund=ZEM",
+    ]
+    assert lookups == ["purpose_metrics", "bmo_metrics"]
+    assert collector.calls == [("ZEM", date(2026, 11, 2))]
+
+
+def test_collect_aum_refuses_a_not_allowed_metrics_source_without_a_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = {
+        "bmo_metrics": _FakeMetricsSource("bmo_metrics", decision=Decision.not_allowed),
+        "evolve_metrics": _FakeMetricsSource("evolve_metrics", supported=False),
+    }
+    funds = [_fake_fund("ZEM", ("bmo_metrics",)), _fake_fund("ETHH", ("evolve_metrics",))]
+    lookups: list[str] = []
+
+    monkeypatch.setattr("etfh.cli.load_sources", lambda path: sources)
+    monkeypatch.setattr("etfh.cli.load_funds", lambda path, loaded: funds)
+    monkeypatch.setattr("etfh.cli.collector_for", lambda source: lookups.append(source.id))
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    result = runner.invoke(
+        app,
+        [
+            "collect-aum",
+            "--date",
+            "2026-11-02",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--config",
+            str(tmp_path / "config"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip().splitlines() == [
+        "skipped: unsupported source=evolve_metrics fund=ETHH",
+        "skipped: terms source=bmo_metrics fund=ZEM decision=not_allowed",
+    ]
+    assert lookups == []
+
+
+def _flows_fixture() -> pl.DataFrame:
+    from etfh.cli import _FLOW_METHOD
+
+    return pl.DataFrame(
+        {
+            "as_of_date": [date(2026, 10, 21), date(2026, 10, 22)],
+            "shares_outstanding": [1_000_000.0, 1_050_000.0],
+            "nav_per_unit": [25.0, 25.2],
+            "prev_as_of_date": [date(2026, 10, 20), date(2026, 10, 21)],
+            "prev_shares": [990_000.0, 1_000_000.0],
+            "gap_days": [1, 1],
+            "flow_estimate": [250_000.0, 1_260_000.0],
+            "method": [_FLOW_METHOD, _FLOW_METHOD],
+        }
+    )
+
+
+def test_flows_prints_rows_and_the_method_line(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etfh.cli._flows_frame", lambda *args, **kwargs: _flows_fixture())
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "PDF",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "flows PDF 2026-10-20..2026-10-22 as of 2026-10-22: 2 row(s)" in result.output
+    assert (
+        "  2026-10-22 prev=2026-10-21 gap_days=1 shares=1,050,000.0000 "
+        "nav=25.2000 flow=+1,260,000.00" in result.output
+    )
+    assert (
+        "method: Δshares × NAV (estimate; ignores distributions and in-kind effects)"
+        in result.output
+    )
+
+
+def test_flows_json_carries_the_method_and_decimal_strings(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etfh.cli._flows_frame", lambda *args, **kwargs: _flows_fixture())
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "PDF",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["fund"] == "PDF"
+    assert payload["asof"] == "2026-10-22"
+    assert payload["method"].startswith("Δshares × NAV")
+    assert payload["rows"][1] == {
+        "as_of_date": "2026-10-22",
+        "shares_outstanding": "1050000.0000",
+        "nav_per_unit": "25.2000",
+        "prev_as_of_date": "2026-10-21",
+        "prev_shares": "1000000.0000",
+        "gap_days": 1,
+        "flow_estimate": "1260000.00",
+    }
+
+
+def test_flows_defaults_asof_to_the_end_and_honours_an_explicit_one(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[date] = []
+
+    def fake_flows(con: Any, fund: str, start: date, end: date, *, asof: date) -> Any:
+        seen.append(asof)
+        return _flows_fixture()
+
+    monkeypatch.setattr("etfh.cli._flows_frame", fake_flows)
+    base = [
+        "flows",
+        "--fund",
+        "PDF",
+        "--from",
+        "2026-10-20",
+        "--to",
+        "2026-10-22",
+        "--db",
+        str(fixture_build / "etfh.duckdb"),
+    ]
+    assert runner.invoke(app, base).exit_code == 0
+    assert runner.invoke(app, [*base, "--asof", "2026-10-21"]).exit_code == 0
+    assert seen == [date(2026, 10, 22), date(2026, 10, 21)]
+
+
+def test_flows_unknown_fund_exits_two(fixture_build: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from etfh.analytics import FundNotFoundError
+
+    def missing(*args: Any, **kwargs: Any) -> Any:
+        raise FundNotFoundError("NOPE")
+
+    monkeypatch.setattr("etfh.cli._flows_frame", missing)
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "NOPE",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "unknown fund 'NOPE'" in result.output
+
+
+def test_flows_with_no_rows_still_prints_the_method(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etfh.cli._flows_frame", lambda *args, **kwargs: _flows_fixture().clear())
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "PDF",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "0 row(s)" in result.output
+    assert (
+        "method: Δshares × NAV (estimate; ignores distributions and in-kind effects)"
+        in result.output
+    )
+
+
+def _backfill_results() -> list[Any]:
+    return [
+        SimpleNamespace(
+            fund_ticker="ZCN",
+            quarter_end=date(2026, 9, 30),
+            status="fetched",
+            detail="2026Q3 disclosure",
+            raw=SimpleNamespace(path=Path("raw/vanguard_ca/ZCN/2026-09-30/file.pdf")),
+        ),
+        SimpleNamespace(
+            fund_ticker="ZCN",
+            quarter_end=date(2026, 6, 30),
+            status="present",
+            detail="already in the raw store",
+            raw=None,
+        ),
+        SimpleNamespace(
+            fund_ticker="ZCN",
+            quarter_end=date(2026, 3, 31),
+            status="missing",
+            detail="no disclosure link on the product page",
+            raw=None,
+        ),
+    ]
+
+
+def test_backfill_qpd_reports_every_fund_quarter_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_backfill(
+        issuer: str,
+        quarters: int,
+        raw_root: Path,
+        *,
+        config_dir: Path,
+        client: PoliteClient,
+    ) -> list[Any]:
+        captured.update(issuer=issuer, quarters=quarters, raw_root=raw_root, config_dir=config_dir)
+        return _backfill_results()
+
+    monkeypatch.setattr("etfh.cli._backfill_qpd", fake_backfill)
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    result = runner.invoke(
+        app,
+        [
+            "backfill-qpd",
+            "--issuer",
+            "vanguard_ca",
+            "--quarters",
+            "3",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--config",
+            str(CONFIG_DIR),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    lines = result.output.strip().splitlines()
+    assert lines[0] == (
+        "fetched ZCN 2026-09-30 2026Q3 disclosure raw/vanguard_ca/ZCN/2026-09-30/file.pdf"
+    )
+    assert lines[1] == "present ZCN 2026-06-30 already in the raw store"
+    assert lines[2] == "missing ZCN 2026-03-31 no disclosure link on the product page"
+    assert lines[3] == ("backfill vanguard_ca: 1 fetched, 1 present, 1 missing (3 fund-quarter(s))")
+    assert captured == {
+        "issuer": "vanguard_ca",
+        "quarters": 3,
+        "raw_root": tmp_path / "raw",
+        "config_dir": CONFIG_DIR,
+    }
+
+
+def test_backfill_qpd_rejects_an_issuer_without_an_approved_source(
+    tmp_path: Path,
+) -> None:
+    for issuer in ("nope", "ishares_ca"):
+        result = runner.invoke(
+            app,
+            [
+                "backfill-qpd",
+                "--issuer",
+                issuer,
+                "--quarters",
+                "2",
+                "--raw",
+                str(tmp_path / "raw"),
+                "--config",
+                str(CONFIG_DIR),
+            ],
+        )
+        assert result.exit_code == 2, result.output
+        assert f"no approved quarterly disclosure source for issuer '{issuer}'" in result.output
+
+
+def test_backfill_qpd_rejects_zero_quarters(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "backfill-qpd",
+            "--issuer",
+            "vanguard_ca",
+            "--quarters",
+            "0",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--config",
+            str(CONFIG_DIR),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--quarters must be at least 1" in result.output
+
+
+def _share_frame(rows: list[tuple[str, date, str, float, float]]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fund_ticker": [row[0] for row in rows],
+            "as_of_date": [row[1] for row in rows],
+            "source_id": [row[2] for row in rows],
+            "unmatched_weight": [row[3] for row in rows],
+            "total_weight": [row[4] for row in rows],
+            "share": [row[3] / row[4] if row[4] else 0.0 for row in rows],
+        }
+    )
+
+
+def test_qa_asof_measures_unmatched_weight_on_the_versions_known_by_then(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole_store = _share_frame([("SYNA", date(2026, 11, 2), "syn_csv", 0.0, 1.0)])
+    as_of = _share_frame([("SYNA", date(2026, 10, 21), "syn_csv", 0.25, 1.0)])
+    calls: list[date | None] = []
+
+    def fake_shares(con: Any, asof: date | None = None) -> pl.DataFrame:
+        calls.append(asof)
+        return whole_store if asof is None else as_of
+
+    monkeypatch.setattr("etfh.qa.unmatched_shares", fake_shares)
+    result = runner.invoke(
+        app,
+        [
+            "qa",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--asof",
+            "2026-10-22",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [None, date(2026, 10, 22)]
+    assert "as of 2026-10-22: unmatched weight uses only versions known by then" in result.output
+    assert "SYNA as_of=2026-10-21 source=syn_csv share=25.00%" in result.output
+
+
+def test_qa_asof_feeds_the_max_unmatched_share_threshold(
+    fixture_build: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole_store = _share_frame([("SYNA", date(2026, 11, 2), "syn_csv", 0.0, 1.0)])
+    as_of = _share_frame([("SYNA", date(2026, 10, 21), "syn_csv", 0.5, 1.0)])
+
+    def fake_shares(con: Any, asof: date | None = None) -> pl.DataFrame:
+        return whole_store if asof is None else as_of
+
+    monkeypatch.setattr("etfh.qa.unmatched_shares", fake_shares)
+    result = runner.invoke(
+        app,
+        [
+            "qa",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--asof",
+            "2026-10-22",
+            "--max-unmatched-share",
+            "0.4",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    assert "unmatched threshold 40.00% exceeded by 1 included daily file(s)" in result.output
+    assert "SYNA as_of=2026-10-21 source=syn_csv share=50.00%" in result.output
