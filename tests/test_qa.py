@@ -21,7 +21,13 @@ from etfh.qa import (
     summarize,
     unmatched_shares,
 )
-from etfh.schema import DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_HOLDINGS_CHANGES, DDL_QA_EVENTS
+from etfh.schema import (
+    DDL_FILE_VERSIONS,
+    DDL_FUND_METRICS,
+    DDL_HOLDINGS,
+    DDL_HOLDINGS_CHANGES,
+    DDL_QA_EVENTS,
+)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -42,7 +48,7 @@ _SHARE_COLUMNS = [
 
 
 def _connect(
-    tmp_path: Path, *, tables: bool = True, sources: bool = False
+    tmp_path: Path, *, tables: bool = True, sources: bool = False, metrics: bool = False
 ) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(tmp_path / "etfh.duckdb"))
     if tables:
@@ -53,6 +59,8 @@ def _connect(
                 "CREATE TABLE sources ("
                 "source_id VARCHAR, issuer VARCHAR, kind VARCHAR, format VARCHAR)"
             )
+        if metrics:
+            con.execute(DDL_FUND_METRICS)
     return con
 
 
@@ -141,6 +149,26 @@ def _source(
     format: str = "csv",
 ) -> None:
     con.execute("INSERT INTO sources VALUES (?, ?, ?, ?)", [source_id, issuer, kind, format])
+
+
+def _fund_metric(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    fund: str = "SYNQ",
+    source: str = "syn_metrics",
+    as_of: date = AS_OF,
+    version: int = 1,
+    nav: float | None = 10.0,
+    shares: float | None = 100.0,
+    aum: float | None = 1000.0,
+    sha: str = SHA_A,
+    known_at: datetime = NOW,
+) -> None:
+    """One ``fund_metrics`` row in the frozen column order."""
+    con.execute(
+        "INSERT INTO fund_metrics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [fund, as_of, known_at, version, nav, shares, aum, "CAD", source, sha],
+    )
 
 
 def test_clean_database_exits_zero(tmp_path: Path) -> None:
@@ -763,3 +791,367 @@ def test_render_does_not_depend_on_insertion_order(tmp_path: Path) -> None:
     assert "  daily files:" in forward
     assert "  quarterly files:" in forward
     assert forward.count("    worst funds:") == 2
+
+
+# --- fund metrics (D66, interfaces wave 06 §4) ---------------------------------
+
+
+def test_metrics_section_is_rendered_even_without_metrics(tmp_path: Path) -> None:
+    con = _connect(tmp_path)
+    summary = summarize(con)
+    text = render(summary)
+    assert "fund metrics:" in text
+    assert "  files: 0 total (0 included, 0 excluded)" in text
+    assert "  funds with metrics: 0" in text
+    assert "  latest as-of per issuer: none" in text
+    assert "  findings: 0 error(s), 0 warning(s), 0 info(s)" in text
+    assert summary.metrics.excluded_files == ()
+    assert summary.metrics.inconsistent_files == ()
+    assert exit_code(summary) == 0
+
+
+def test_metrics_files_funds_and_latest_dates(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "bmo_daily", issuer="bmo", kind="daily_holdings")
+    _source(con, "bmo_metrics", issuer="bmo", kind="fund_metrics")
+    _source(con, "evolve_metrics", issuer="evolve", kind="fund_metrics")
+    _file_version(con, SHA_A, fund="ZEM", source="bmo_daily")
+    for day in (date(2026, 10, 27), date(2026, 10, 28), date(2026, 10, 29)):
+        _file_version(con, SHA_B, fund="ZEM", source="bmo_metrics", as_of=day)
+        _fund_metric(con, fund="ZEM", source="bmo_metrics", as_of=day, sha=SHA_B)
+    _file_version(con, SHA_C, fund="ESPX", source="evolve_metrics", as_of=date(2026, 10, 20))
+    _fund_metric(con, fund="ESPX", source="evolve_metrics", as_of=date(2026, 10, 20), sha=SHA_C)
+    _fund_metric(con, fund="ESPX", source="evolve_metrics", as_of=date(2026, 10, 15), sha=SHA_C)
+    summary = summarize(con)
+    assert summary.metrics.files_included == 2
+    assert summary.metrics.files_excluded == 0
+    assert summary.metrics.funds == ("ESPX", "ZEM")
+    assert summary.metrics.latest_by_issuer == (
+        ("bmo", date(2026, 10, 29)),
+        ("evolve", date(2026, 10, 20)),
+    )
+    assert exit_code(summary) == 0
+    text = render(summary)
+    assert "  files: 2 total (2 included, 0 excluded)" in text
+    assert "  funds with metrics: 2" in text
+    assert "    bmo 2026-10-29" in text
+    assert "    evolve 2026-10-20" in text
+    # A file is one stored input per source: the three dated versions of the
+    # BMO metrics history are one metrics file, and the top line still counts
+    # holdings inputs only.
+    assert "files: 1 total (1 included, 0 excluded)" in text
+
+
+def test_excluded_metrics_file_is_listed_and_exits_zero(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "syn_metrics", issuer="synthetic", kind="fund_metrics")
+    _file_version(con, SHA_B, fund="SYNQ", source="syn_metrics", status="excluded")
+    _qa_event(
+        con,
+        SHA_B,
+        fund="SYNQ",
+        source="syn_metrics",
+        check="duplicate_date",
+        detail="SYNQ 2026-11-02 appears 2 times",
+        excluded=True,
+    )
+    summary = summarize(con)
+    assert exit_code(summary) == 0
+    assert summary.metrics.files_excluded == 1
+    assert summary.metrics.errors == 1
+    entry = summary.metrics.excluded_files[0]
+    assert entry.fund_tickers == ("SYNQ",)
+    assert entry.versions == 1
+    assert entry.findings == (("duplicate_date", "error", "SYNQ 2026-11-02 appears 2 times"),)
+    text = render(summary)
+    assert "excluded files:" in text
+    assert "    as_of=2026-11-02 source=syn_metrics funds=SYNQ versions=1" in text
+    assert "      error duplicate_date: SYNQ 2026-11-02 appears 2 times" in text
+    # It belongs to the metrics section, not to the holdings excluded list.
+    assert "  SYNQ as_of=" not in text
+
+
+def test_metrics_error_on_an_included_file_is_inconsistent_and_exits_one(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "syn_metrics", issuer="synthetic", kind="fund_metrics")
+    _file_version(con, SHA_B, fund="SYNQ", source="syn_metrics")
+    _qa_event(
+        con,
+        SHA_B,
+        fund="SYNQ",
+        source="syn_metrics",
+        check="nav_positive",
+        detail="1 of 1 nav_per_unit value(s) are not positive: 0",
+        excluded=False,
+    )
+    summary = summarize(con)
+    assert exit_code(summary) == 1
+    assert summary.inconsistent_files == ()
+    assert len(summary.metrics.inconsistent_files) == 1
+    entry = summary.metrics.inconsistent_files[0]
+    assert entry.reason == "errored but not excluded (status=included)"
+    assert entry.source_id == "syn_metrics"
+    text = render(summary)
+    assert "fund metrics:" in text
+    metrics_section = text.split("fund metrics:", 1)[1]
+    assert "  inconsistent:" in metrics_section
+    assert "source=syn_metrics" in metrics_section
+
+
+def test_metrics_parse_error_without_a_version_is_inconsistent(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "syn_daily", issuer="synthetic", kind="daily_holdings")
+    _file_version(con, SHA_A, fund="SYNA", source="syn_daily")
+    _qa_event(
+        con,
+        SHA_B,
+        fund="SYNQ",
+        source="syn_daily",
+        check="metrics_parse_error",
+        detail="ValueError: no NAV table",
+        excluded=True,
+    )
+    summary = summarize(con)
+    # The holdings file is clean; only the metrics attempt failed.
+    assert summary.inconsistent_files == ()
+    assert exit_code(summary) == 1
+    assert summary.metrics.files_included == 0
+    assert summary.metrics.files_excluded == 0
+    entry = summary.metrics.inconsistent_files[0]
+    assert entry.source_id == "syn_daily"
+    assert entry.versions == 0
+    assert entry.reason == "errored metrics file has no file_versions row"
+    assert entry.findings == (("metrics_parse_error", "error", "ValueError: no NAV table"),)
+
+
+def test_metrics_findings_never_make_a_holdings_file_inconsistent(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "purpose_daily", issuer="purpose", kind="daily_holdings")
+    _source(con, "purpose_metrics", issuer="purpose", kind="fund_metrics")
+    # One raw file: a clean holdings version and an excluded metrics version.
+    _file_version(con, SHA_A, fund="PHR", source="purpose_daily")
+    _file_version(con, SHA_A, fund="PHR", source="purpose_metrics", status="excluded")
+    _qa_event(
+        con,
+        SHA_A,
+        fund="PHR",
+        source="purpose_daily",
+        check="partial_list",
+        severity="info",
+        excluded=False,
+    )
+    _qa_event(
+        con,
+        SHA_A,
+        fund="PHR",
+        source="purpose_metrics",
+        check="duplicate_date",
+        excluded=True,
+    )
+    summary = summarize(con)
+    assert summary.inconsistent_files == ()
+    assert summary.metrics.inconsistent_files == ()
+    assert exit_code(summary) == 0
+    assert summary.metrics.files_excluded == 1
+    assert summary.files_included == 1
+    assert summary.files_excluded == 0
+    text = render(summary)
+    holdings_section = text.split("fund metrics:", 1)[0]
+    metrics_section = text.split("fund metrics:", 1)[1]
+    assert "duplicate_date" not in holdings_section
+    assert "partial_list" not in metrics_section
+    assert "duplicate_date" in metrics_section
+
+
+def test_holdings_findings_never_make_a_metrics_file_inconsistent(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "purpose_daily", issuer="purpose", kind="daily_holdings")
+    _source(con, "purpose_metrics", issuer="purpose", kind="fund_metrics")
+    _file_version(con, SHA_A, fund="PHR", source="purpose_daily", status="excluded")
+    _file_version(con, SHA_A, fund="PHR", source="purpose_metrics")
+    _qa_event(
+        con,
+        SHA_A,
+        fund="PHR",
+        source="purpose_daily",
+        check="weight_sum",
+        detail="sum=0.8500 expected=1±0.005",
+        excluded=True,
+    )
+    _qa_event(
+        con,
+        SHA_A,
+        fund="PHR",
+        source="purpose_metrics",
+        check="aum_consistency",
+        severity="warning",
+        detail="1 row(s) differ from NAV x shares",
+        excluded=False,
+    )
+    summary = summarize(con)
+    assert summary.metrics.inconsistent_files == ()
+    assert summary.metrics.excluded_files == ()
+    assert summary.metrics.files_included == 1
+    assert summary.metrics.warnings == 1
+    assert summary.metrics.errors == 0
+    assert summary.warnings == 1
+    assert exit_code(summary) == 0
+    text = render(summary)
+    assert "excluded files:" in text
+    holdings_section = text.split("fund metrics:", 1)[0]
+    metrics_section = text.split("fund metrics:", 1)[1]
+    assert "weight_sum" in holdings_section
+    assert "weight_sum" not in metrics_section
+    assert "aum_consistency" not in holdings_section
+
+
+def test_metrics_findings_counted_by_severity(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "syn_metrics", issuer="synthetic", kind="fund_metrics")
+    _file_version(con, SHA_B, fund="SYNQ", source="syn_metrics")
+    _qa_event(con, SHA_B, fund="SYNQ", source="syn_metrics", check="nav_positive")
+    _qa_event(
+        con,
+        SHA_B,
+        fund="SYNQ",
+        source="syn_metrics",
+        check="aum_consistency",
+        severity="warning",
+        excluded=False,
+    )
+    _qa_event(
+        con,
+        SHA_B,
+        fund="SYNQ",
+        source="syn_metrics",
+        check="declared_unit",
+        severity="info",
+        excluded=False,
+    )
+    summary = summarize(con)
+    assert (summary.metrics.errors, summary.metrics.warnings, summary.metrics.infos) == (1, 1, 1)
+    # The global warning count still covers every kind of file.
+    assert summary.warnings == 1
+    text = render(summary)
+    assert "  findings: 1 error(s), 1 warning(s), 1 info(s)" in text
+
+
+def test_metrics_section_without_a_fund_metrics_table(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_metrics", issuer="synthetic", kind="fund_metrics")
+    _file_version(con, SHA_B, fund="SYNQ", source="syn_metrics")
+    summary = summarize(con)
+    assert summary.metrics.files_included == 1
+    assert summary.metrics.funds == ()
+    assert summary.metrics.latest_by_issuer == ()
+    assert exit_code(summary) == 0
+    text = render(summary)
+    assert "  files: 1 total (1 included, 0 excluded)" in text
+    assert "  funds with metrics: 0" in text
+
+
+def test_metrics_rows_identify_a_source_without_the_metrics_kind(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "syn_metrics", issuer="synthetic", kind="synthetic")
+    _file_version(con, SHA_B, fund="SYNQ", source="syn_metrics")
+    _fund_metric(con, fund="SYNQ", source="syn_metrics", sha=SHA_B)
+    summary = summarize(con)
+    assert summary.metrics.files_included == 1
+    assert summary.metrics.funds == ("SYNQ",)
+    assert summary.metrics.latest_by_issuer == (("synthetic", AS_OF),)
+
+
+def test_metrics_row_checks_identify_a_source_without_the_kind(tmp_path: Path) -> None:
+    """A metrics-only finding is enough evidence when the config kind is older."""
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_metrics", issuer="synthetic", kind="synthetic")
+    _file_version(con, SHA_B, fund="SYNQ", source="syn_metrics", status="excluded")
+    _qa_event(
+        con,
+        SHA_B,
+        fund="SYNQ",
+        source="syn_metrics",
+        check="duplicate_date",
+        detail="SYNQ 2026-11-02 x2",
+        excluded=True,
+    )
+    summary = summarize(con)
+    assert summary.files_included == 0
+    assert summary.files_excluded == 0
+    assert summary.metrics.files_excluded == 1
+    assert summary.metrics.errors == 1
+    assert exit_code(summary) == 0
+    text = render(summary)
+    assert "  SYNQ as_of=" not in text
+    assert "source=syn_metrics" in text.split("fund metrics:", 1)[1]
+
+
+def test_metrics_parse_error_on_a_holdings_file_keeps_it_in_holdings(tmp_path: Path) -> None:
+    """The parse error shares the raw file's source; the holdings file stays clean."""
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_daily", issuer="synthetic", kind="daily_holdings")
+    _file_version(con, SHA_A, fund="SYNA", source="syn_daily")
+    _qa_event(
+        con,
+        SHA_A,
+        fund="SYNA",
+        source="syn_daily",
+        check="metrics_parse_error",
+        detail="ValueError: no NAV table",
+        excluded=True,
+    )
+    summary = summarize(con)
+    assert summary.files_included == 1
+    assert summary.files_excluded == 0
+    assert summary.inconsistent_files == ()
+    assert summary.metrics.files_included == 0
+    assert summary.metrics.files_excluded == 0
+    assert len(summary.metrics.inconsistent_files) == 1
+    assert exit_code(summary) == 1
+    text = render(summary)
+    holdings_section = text.split("fund metrics:", 1)[0]
+    metrics_section = text.split("fund metrics:", 1)[1]
+    assert "metrics_parse_error" not in holdings_section
+    assert "metrics_parse_error" in metrics_section
+
+
+def _metrics_report_with_insertion_order(root: Path, *, reverse: bool) -> str:
+    """Render a database with metrics rows inserted in either order."""
+    root.mkdir(parents=True, exist_ok=True)
+    con = _connect(root, sources=True, metrics=True)
+    sources = [
+        ("purpose_daily", "purpose", "daily_holdings", "json"),
+        ("purpose_metrics", "purpose", "fund_metrics", "json"),
+        ("bmo_metrics", "bmo", "fund_metrics", "json"),
+    ]
+    for source_id, issuer, kind, source_format in reversed(sources) if reverse else sources:
+        _source(con, source_id, issuer=issuer, kind=kind, format=source_format)
+    metrics = [
+        (SHA_B, "PHR", "purpose_metrics", date(2026, 10, 27), "included"),
+        (SHA_C, "PHR", "purpose_metrics", date(2026, 10, 28), "included"),
+        (SHA_D, "ZEM", "bmo_metrics", date(2026, 10, 29), "excluded"),
+        ("e" * 64, "ZEM", "bmo_metrics", date(2026, 10, 29), "included"),
+    ]
+    for sha, fund, source_id, as_of, status in reversed(metrics) if reverse else metrics:
+        _file_version(con, sha, fund=fund, source=source_id, as_of=as_of, status=status)
+        if status == "included":
+            _fund_metric(con, fund=fund, source=source_id, as_of=as_of, sha=sha)
+    events = [
+        (SHA_B, "PHR", "purpose_metrics", "aum_consistency", "warning"),
+        (SHA_D, "ZEM", "bmo_metrics", "duplicate_date", "error"),
+    ]
+    for sha, fund, source_id, check, severity in reversed(events) if reverse else events:
+        _qa_event(con, sha, fund=fund, source=source_id, check=check, severity=severity)
+    _file_version(con, "9" * 64, fund="SYNA", source="purpose_daily", status="included")
+    text = render(summarize(con))
+    con.close()
+    return text
+
+
+def test_metrics_render_does_not_depend_on_insertion_order(tmp_path: Path) -> None:
+    forward = _metrics_report_with_insertion_order(tmp_path / "forward", reverse=False)
+    backward = _metrics_report_with_insertion_order(tmp_path / "backward", reverse=True)
+    assert forward == backward
+    assert "  files: 4 total (3 included, 1 excluded)" in forward
+    assert "files: 1 total (1 included, 0 excluded)" in forward
+    assert forward.index("    bmo") < forward.index("    purpose")
