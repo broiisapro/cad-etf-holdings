@@ -2,7 +2,10 @@
 
 The product page lists a "YYYY Qn Summary" link (the Summary of Investment
 Portfolio). Link names are not stable, so the collector always reads the page
-and picks the newest English quarterly link instead of guessing a file name.
+and picks a link by the quarter printed in its text instead of guessing a file
+name. The product pages currently list Q1 and Q3 summaries only; a quarter that
+is not linked is reported missing rather than requested at a guessed URL.
+
 The product pages and ``/wp-content/uploads/`` are allowed by robots.txt; the
 recorded source condition sets a 30-second minimum interval.
 """
@@ -22,7 +25,7 @@ from etfh.registry import Fund, Source, load_sources, require_collectable
 from etfh.storage import RawStore
 from etfh.types import RawFile
 
-__all__ = ["COLLECTORS", "GlobalXQpdCollector"]
+__all__ = ["COLLECTORS", "GlobalXQpdCollector", "quarterly_links"]
 
 _SOURCE_ID = "globalx_ca_qpd"
 _PRODUCT_URL = "https://www.globalx.ca/product/{ticker}"
@@ -103,8 +106,55 @@ def quarterly_links(page: str) -> list[tuple[tuple[int, int], str]]:
     return scored
 
 
+def _download_pdf(
+    *,
+    source_id: str,
+    fund: Fund,
+    client: PoliteClient,
+    store: RawStore,
+    source: Source,
+    url: str,
+    as_of_hint: date | None = None,
+    conditional: bool = True,
+) -> RawFile | None:
+    etag: str | None = None
+    last_modified: str | None = None
+    if conditional:
+        etag, last_modified = _conditional_for_url(store, source_id, fund.ticker, url)
+    try:
+        response = client.get(url, source=source, etag=etag, last_modified=last_modified)
+    except RobotsDisallowedError as exc:
+        raise CollectError(source_id, fund, f"robots.txt disallows {url}") from exc
+    except HTTPRetryError as exc:
+        raise CollectError(source_id, fund, f"HTTP {exc.status_code} for {url}") from exc
+    if response.status_code == 304:
+        return None
+    if response.status_code != 200:
+        raise CollectError(source_id, fund, f"HTTP {response.status_code} for {url}")
+    if not response.content.startswith(b"%PDF-"):
+        raise CollectError(
+            source_id,
+            fund,
+            f"response is not a PDF ({response.headers.get('content-type', 'unknown')})",
+        )
+    return store.write(
+        response.content,
+        source_id=source_id,
+        issuer=source.issuer,
+        fund_ticker=fund.ticker,
+        url=str(response.url),
+        fetched_at=datetime.now(UTC),
+        ext="pdf",
+        content_type=response.headers.get("content-type", "application/pdf"),
+        as_of_hint=as_of_hint,
+        http_status=response.status_code,
+        etag=response.headers.get("etag"),
+        last_modified=response.headers.get("last-modified"),
+    )
+
+
 class GlobalXQpdCollector:
-    """Read a product page and download its newest quarterly summary PDF."""
+    """Read a product page and download a quarterly summary PDF."""
 
     source_id: str = _SOURCE_ID
     source: Source | None = None
@@ -133,6 +183,48 @@ class GlobalXQpdCollector:
         _, best_href = max(scored, key=lambda item: item[0])
         return urljoin(self.product_url(ticker), best_href)
 
+    def _product_page(self, fund: Fund, client: PoliteClient, source: Source) -> str:
+        product_url = self.product_url(fund.ticker)
+        try:
+            response = client.get(product_url, source=source)
+        except RobotsDisallowedError as exc:
+            raise CollectError(self.source_id, fund, f"robots.txt disallows {product_url}") from exc
+        except HTTPRetryError as exc:
+            raise CollectError(
+                self.source_id, fund, f"HTTP {exc.status_code} for {product_url}"
+            ) from exc
+        if response.status_code != 200:
+            raise CollectError(
+                self.source_id,
+                fund,
+                f"HTTP {response.status_code} for {product_url}",
+            )
+        return response.text
+
+    def _historical_page(self, fund: Fund, client: PoliteClient, source: Source) -> str:
+        """Fetch a product page once per fund during a backfill run.
+
+        A backfill asks for several quarters; re-reading the same page for each
+        one would multiply the politeness delay by the quarter count. Failures
+        are cached too, so a broken page costs one request, not one per quarter.
+        """
+        cache = getattr(self, "_historical_pages", None)
+        if cache is None:
+            cache = {}
+            self._historical_pages: dict[str, str | CollectError] = cache
+        cached = cache.get(fund.ticker)
+        if isinstance(cached, CollectError):
+            raise cached
+        if isinstance(cached, str):
+            return cached
+        try:
+            page = self._product_page(fund, client, source)
+        except CollectError as exc:
+            cache[fund.ticker] = exc
+            raise
+        cache[fund.ticker] = page
+        return page
+
     def fetch(
         self,
         fund: Fund,
@@ -142,59 +234,60 @@ class GlobalXQpdCollector:
     ) -> list[RawFile]:
         source = self._resolve_source(fund)
         require_collectable(source)
-        product_url = self.product_url(fund.ticker)
-        try:
-            page_response = client.get(product_url, source=source)
-        except RobotsDisallowedError as exc:
-            raise CollectError(self.source_id, fund, f"robots.txt disallows {product_url}") from exc
-        except HTTPRetryError as exc:
-            raise CollectError(
-                self.source_id, fund, f"HTTP {exc.status_code} for {product_url}"
-            ) from exc
-        if page_response.status_code != 200:
-            raise CollectError(
-                self.source_id,
-                fund,
-                f"HTTP {page_response.status_code} for {product_url}",
-            )
-        pdf_url = self.disclosure_url(page_response.text, fund.ticker)
-        etag, last_modified = _conditional_for_url(store, self.source_id, fund.ticker, pdf_url)
-        try:
-            pdf_response = client.get(
-                pdf_url, source=source, etag=etag, last_modified=last_modified
-            )
-        except RobotsDisallowedError as exc:
-            raise CollectError(self.source_id, fund, f"robots.txt disallows {pdf_url}") from exc
-        except HTTPRetryError as exc:
-            raise CollectError(
-                self.source_id, fund, f"HTTP {exc.status_code} for {pdf_url}"
-            ) from exc
-        if pdf_response.status_code == 304:
-            return []
-        if pdf_response.status_code != 200:
-            raise CollectError(
-                self.source_id, fund, f"HTTP {pdf_response.status_code} for {pdf_url}"
-            )
-        if not pdf_response.content.startswith(b"%PDF-"):
-            raise CollectError(
-                self.source_id,
-                fund,
-                f"response is not a PDF ({pdf_response.headers.get('content-type', 'unknown')})",
-            )
-        raw = store.write(
-            pdf_response.content,
+        page = self._product_page(fund, client, source)
+        pdf_url = self.disclosure_url(page, fund.ticker)
+        raw = _download_pdf(
             source_id=self.source_id,
-            issuer=source.issuer,
-            fund_ticker=fund.ticker,
-            url=str(pdf_response.url),
-            fetched_at=datetime.now(UTC),
-            ext="pdf",
-            content_type=pdf_response.headers.get("content-type", "application/pdf"),
-            http_status=pdf_response.status_code,
-            etag=pdf_response.headers.get("etag"),
-            last_modified=pdf_response.headers.get("last-modified"),
+            fund=fund,
+            client=client,
+            store=store,
+            source=source,
+            url=pdf_url,
         )
-        return [raw]
+        return [] if raw is None else [raw]
+
+    def fetch_historical(
+        self,
+        fund: Fund,
+        quarter_end: date,
+        client: PoliteClient,
+        store: RawStore,
+    ) -> list[RawFile]:
+        """Fetch the summary that the product page links for ``quarter_end``.
+
+        Only links printed on the page are used: the upload directory in a
+        Global X URL is not derivable from the quarter, so a URL for an older
+        quarter cannot be constructed. When the page does not list the quarter,
+        the caller reports it missing with the listed quarters as the reason.
+        """
+        source = self._resolve_source(fund)
+        require_collectable(source)
+        page = self._historical_page(fund, client, source)
+        quarter = (quarter_end.month - 1) // 3 + 1
+        target = (quarter_end.year, quarter)
+        links = quarterly_links(page)
+        matches = sorted(href for score, href in links if score == target)
+        if not matches:
+            listed = ", ".join(
+                f"{year} Q{number}" for year, number in sorted({score for score, _ in links})
+            )
+            reason = (
+                f"not published: the product page lists no {target[0]} Q{target[1]} summary"
+                f" (listed: {listed or 'none'})"
+            )
+            raise CollectError(self.source_id, fund, reason)
+        url = urljoin(self.product_url(fund.ticker), matches[0])
+        raw = _download_pdf(
+            source_id=self.source_id,
+            fund=fund,
+            client=client,
+            store=store,
+            source=source,
+            url=url,
+            as_of_hint=quarter_end,
+            conditional=False,
+        )
+        return [] if raw is None else [raw]
 
 
 COLLECTORS: list[GlobalXQpdCollector] = [GlobalXQpdCollector()]
