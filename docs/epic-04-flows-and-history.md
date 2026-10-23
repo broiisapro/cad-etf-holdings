@@ -234,6 +234,8 @@ collect:     76 files fetched (bmo_daily 16, evolve_daily 6, evolve_qpd 6,
              source skipped; bmo_qpd unavailable because robots.txt for
              bmogam.com was unreachable during the run (D46: disallow for the
              run), reported per fund
+             a second run after the metrics-skip fix: 20 fetched, 50 unchanged,
+             0 purpose_metrics lines, only the bmo_qpd robots errors remain
 build:       457 file versions (456 included, 1 excluded), 7,689 holdings rows,
              387 fund_metrics rows, 1,910 change rows, 87 QA events,
              1,144 unmatched rows
@@ -249,6 +251,8 @@ flows PDF:   15 dated rows for 2026-10-01..2026-10-22; only the 2026-10-22 row
 flows ZSP:   1 row (2026-09-30, shares 214,703,140, NAV 119.2016 derived from the
              factsheet); no previous shares date, so no flow estimate yet; the
              method line is printed
+qa --asof:   exit 0; --asof 2026-10-22 reports nothing known yet (all files were
+             fetched on 2026-10-23), --asof 2026-10-23 restores the full section
 backfill vanguard_ca: 0 fetched, 10 present, 70 missing (80 fund-quarters):
              Vanguard links only its current disclosure, so older quarters are
              reported missing with that reason
@@ -258,6 +262,10 @@ backfill globalx_ca:  16 fetched, 8 present, 40 missing (64 fund-quarters): the
              missing with the listed quarters in the reason
 build after backfill: 473 file versions (470 included, 3 excluded), 7,846
              holdings rows; qa exit 0 with the 3 excluded files reported
+final build (after the second collect): 535 file versions (531 included,
+             4 excluded: two BNC versions of one file, CASH and HMMJ), 7,856
+             holdings rows, 447 fund_metrics rows, 41 metrics inputs, 33 funds;
+             qa exit 0
 ```
 
 Two findings are source-side and are recorded rather than worked around:
