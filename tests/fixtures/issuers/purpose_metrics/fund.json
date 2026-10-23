@@ -1,0 +1,48 @@
+{
+  "code": "PMTF",
+  "name": "Purpose Lookalike Dividend Fund",
+  "updated": "2026-10-22",
+  "series": {
+    "ETF": {
+      "name": "ETF",
+      "code": "PMTF",
+      "type": "etf",
+      "currency": "CAD",
+      "inception": "2013-09-03",
+      "default": true,
+      "nav_updated": "2026-10-22"
+    },
+    "F": {
+      "name": "F",
+      "code": "PFC401",
+      "type": "series",
+      "currency": "CAD",
+      "inception": "2013-09-03",
+      "default": false,
+      "nav_updated": "2026-10-22"
+    }
+  },
+  "details": {
+    "ETF": [
+      {"name": "nav", "val": "$10.40"},
+      {"name": "current_yield", "val": "2.79%"},
+      {"name": "aum", "val": "$125.6M"}
+    ],
+    "F": [
+      {"name": "nav", "val": "$10.20"},
+      {"name": "aum", "val": "$125.6M"}
+    ]
+  },
+  "nav_table": {
+    "ETF": {
+      "2026-10-20": {"nav": 10.0, "adj_nav": 9.99, "price": 10.01, "vol": 0},
+      "2026-10-21": {"nav": 10.2, "adj_nav": 10.19, "price": 10.21, "vol": 0},
+      "2026-10-22": {"nav": 10.4, "adj_nav": 10.39, "price": 10.41, "vol": 0}
+    },
+    "F": {
+      "2026-10-20": {"nav": 9.8, "adj_nav": 9.79, "price": null, "vol": null},
+      "2026-10-21": {"nav": 10.0, "adj_nav": 9.99, "price": null, "vol": null},
+      "2026-10-22": {"nav": 10.2, "adj_nav": 10.19, "price": null, "vol": null}
+    }
+  }
+}
