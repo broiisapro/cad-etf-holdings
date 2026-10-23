@@ -12,11 +12,17 @@ CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 EXPECTED_ISSUERS = frozenset({"bmo", "purpose", "evolve", "vanguard_ca", "globalx_ca"})
 
 EXPECTED_SOURCE_IDS: dict[str, frozenset[str]] = {
-    "bmo": frozenset({"bmo_daily", "bmo_qpd"}),
-    "purpose": frozenset({"purpose_daily", "purpose_qpd"}),
-    "evolve": frozenset({"evolve_daily", "evolve_qpd"}),
+    "bmo": frozenset({"bmo_daily", "bmo_qpd", "bmo_metrics"}),
+    "purpose": frozenset({"purpose_daily", "purpose_qpd", "purpose_metrics"}),
+    "evolve": frozenset({"evolve_daily", "evolve_qpd", "evolve_metrics"}),
     "vanguard_ca": frozenset({"vanguard_ca_qpd"}),
     "globalx_ca": frozenset({"globalx_ca_qpd"}),
+}
+
+EXPECTED_METRICS_SOURCE: dict[str, str] = {
+    "bmo": "bmo_metrics",
+    "purpose": "purpose_metrics",
+    "evolve": "evolve_metrics",
 }
 
 SPOT_CHECK_NAMES = {
@@ -97,6 +103,22 @@ def test_real_funds_use_collectable_sources_of_their_issuer() -> None:
             source = sources[source_id]
             assert is_collectable(source), (fund.ticker, source_id)
             assert source.issuer == fund.issuer, (fund.ticker, source_id)
+
+
+def test_each_fund_with_metrics_lists_its_issuer_metrics_source() -> None:
+    sources, funds = _load()
+    for fund in _real(funds):
+        expected = EXPECTED_METRICS_SOURCE.get(fund.issuer)
+        metrics = [
+            source_id
+            for source_id in fund.source_ids
+            if sources[source_id].kind is SourceKind.fund_metrics
+        ]
+        if expected is None:
+            assert metrics == [], fund.ticker
+            continue
+        assert metrics == [expected], fund.ticker
+        assert sources[expected].issuer == fund.issuer, fund.ticker
 
 
 def test_every_source_id_exists_and_is_collectable_or_not_allowed() -> None:
