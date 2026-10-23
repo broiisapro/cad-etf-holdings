@@ -87,26 +87,24 @@ def metrics_from_text(
     """Extract ``(as_of_date, nav, shares, aum, currency)`` from factsheet text.
 
     ``nav`` is derived from net assets and shares because the factsheet prints
-    no NAV per unit. Raises ``ValueError`` when the document has no date, no net
-    assets or no shares: that is not a factsheet this parser can trust.
+    no NAV per unit. A missing net-assets or shares line leaves that figure null
+    (never zero); raising is reserved for a document with no date or with
+    neither figure, which is not a factsheet this parser can trust.
     """
     as_of = date_from_text(text)
     if as_of is None:
         raise ValueError("BMO factsheet has no 'DATA AS OF' date")
     assets_match = _NET_ASSETS.search(text)
-    if assets_match is None:
-        raise ValueError("BMO factsheet has no 'Net Assets (MM)' line")
-    millions = _number(assets_match.group(1))
-    if millions is None:
-        raise ValueError("BMO factsheet net assets are not numeric")
     shares_match = _SHARES.search(text)
-    if shares_match is None:
-        raise ValueError("BMO factsheet has no 'Shares Outstanding' line")
-    shares = _number(shares_match.group(1))
-    if shares is None:
-        raise ValueError("BMO factsheet shares outstanding are not numeric")
-    aum = millions * 1_000_000.0
-    nav = aum / shares if shares > 0 else None
+    if assets_match is None and shares_match is None:
+        raise ValueError("BMO factsheet has neither 'Net Assets (MM)' nor 'Shares Outstanding'")
+    aum = None
+    if assets_match is not None:
+        millions = _number(assets_match.group(1))
+        if millions is not None:
+            aum = millions * 1_000_000.0
+    shares = _number(shares_match.group(1)) if shares_match is not None else None
+    nav = aum / shares if aum is not None and shares is not None and shares > 0 else None
     currency_match = _CURRENCY.search(text)
     currency = currency_match.group(1) if currency_match is not None else "CAD"
     return as_of, nav, shares, aum, currency

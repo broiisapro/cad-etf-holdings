@@ -50,7 +50,7 @@ def test_currency_falls_back_to_cad(tmp_path: Path) -> None:
     assert parsed.frame["currency"][0] == "CAD"
 
 
-def test_missing_net_assets_is_an_error(tmp_path: Path) -> None:
+def test_missing_net_assets_leaves_aum_and_nav_null(tmp_path: Path) -> None:
     path = bmo_factsheet_pdf(
         tmp_path,
         lines=[
@@ -58,11 +58,15 @@ def test_missing_net_assets_is_an_error(tmp_path: Path) -> None:
             "Shares Outstanding 100,000",
         ],
     )
-    with pytest.raises(ValueError, match="Net Assets"):
-        BmoMetricsParser().parse(_raw(path))  # type: ignore[arg-type]
+    parsed = BmoMetricsParser().parse(_raw(path))
+    row = parsed.frame.row(0, named=True)
+    assert row["aum"] is None
+    assert row["nav_per_unit"] is None
+    assert row["shares_outstanding"] == pytest.approx(100_000.0)
+    assert "nav_derived=aum/shares" not in parsed.notes
 
 
-def test_missing_shares_is_an_error(tmp_path: Path) -> None:
+def test_missing_shares_leaves_shares_and_nav_null(tmp_path: Path) -> None:
     path = bmo_factsheet_pdf(
         tmp_path,
         lines=[
@@ -70,8 +74,19 @@ def test_missing_shares_is_an_error(tmp_path: Path) -> None:
             "Net Assets (MM) $1,000.00",
         ],
     )
-    with pytest.raises(ValueError, match="Shares Outstanding"):
-        BmoMetricsParser().parse(_raw(path))  # type: ignore[arg-type]
+    parsed = BmoMetricsParser().parse(_raw(path))
+    row = parsed.frame.row(0, named=True)
+    assert row["aum"] == pytest.approx(1_000_000_000.0)
+    assert row["shares_outstanding"] is None
+    assert row["nav_per_unit"] is None
+
+
+def test_no_metrics_lines_is_an_error(tmp_path: Path) -> None:
+    path = bmo_factsheet_pdf(
+        tmp_path, lines=["BMLK BMO Lookalike Index ETF DATA AS OF SEP 30, 2026"]
+    )
+    with pytest.raises(ValueError, match="neither"):
+        BmoMetricsParser().parse(_raw(path))
 
 
 def test_missing_date_is_an_error(tmp_path: Path) -> None:
@@ -80,7 +95,7 @@ def test_missing_date_is_an_error(tmp_path: Path) -> None:
         lines=["Net Assets (MM) $1,000.00", "Shares Outstanding 100,000"],
     )
     with pytest.raises(ValueError, match="DATA AS OF"):
-        BmoMetricsParser().parse(_raw(path))  # type: ignore[arg-type]
+        BmoMetricsParser().parse(_raw(path))
 
 
 def test_can_parse_only_its_source_and_pdf() -> None:
