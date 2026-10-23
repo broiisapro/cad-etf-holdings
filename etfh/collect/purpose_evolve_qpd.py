@@ -26,6 +26,7 @@ __all__ = [
     "COLLECTORS",
     "EvolveQpdCollector",
     "PurposeQpdCollector",
+    "evolve_disclosure_links",
     "evolve_disclosure_url",
     "purpose_disclosure_url",
 ]
@@ -112,6 +113,12 @@ def _is_french(href: str, text: str) -> bool:
 
 
 def _qpd_score(href: str, text: str) -> tuple[int, int] | None:
+    """Return a (year, quarter-end month) score for a disclosure link.
+
+    Evolve names its files by the disclosure month (``QPDMarch2026``). The
+    quarter forms are accepted too so a renamed or older file is still tied to
+    the right quarter instead of being ignored.
+    """
     for candidate in (href, text):
         match = re.search(r"qpd\s*([a-z]+)\s*(20\d{2})", candidate, re.IGNORECASE)
         if match:
@@ -121,13 +128,22 @@ def _qpd_score(href: str, text: str) -> tuple[int, int] | None:
         if match:
             month = _MONTHS.get(match.group(2).lower(), 0)
             return int(match.group(1)), month
+        match = re.search(r"qpd\s*(20\d{2})\s*[-_ ]?\s*q([1-4])", candidate, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), int(match.group(2)) * 3
+        match = re.search(r"qpd\s*q([1-4])\s*[-_ ]?\s*(20\d{2})", candidate, re.IGNORECASE)
+        if match:
+            return int(match.group(2)), int(match.group(1)) * 3
+        match = re.search(r"(20\d{2})\s*[-_ ]?\s*q([1-4])\s*[-_ ]?\s*qpd", candidate, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), int(match.group(2)) * 3
     return None
 
 
-def evolve_disclosure_url(page: str) -> str | None:
-    """Return the newest English quarterly portfolio disclosure link."""
+def _evolve_links(page: str) -> tuple[list[tuple[tuple[int, int], str]], list[str]]:
+    """Split English disclosure links into quarter-scored and unscored."""
     scored: list[tuple[tuple[int, int], str]] = []
-    fallback: list[str] = []
+    unscored: list[str] = []
     for match in _ANCHOR.finditer(page):
         href = html_module.unescape(match.group(1)).strip()
         text = _anchor_text(match.group(2))
@@ -138,12 +154,23 @@ def evolve_disclosure_url(page: str) -> str | None:
             continue
         score = _qpd_score(href, text)
         if score is None:
-            fallback.append(href)
+            unscored.append(href)
         else:
             scored.append((score, href))
+    return scored, unscored
+
+
+def evolve_disclosure_links(page: str) -> list[tuple[tuple[int, int], str]]:
+    """Return English quarterly portfolio disclosure links with their quarter."""
+    return _evolve_links(page)[0]
+
+
+def evolve_disclosure_url(page: str) -> str | None:
+    """Return the newest English quarterly portfolio disclosure link."""
+    scored, unscored = _evolve_links(page)
     if scored:
         return max(scored, key=lambda item: item[0])[1]
-    return fallback[0] if fallback else None
+    return unscored[0] if unscored else None
 
 
 def _download_pdf(
@@ -154,8 +181,13 @@ def _download_pdf(
     store: RawStore,
     source: Source,
     url: str,
+    as_of_hint: date | None = None,
+    conditional: bool = True,
 ) -> RawFile | None:
-    etag, last_modified = _conditional_for_url(store, source_id, fund.ticker, url)
+    etag: str | None = None
+    last_modified: str | None = None
+    if conditional:
+        etag, last_modified = _conditional_for_url(store, source_id, fund.ticker, url)
     try:
         response = client.get(url, source=source, etag=etag, last_modified=last_modified)
     except RobotsDisallowedError as exc:
@@ -181,6 +213,7 @@ def _download_pdf(
         fetched_at=datetime.now(UTC),
         ext="pdf",
         content_type=response.headers.get("content-type", "application/pdf"),
+        as_of_hint=as_of_hint,
         http_status=response.status_code,
         etag=response.headers.get("etag"),
         last_modified=response.headers.get("last-modified"),
@@ -268,15 +301,7 @@ class EvolveQpdCollector:
     def product_url(self, ticker: str) -> str:
         return _EVOLVE_PRODUCT.format(ticker=ticker.strip().upper())
 
-    def fetch(
-        self,
-        fund: Fund,
-        day: date,
-        client: PoliteClient,
-        store: RawStore,
-    ) -> list[RawFile]:
-        source = self._resolve_source(fund)
-        require_collectable(source)
+    def _product_page(self, fund: Fund, client: PoliteClient, source: Source) -> str:
         product_url = self.product_url(fund.ticker)
         try:
             response = client.get(product_url, source=source)
@@ -290,7 +315,38 @@ class EvolveQpdCollector:
             raise CollectError(
                 self.source_id, fund, f"HTTP {response.status_code} for {product_url}"
             )
-        pdf_url = evolve_disclosure_url(response.text)
+        return response.text
+
+    def _historical_page(self, fund: Fund, client: PoliteClient, source: Source) -> str:
+        """Fetch a product page once per fund during a backfill run."""
+        cache = getattr(self, "_historical_pages", None)
+        if cache is None:
+            cache = {}
+            self._historical_pages: dict[str, str | CollectError] = cache
+        cached = cache.get(fund.ticker)
+        if isinstance(cached, CollectError):
+            raise cached
+        if isinstance(cached, str):
+            return cached
+        try:
+            page = self._product_page(fund, client, source)
+        except CollectError as exc:
+            cache[fund.ticker] = exc
+            raise
+        cache[fund.ticker] = page
+        return page
+
+    def fetch(
+        self,
+        fund: Fund,
+        day: date,
+        client: PoliteClient,
+        store: RawStore,
+    ) -> list[RawFile]:
+        source = self._resolve_source(fund)
+        require_collectable(source)
+        page = self._product_page(fund, client, source)
+        pdf_url = evolve_disclosure_url(page)
         if pdf_url is None:
             raise CollectError(
                 self.source_id, fund, "no quarterly portfolio disclosure link on the product page"
@@ -302,6 +358,47 @@ class EvolveQpdCollector:
             store=store,
             source=source,
             url=pdf_url,
+        )
+        return [] if raw is None else [raw]
+
+    def fetch_historical(
+        self,
+        fund: Fund,
+        quarter_end: date,
+        client: PoliteClient,
+        store: RawStore,
+    ) -> list[RawFile]:
+        """Fetch the disclosure that the product page links for ``quarter_end``.
+
+        The Evolve page lists every disclosure it still publishes. A file whose
+        name carries the disclosure month is matched to the quarter-end month;
+        a quarter that is not listed is reported missing, never requested at a
+        guessed URL.
+        """
+        source = self._resolve_source(fund)
+        require_collectable(source)
+        page = self._historical_page(fund, client, source)
+        target = (quarter_end.year, quarter_end.month)
+        links = evolve_disclosure_links(page)
+        matches = sorted(href for score, href in links if score == target)
+        if not matches:
+            listed = ", ".join(
+                f"{year}-{month:02d}" for year, month in sorted({score for score, _ in links})
+            )
+            reason = (
+                "not published: the product page lists no quarterly portfolio disclosure"
+                f" dated {target[0]}-{target[1]:02d} (listed: {listed or 'none'})"
+            )
+            raise CollectError(self.source_id, fund, reason)
+        raw = _download_pdf(
+            source_id=self.source_id,
+            fund=fund,
+            client=client,
+            store=store,
+            source=source,
+            url=matches[0],
+            as_of_hint=quarter_end,
+            conditional=False,
         )
         return [] if raw is None else [raw]
 
