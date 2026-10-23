@@ -51,6 +51,7 @@ import polars as pl
 from polars.datatypes import DataType, DataTypeClass
 
 from etfh import analytics
+from etfh.types import SourceKind
 
 __all__ = [
     "ExcludedFile",
@@ -69,7 +70,7 @@ __all__ = [
 
 _DAILY_KIND = "daily_holdings"
 _QUARTERLY_KIND = "quarterly_disclosure"
-_METRICS_KIND = "fund_metrics"
+_METRICS_KIND = SourceKind.fund_metrics.value
 _PDF_FORMAT = "pdf"
 _QUALITY_DAILY = "daily"
 _QUALITY_QUARTERLY = "quarterly"
