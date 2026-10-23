@@ -5,10 +5,11 @@
 .env
 # Local data (raw files are never committed)
 raw/
-build/
+build*/
 *.duckdb
 *.parquet
-# Python / tooling
+# Local caches and tooling
+.cache/
 .venv/
 __pycache__/
 *.py[cod]
