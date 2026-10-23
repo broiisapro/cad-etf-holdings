@@ -104,19 +104,34 @@ def test_demo_apptest_with_the_command_line_flag(monkeypatch: pytest.MonkeyPatch
     assert app.selectbox(key="fund").options == ["SYNA", "SYNB", "SYNE", "SYNF"]
 
 
+def test_cloud_entrypoint_forces_demo_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    demo.demo_database.clear()
+    monkeypatch.delenv("ETFH_DEMO", raising=False)
+    monkeypatch.setenv("ETFH_DB", str(tmp_path / "real-store.duckdb"))
+    app = AppTest.from_file(str(REPO_ROOT / "streamlit_app.py"), default_timeout=120).run()
+
+    assert not app.exception
+    assert app.info[0].value.startswith("Demo data — synthetic funds")
+    assert app.selectbox(key="fund").options == ["SYNA", "SYNB", "SYNE", "SYNF"]
+    assert not app.error
+
+
 def test_community_cloud_finds_the_uv_lock() -> None:
     """Cloud prefers uv.lock and searches the app directory before the root.
 
     The official dependency order (streamlit.io docs, checked 2026-10-22) is
-    uv.lock, Pipfile, environment.yml, requirements.txt, pyproject.toml. No
-    dependency file sits next to the app, so Cloud uses the committed root
-    ``uv.lock`` and ``pyproject.toml``; adding a requirements.txt would be
-    ignored and only create a second source of truth.
+    uv.lock, Pipfile, environment.yml, requirements.txt, pyproject.toml. The
+    public entry point is ``streamlit_app.py`` at the root, next to the
+    committed ``uv.lock``, so Cloud installs the locked environment; no
+    requirements.txt is committed because Cloud would ignore it and it would
+    only create a second source of truth.
     """
     assert (REPO_ROOT / "uv.lock").is_file()
+    assert (REPO_ROOT / "streamlit_app.py").is_file()
     app_dir = REPO_ROOT / "etfh" / "dashboard"
     for name in ("uv.lock", "Pipfile", "environment.yml", "requirements.txt", "pyproject.toml"):
         assert not (app_dir / name).exists(), f"{name} would shadow the root lock file"
+    assert not (REPO_ROOT / "requirements.txt").exists()
 
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["requires-python"] == ">=3.12,<3.13"
