@@ -11,6 +11,7 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
+import etfh.schema as schema_module
 from etfh.registry import Source, load_funds, load_sources
 from etfh.types import AssetClass, ParsedFile, RawFile
 from etfh.units import WeightUnit, check_unit
@@ -21,8 +22,17 @@ from etfh.validate import (
     is_excluded,
     tolerance_for,
     validate_file,
+    validate_metrics,
 )
-from tests._validate_helpers import load_manifest, parse_fixture, raw_files
+from tests._validate_helpers import (
+    ContractParsedFundMetrics,
+    load_manifest,
+    metrics_frame,
+    metrics_row,
+    parse_fixture,
+    parsed_metrics,
+    raw_files,
+)
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 CONFIG_PATH = CONFIG_DIR / "validation.yaml"
@@ -799,3 +809,220 @@ class TestNegativeWeight:
         assert warnings[0].severity == "warning"
         assert "-0.0200" in warnings[0].detail
         assert "Short Alpha Corp." in warnings[0].detail
+
+
+class TestValidateMetrics:
+    """Fund-metrics checks (interfaces wave 06 §4, D66)."""
+
+    @pytest.fixture(autouse=True)
+    def _metrics_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Use the contract stand-in only while the additive model is not merged."""
+        if not hasattr(schema_module, "ParsedFundMetrics"):
+            monkeypatch.setattr(
+                schema_module, "ParsedFundMetrics", ContractParsedFundMetrics, raising=False
+            )
+
+    def _findings(
+        self,
+        frame: pl.DataFrame,
+        source_factory: Callable[..., Source],
+        *,
+        as_of: date | None = None,
+        fetched_at: datetime | None = None,
+        config: ValidationConfig = _CONFIG,
+    ) -> list[QaFinding]:
+        return validate_metrics(
+            parsed_metrics(frame, as_of=as_of, fetched_at=fetched_at),
+            source=source_factory("syn_metrics"),
+            config=config,
+        )
+
+    def _only(self, findings: list[QaFinding], check: str) -> list[QaFinding]:
+        return [finding for finding in findings if finding.check == check]
+
+    def test_clean_consistent_file_has_no_findings(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        assert self._findings(metrics_frame(), source_factory) == []
+
+    def test_a_history_of_dates_is_not_a_duplicate(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            metrics_row(as_of_date=date(2026, 10, 27)),
+            metrics_row(as_of_date=date(2026, 10, 28)),
+            metrics_row(as_of_date=date(2026, 10, 29)),
+        ]
+        assert self._findings(metrics_frame(rows), source_factory) == []
+
+    def test_missing_required_column_is_a_schema_error(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        findings = self._findings(metrics_frame().drop("aum"), source_factory)
+        assert [finding.check for finding in findings] == ["schema"]
+        assert findings[0].severity == "error"
+        assert "aum" in findings[0].detail
+        assert "syn_metrics" in findings[0].detail
+
+    def test_bad_file_hash_is_a_schema_error(self, source_factory: Callable[..., Source]) -> None:
+        frame = metrics_frame([metrics_row(raw_file_sha256="not-a-sha")])
+        findings = self._findings(frame, source_factory)
+        assert [finding.check for finding in findings] == ["schema"]
+        assert findings[0].severity == "error"
+
+    def test_nav_must_be_positive_and_finite(self, source_factory: Callable[..., Source]) -> None:
+        rows = [
+            metrics_row(nav_per_unit=0.0),
+            metrics_row(nav_per_unit=-3.5),
+            metrics_row(nav_per_unit=float("nan")),
+            metrics_row(nav_per_unit=12.0),
+        ]
+        findings = self._only(self._findings(metrics_frame(rows), source_factory), "nav_positive")
+        assert len(findings) == 1
+        assert findings[0].severity == "error"
+        assert "3 of 4 nav_per_unit" in findings[0].detail
+
+    def test_null_nav_is_allowed(self, source_factory: Callable[..., Source]) -> None:
+        frame = metrics_frame([metrics_row(nav_per_unit=None)])
+        assert self._findings(frame, source_factory) == []
+
+    def test_shares_must_be_nonnegative_and_finite(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            metrics_row(shares_outstanding=-1.0),
+            metrics_row(shares_outstanding=float("-inf")),
+        ]
+        findings = self._only(
+            self._findings(metrics_frame(rows), source_factory), "shares_nonnegative"
+        )
+        assert len(findings) == 1
+        assert findings[0].severity == "error"
+        assert "2 of 2 shares_outstanding" in findings[0].detail
+
+    def test_zero_shares_and_null_shares_are_allowed(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            metrics_row(shares_outstanding=0.0, aum=0.0),
+            metrics_row(as_of_date=date(2026, 10, 28), shares_outstanding=None),
+        ]
+        assert self._findings(metrics_frame(rows), source_factory) == []
+
+    def test_aum_gap_is_a_warning_not_an_error(self, source_factory: Callable[..., Source]) -> None:
+        frame = metrics_frame([metrics_row(aum=25_600_000.0)])
+        findings = self._only(self._findings(frame, source_factory), "aum_consistency")
+        assert len(findings) == 1
+        assert findings[0].severity == "warning"
+        assert not is_excluded(self._findings(frame, source_factory))
+        assert "aum=25600000.0000" in findings[0].detail
+        assert "nav*shares=25000000.0000" in findings[0].detail
+
+    def test_aum_gap_within_tolerance_is_silent(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        frame = metrics_frame([metrics_row(aum=25_400_000.0)])
+        assert self._only(self._findings(frame, source_factory), "aum_consistency") == []
+
+    def test_aum_tolerance_boundary_is_strict(self, source_factory: Callable[..., Source]) -> None:
+        config = _CONFIG.model_copy(update={"aum_tolerance": 0.5})
+        at_boundary = metrics_frame(
+            [metrics_row(nav_per_unit=1.0, shares_outstanding=50.0, aum=100.0)]
+        )
+        assert (
+            self._only(
+                self._findings(at_boundary, source_factory, config=config), "aum_consistency"
+            )
+            == []
+        )
+        above = metrics_frame([metrics_row(nav_per_unit=1.0, shares_outstanding=49.0, aum=100.0)])
+        warnings = self._only(
+            self._findings(above, source_factory, config=config), "aum_consistency"
+        )
+        assert len(warnings) == 1
+        assert warnings[0].severity == "warning"
+        assert "relative=51.00%" in warnings[0].detail
+
+    def test_zero_aum_with_positive_nav_times_shares_warns(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        frame = metrics_frame([metrics_row(nav_per_unit=10.0, shares_outstanding=100.0, aum=0.0)])
+        findings = self._only(self._findings(frame, source_factory), "aum_consistency")
+        assert len(findings) == 1
+        assert findings[0].severity == "warning"
+        assert "undefined (aum=0)" in findings[0].detail
+
+    def test_zero_aum_with_zero_shares_is_consistent(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        frame = metrics_frame([metrics_row(shares_outstanding=0.0, aum=0.0)])
+        assert self._only(self._findings(frame, source_factory), "aum_consistency") == []
+
+    def test_missing_figure_skips_aum_check(self, source_factory: Callable[..., Source]) -> None:
+        frame = metrics_frame([metrics_row(aum=None)])
+        assert self._only(self._findings(frame, source_factory), "aum_consistency") == []
+
+    def test_duplicate_fund_date_is_an_error(self, source_factory: Callable[..., Source]) -> None:
+        rows = [metrics_row(), metrics_row(shares_outstanding=2_000_000.0, aum=50_000_000.0)]
+        findings = self._only(self._findings(metrics_frame(rows), source_factory), "duplicate_date")
+        assert len(findings) == 1
+        assert findings[0].severity == "error"
+        assert "SYNM 2026-10-29 x2" in findings[0].detail
+        assert is_excluded(self._findings(metrics_frame(rows), source_factory))
+
+    def test_same_date_for_two_funds_is_not_a_duplicate(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [metrics_row(), metrics_row(fund_ticker="SYNQ")]
+        assert (
+            self._only(self._findings(metrics_frame(rows), source_factory), "duplicate_date") == []
+        )
+
+    def test_future_as_of_compares_in_toronto(self, source_factory: Callable[..., Source]) -> None:
+        frame = metrics_frame([metrics_row(as_of_date=date(2026, 11, 3))])
+        findings = self._only(
+            self._findings(
+                frame,
+                source_factory,
+                as_of=date(2026, 11, 3),
+                fetched_at=datetime(2026, 11, 3, 2, 0, tzinfo=UTC),
+            ),
+            "future_as_of",
+        )
+        assert len(findings) == 1
+        assert findings[0].severity == "error"
+        assert "as_of_date=2026-11-03" in findings[0].detail
+        assert "fetch date 2026-11-02" in findings[0].detail
+
+    def test_every_future_row_is_reported_not_only_the_latest(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            metrics_row(as_of_date=date(2026, 10, 28)),
+            metrics_row(as_of_date=date(2026, 11, 3)),
+            metrics_row(as_of_date=date(2026, 11, 4)),
+        ]
+        findings = self._only(
+            self._findings(
+                metrics_frame(rows),
+                source_factory,
+                as_of=date(2026, 11, 4),
+                fetched_at=datetime(2026, 11, 3, 2, 0, tzinfo=UTC),
+            ),
+            "future_as_of",
+        )
+        assert len(findings) == 1
+        assert "as_of_date=2026-11-03, 2026-11-04" in findings[0].detail
+        assert "2026-10-28" not in findings[0].detail
+
+    def test_future_as_of_day_tolerance(self, source_factory: Callable[..., Source]) -> None:
+        frame = metrics_frame([metrics_row(as_of_date=date(2026, 11, 3))])
+        config = _CONFIG.model_copy(update={"future_as_of_days": 1})
+        findings = self._findings(
+            frame,
+            source_factory,
+            as_of=date(2026, 11, 3),
+            fetched_at=datetime(2026, 11, 3, 2, 0, tzinfo=UTC),
+            config=config,
+        )
+        assert findings == []
