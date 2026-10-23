@@ -247,10 +247,12 @@ BMO_RULES = replace(
 
 # Purpose puts the Top 25 Holdings down the right column and the sector and
 # asset mixes down the left. The listed holdings have no stated total, so the
-# table is scoped to "TOP 25 HOLDINGS" and treated as a partial list. Long
-# bond and option names wrap over several lines and can push the weight onto
-# its own line; the wrapped-name pass joins those fragments by column position
-# so a strike price printed inside the name never becomes a weight.
+# table is scoped to the "TOP 25 HOLDINGS" heading and treated as a partial
+# list. Older documents use other Top N headings ("TOP 10 HOLDINGS"), so the
+# heading pattern accepts any position count. Long bond and option names wrap
+# over several lines and can push the weight onto its own line; the
+# wrapped-name pass joins those fragments by column position so a strike price
+# printed inside the name never becomes a weight.
 PURPOSE_RULES = replace(
     DEFAULT_RULES,
     name="purpose",
@@ -259,8 +261,8 @@ PURPOSE_RULES = replace(
     wrapped_names=True,
     max_weight_percent=150.0,
     sector_grouping=False,
-    section_start_patterns=(r"^top\s*25\s+holdings\b",),
-    partial_section_pattern=r"^top\s*25\s+holdings\b",
+    section_start_patterns=(r"^top\s*(?:\d+\s+)?holdings\b",),
+    partial_section_pattern=r"^top\s*(?:\d+\s+)?holdings\b",
     stated_total_applies_to_partial=False,
     skip_patterns=(
         r"^asset\s+value$",

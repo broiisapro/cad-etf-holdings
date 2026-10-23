@@ -216,3 +216,46 @@ def test_conditional_headers_come_from_the_previous_sidecar(tmp_path: Path) -> N
     assert len(first) == 1
     assert second == []
     assert seen["if-none-match"] == '"v1"'
+
+
+def test_fetch_historical_reports_no_archive_without_a_request(tmp_path: Path) -> None:
+    """Vanguard links one undated current disclosure and no older quarters.
+
+    Downloading that URL for an older quarter would store the current document
+    under the wrong quarter, so the collector refuses without any request.
+    """
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    collector = VanguardQpdCollector(source=qpd_source())
+    client = _client(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(CollectError, match="not published: Vanguard"):
+            collector.fetch_historical(
+                qpd_fund("VFV"), date(2025, 6, 30), client, RawStore(tmp_path)
+            )
+    finally:
+        client.close()
+    assert calls == []
+
+
+def test_fetch_historical_respects_the_terms_gate(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    collector = VanguardQpdCollector(source=qpd_source(decision=Decision.not_allowed))
+    client = _client(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(TermsNotAllowedError, match="skipped: terms"):
+            collector.fetch_historical(
+                qpd_fund("VFV"), date(2025, 6, 30), client, RawStore(tmp_path)
+            )
+    finally:
+        client.close()
+    assert calls == []

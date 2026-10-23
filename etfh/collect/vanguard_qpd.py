@@ -115,5 +115,30 @@ class VanguardQpdCollector:
         )
         return [raw]
 
+    def fetch_historical(
+        self,
+        fund: Fund,
+        quarter_end: date,
+        client: PoliteClient,
+        store: RawStore,
+    ) -> list[RawFile]:
+        """Report that Vanguard publishes only its current disclosure.
+
+        The fund page links a single stable URL, ``qpd-<TICKER>-en.pdf``, which
+        always serves the latest document; it has no date and no archive. Using
+        it for an older quarter would store the current document under a
+        different quarter, so no request is made and the quarter is reported
+        missing. The current quarter is covered by :meth:`fetch` (or reported
+        ``present`` by the backfill when its file is already stored).
+        """
+        source = self._resolve_source(fund)
+        require_collectable(source)
+        raise CollectError(
+            self.source_id,
+            fund,
+            "not published: Vanguard links only its current quarterly portfolio disclosure "
+            f"(qpd-{fund.ticker.strip().upper()}-en.pdf); its fund page lists no older quarters",
+        )
+
 
 COLLECTORS: list[VanguardQpdCollector] = [VanguardQpdCollector()]
