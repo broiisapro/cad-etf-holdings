@@ -73,21 +73,53 @@ jobs:
   # Non-required job (D60): a leaked secret should be visible on the PR without
   # blocking the merge gate. It follows the same runner choice as the required jobs,
   # so the private phase stays on the self-hosted runner and ship moves every job
-  # with one variable change.
+  # with one variable change. The gitleaks binary is used rather than the action:
+  # the action leaves its temp download behind and fails on the next run of a
+  # persistent self-hosted runner.
   secrets:
     runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Install gitleaks 8.30.1
+        run: |
+          set -eu
+          version=8.30.1
+          if command -v gitleaks >/dev/null 2>&1 && [ "$(gitleaks version)" = "$version" ]; then
+            gitleaks version
+            exit 0
+          fi
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64) asset="gitleaks_${version}_darwin_arm64.tar.gz" ;;
+            Darwin-x86_64) asset="gitleaks_${version}_darwin_x64.tar.gz" ;;
+            Linux-x86_64) asset="gitleaks_${version}_linux_x64.tar.gz" ;;
+            Linux-aarch64) asset="gitleaks_${version}_linux_arm64.tar.gz" ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          dir="${RUNNER_TEMP:-/tmp}/gitleaks-$version"
+          mkdir -p "$dir"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v$version"
+          curl -fsSL -o "$dir/$asset" "$base/$asset"
+          curl -fsSL -o "$dir/checksums.txt" "$base/gitleaks_${version}_checksums.txt"
+          (cd "$dir" && grep "  $asset\$" checksums.txt | shasum -a 256 -c -)
+          tar -xzf "$dir/$asset" -C "$dir" gitleaks
+          echo "$dir" >> "$GITHUB_PATH"
+          "$dir/gitleaks" version
       - name: Scan the pull request commits
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
-          GITLEAKS_VERSION: 8.30.1
-          GITLEAKS_ENABLE_COMMENTS: "false"
+        if: github.event_name == 'pull_request'
+        run: |
+          gitleaks git . --config .gitleaks.toml --no-banner --redact \
+            --log-opts "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+      - name: Scan the pushed commits
+        if: github.event_name == 'push'
+        run: |
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts="--all"
+          else
+            gitleaks git . --config .gitleaks.toml --no-banner --redact \
+              --log-opts "${{ github.event.before }}..${{ github.event.after }}"
+          fi
