@@ -68,6 +68,28 @@ FLOW_METHOD = "Δshares × NAV (estimate; ignores distributions and in-kind effe
 _NON_SECURITY_PREFIXES = ("CASH:", "DERIV:")
 _NON_SECURITY_CLASSES = ("cash", "fx", "derivative")
 
+_FLOW_COLUMNS: tuple[str, ...] = (
+    "as_of_date",
+    "shares_outstanding",
+    "nav_per_unit",
+    "prev_as_of_date",
+    "prev_shares",
+    "gap_days",
+    "flow_estimate",
+    "method",
+)
+
+_FLOW_SCHEMA = {
+    "as_of_date": pl.Date,
+    "shares_outstanding": pl.Float64,
+    "nav_per_unit": pl.Float64,
+    "prev_as_of_date": pl.Date,
+    "prev_shares": pl.Float64,
+    "gap_days": pl.Int32,
+    "flow_estimate": pl.Float64,
+    "method": pl.String,
+}
+
 
 class FundNotFoundError(KeyError):
     """Raised when a fund has no rows at all in the built database."""
@@ -259,8 +281,9 @@ def overlap_matrix(
 def metrics_asof(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> pl.DataFrame:
     """Fund-metrics history for ``fund`` as known on ``asof``.
 
-    One row per ``as_of_date``: the latest known version of that date (D20:
-    highest ``known_at``, then ``file_version``, then ``source_id``). Rows are
+    One row per ``as_of_date``: the latest known version of that date (highest
+    ``known_at``, then ``file_version``, then lowest ``source_id``, then lowest
+    SHA-256, so the choice never depends on database row order). Rows are
     ordered by ``as_of_date`` and keep the ``fund_metrics`` columns, so callers
     can read ``nav_per_unit``, ``shares_outstanding``, ``aum`` and ``currency``
     exactly as the source published them (nulls stay null, D67). Only versions
@@ -270,7 +293,26 @@ def metrics_asof(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> pl.Da
     ``fund`` at all; returns an empty frame when the fund exists but nothing is
     known by ``asof``.
     """
-    raise NotImplementedError("fund-metrics analytics are implemented in issue 151")
+    exists = con.execute(
+        "SELECT 1 FROM fund_metrics WHERE fund_ticker = ? LIMIT 1", [fund]
+    ).fetchone()
+    if exists is None:
+        raise FundNotFoundError(fund)
+    cutoff = cutoff_utc(asof)
+    rows = con.execute(
+        "SELECT * FROM fund_metrics WHERE fund_ticker = ? AND known_at < ?",
+        [fund, cutoff],
+    ).pl()
+    if rows.is_empty():
+        return con.execute("SELECT * FROM fund_metrics LIMIT 0").pl()
+    return (
+        rows.sort(
+            ["as_of_date", "known_at", "file_version", "source_id", "raw_file_sha256"],
+            descending=[False, True, True, False, False],
+        )
+        .unique(subset=["as_of_date"], keep="first", maintain_order=True)
+        .sort("as_of_date")
+    )
 
 
 def flows(
@@ -300,7 +342,49 @@ def flows(
     so a republished metrics file becomes visible only on its own ``known_at``.
     Raises :class:`FundNotFoundError` when the fund has no metrics rows at all.
     """
-    raise NotImplementedError("fund-metrics analytics are implemented in issue 151")
+    if asof is None:
+        asof = end
+    history = metrics_asof(con, fund, asof)
+    if history.is_empty():
+        return pl.DataFrame(schema=_FLOW_SCHEMA)
+    share_points = history.filter(pl.col("shares_outstanding").is_not_null()).select(
+        pl.col("as_of_date").alias("prev_as_of_date"),
+        pl.col("shares_outstanding").alias("prev_shares"),
+    )
+    window = history.filter(pl.col("as_of_date").is_between(start, end)).select(
+        "as_of_date", "shares_outstanding", "nav_per_unit"
+    )
+    joined = window.join_asof(
+        share_points,
+        left_on="as_of_date",
+        right_on="prev_as_of_date",
+        strategy="backward",
+        allow_exact_matches=False,
+    )
+    result = joined.with_columns(
+        _business_day_gap().alias("gap_days"),
+        ((pl.col("shares_outstanding") - pl.col("prev_shares")) * pl.col("nav_per_unit")).alias(
+            "flow_estimate"
+        ),
+        pl.lit(FLOW_METHOD).alias("method"),
+    ).select(list(_FLOW_COLUMNS))
+    return result.sort("as_of_date")
+
+
+def _business_day_gap() -> pl.Expr:
+    """Weekdays in ``(prev_as_of_date, as_of_date]``; null without a previous date."""
+    weekdays = (
+        pl.date_ranges(pl.col("prev_as_of_date"), pl.col("as_of_date"), closed="right")
+        .list.eval(pl.element().dt.weekday().is_between(1, 5))
+        .list.sum()
+    )
+    return (
+        pl.when(pl.col("prev_as_of_date").is_null())
+        .then(pl.lit(None, dtype=pl.Int32))
+        .otherwise(weekdays)
+        .cast(pl.Int32)
+        .alias("gap_days")
+    )
 
 
 def changes(con: duckdb.DuckDBPyConnection, fund: str, start: date, end: date) -> pl.DataFrame:

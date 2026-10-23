@@ -11,6 +11,7 @@ import polars as pl
 from etfh.build import DDL_SOURCES
 from etfh.schema import (
     DDL_FILE_VERSIONS,
+    DDL_FUND_METRICS,
     DDL_HOLDINGS,
     DDL_HOLDINGS_CHANGES,
     DDL_QA_EVENTS,
@@ -52,6 +53,45 @@ _CHANGES_SCHEMA: dict[str, Any] = {
     "weight_after": pl.Float64,
     "delta": pl.Float64,
 }
+
+_METRICS_SCHEMA: dict[str, Any] = {
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "known_at": pl.Datetime("us", "UTC"),
+    "file_version": pl.Int32,
+    "nav_per_unit": pl.Float64,
+    "shares_outstanding": pl.Float64,
+    "aum": pl.Float64,
+    "currency": pl.String,
+    "source_id": pl.String,
+    "raw_file_sha256": pl.String,
+}
+
+
+def metric(
+    fund: str,
+    as_of: date,
+    *,
+    nav: float | None = None,
+    shares: float | None = None,
+    aum: float | None = None,
+    known_at: datetime = KNOWN_AT,
+    file_version: int = 1,
+    source_id: str = "metrics",
+    currency: str | None = "CAD",
+) -> dict[str, Any]:
+    return {
+        "fund_ticker": fund,
+        "as_of_date": as_of,
+        "known_at": known_at,
+        "file_version": file_version,
+        "nav_per_unit": nav,
+        "shares_outstanding": shares,
+        "aum": aum,
+        "currency": currency,
+        "source_id": source_id,
+        "raw_file_sha256": SHA,
+    }
 
 
 def holding(
@@ -137,6 +177,7 @@ def make_con(
     rows: list[dict[str, Any]] | None = None,
     changes: list[dict[str, Any]] | None = None,
     partial_list_shas: list[str] | None = None,
+    metrics: list[dict[str, Any]] | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """A database with the build's tables, the two test sources seeded.
 
@@ -144,9 +185,17 @@ def make_con(
     ``quarterly_disclosure`` PDF source, matching the source ids the hand-made
     rows use. ``partial_list_shas`` adds ``partial_list`` info events, the way
     the build records a daily source that publishes only part of the portfolio.
+    ``metrics`` fills the additive ``fund_metrics`` table.
     """
     con = duckdb.connect(":memory:")
-    for ddl in (DDL_FILE_VERSIONS, DDL_SOURCES, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES):
+    for ddl in (
+        DDL_FILE_VERSIONS,
+        DDL_SOURCES,
+        DDL_HOLDINGS,
+        DDL_QA_EVENTS,
+        DDL_HOLDINGS_CHANGES,
+        DDL_FUND_METRICS,
+    ):
         con.execute(ddl)
     holdings = pl.DataFrame(rows or [], schema=_HOLDINGS_SCHEMA)
     con.register("_holdings_rows", holdings)
@@ -156,6 +205,10 @@ def make_con(
     con.register("_change_rows", changes_frame)
     con.execute("INSERT INTO holdings_changes SELECT * FROM _change_rows")
     con.unregister("_change_rows")
+    metrics_frame = pl.DataFrame(metrics or [], schema=_METRICS_SCHEMA)
+    con.register("_metrics_rows", metrics_frame)
+    con.execute("INSERT INTO fund_metrics SELECT * FROM _metrics_rows")
+    con.unregister("_metrics_rows")
     sources = pl.DataFrame(
         [
             ("daily", "tests", "daily_holdings", "csv"),
