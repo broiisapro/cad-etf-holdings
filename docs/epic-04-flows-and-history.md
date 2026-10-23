@@ -244,13 +244,14 @@ qa:          exit 0; 70 files (69 included, 1 excluded: purpose_daily BNC, whose
              39 inputs included, 0 excluded, 33 funds with metrics, 0 findings;
              latest metrics date bmo 2026-09-30, evolve 2026-10-22,
              purpose 2026-10-22
-flows PDF:   15 dated rows for 2026-10-01..2026-10-22; only the 2026-10-22 row
-             carries shares (10,690,717.1139) because Purpose publishes a NAV
-             history but a share count only for the current date, so no flow
-             estimate exists yet; the method line is printed
-flows ZSP:   1 row (2026-09-30, shares 214,703,140, NAV 119.2016 derived from the
-             factsheet); no previous shares date, so no flow estimate yet; the
-             method line is printed
+flows PDF:   15 dated rows for 2026-10-01..2026-10-22; only the latest row
+             carries a share count because Purpose publishes a NAV history but
+             a share count only for the current date, so no flow estimate
+             exists yet; the method line is printed
+flows ZSP:   1 row at the factsheet's stated date with a share count and a
+             derived NAV; no previous shares date, so no flow estimate yet; the
+             method line is printed (individual fund figures are not repeated
+             in committed docs)
 qa --asof:   exit 0; --asof 2026-10-22 reports nothing known yet (all files were
              fetched on 2026-10-23), --asof 2026-10-23 restores the full section
 backfill vanguard_ca: 0 fetched, 10 present, 70 missing (80 fund-quarters):
