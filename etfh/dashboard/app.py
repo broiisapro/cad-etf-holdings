@@ -22,7 +22,7 @@ from streamlit.delta_generator import DeltaGenerator
 
 from etfh import analytics
 from etfh.build import connect
-from etfh.dashboard import quality
+from etfh.dashboard import demo, quality
 
 DEFAULT_DB_PATH = "./build/etfh.duckdb"
 CHANGE_WINDOWS: dict[str, int] = {
@@ -221,7 +221,7 @@ def render_heatmap(con: duckdb.DuckDBPyConnection, funds: list[str], asof: date)
     st.altair_chart(heatmap_chart(matrix), width="stretch")
 
 
-def render(con: duckdb.DuckDBPyConnection) -> None:
+def render(con: duckdb.DuckDBPyConnection, *, demo_mode: bool = False) -> None:
     """Render the whole dashboard against an open read-only connection."""
     try:
         funds = analytics.funds_available(con)
@@ -235,13 +235,17 @@ def render(con: duckdb.DuckDBPyConnection) -> None:
     with st.sidebar:
         st.header("Selection")
         fund = st.selectbox("Fund", funds, index=0, key="fund")
-        preview = analytics.concentration(con, fund, today())
+        reference = demo.DEMO_LATEST_ASOF if demo_mode else today()
+        preview = analytics.concentration(con, fund, reference)
         latest = preview.as_of_date or today()
         picked = st.date_input("As of", value=latest, key="asof")
         asof: date = picked if isinstance(picked, date) else latest
         if preview.partial:
             st.caption("Top holdings only for this fund.")
-        st.caption(f"Database: {db_path()}")
+        if demo_mode:
+            st.caption("Database: synthetic demo (temporary build)")
+        else:
+            st.caption(f"Database: {db_path()}")
 
     fund_tab, overlap_tab, heatmap_tab = st.tabs(["Fund", "Overlap", "Heatmap"])
     with fund_tab:
@@ -258,7 +262,18 @@ def main() -> None:
     st.title("Canadian ETF holdings")
     st.caption("Point-in-time overlap and concentration across published ETF portfolios.")
 
-    path = db_path()
+    demo_mode = demo.is_demo()
+    if demo_mode:
+        st.info(demo.DEMO_BANNER)
+        try:
+            path = demo.demo_database().db_path
+        except demo.DemoError as exc:
+            st.error(str(exc))
+            st.stop()
+            return
+    else:
+        path = db_path()
+
     if not path.is_file():
         st.error(
             f"Database not found: {path}. Build one first with "
@@ -274,7 +289,7 @@ def main() -> None:
         st.stop()
 
     try:
-        render(con)
+        render(con, demo_mode=demo_mode)
     finally:
         con.close()
 
