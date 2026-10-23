@@ -415,3 +415,66 @@ def test_fund_metrics_output_is_sorted_and_rebuilds_byte_identically(
         date(2026, 10, 29),
         date(2026, 10, 30),
     ]
+
+
+def test_default_validator_reports_an_inconsistent_aum_as_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build imports E's real validator when none is injected."""
+    config_dir = make_metrics_config(tmp_path)
+    raw_root = tmp_path / "raw"
+    write_metrics_raw(
+        raw_root,
+        metrics_payload([(date(2026, 10, 29), 25.0, 1_000_000.0, 100_000_000.0)]),
+        fetched_at=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+    out_dir = tmp_path / "out"
+    result = build_metrics_db(
+        out_dir,
+        raw_root=raw_root,
+        config_dir=config_dir,
+        metrics_parsers=[FakeMetricsParser()],
+        metrics_validator=None,
+        monkeypatch=monkeypatch,
+    )
+    db_path = out_dir / "etfh.duckdb"
+    assert result.n_fund_metrics == 1
+    events = _query(
+        db_path,
+        'SELECT source_id, "check", severity, excluded FROM qa_events',
+    )
+    assert events.rows() == [(METRICS_SOURCE_ID, "aum_consistency", "warning", False)]
+    status = _query(db_path, "SELECT status FROM file_versions")
+    assert status["status"].to_list() == ["included"]
+
+
+def test_default_validator_excludes_a_metrics_file_with_negative_shares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = make_metrics_config(tmp_path)
+    raw_root = tmp_path / "raw"
+    write_metrics_raw(
+        raw_root,
+        metrics_payload([(date(2026, 10, 29), 25.0, -1.0, 25.0)]),
+        fetched_at=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+    out_dir = tmp_path / "out"
+    result = build_metrics_db(
+        out_dir,
+        raw_root=raw_root,
+        config_dir=config_dir,
+        metrics_parsers=[FakeMetricsParser()],
+        metrics_validator=None,
+        monkeypatch=monkeypatch,
+    )
+    db_path = out_dir / "etfh.duckdb"
+    assert result.n_fund_metrics == 0
+    status = _query(db_path, "SELECT status FROM file_versions")
+    assert status["status"].to_list() == ["excluded"]
+    events = _query(
+        db_path,
+        'SELECT "check", severity, excluded FROM qa_events ORDER BY "check"',
+    )
+    assert "shares_nonnegative" in events["check"].to_list()
+    assert set(events["severity"].to_list()) == {"error"}
+    assert set(events["excluded"].to_list()) == {True}
