@@ -19,6 +19,7 @@ from tests._qpd_helpers import (
     qpd_fund,
     raw_file_for_pdf,
     write_vanguard_lookalike,
+    write_vanguard_older_lookalike,
     write_vanguard_wrapped_lookalike,
 )
 
@@ -92,6 +93,34 @@ def test_vanguard_wrapped_name_keeps_the_full_fund_name(tmp_path: Path) -> None:
         )
     )
     assert stated == pytest.approx(0.502)
+
+
+def test_vanguard_older_layout_labelled_total_parses(tmp_path: Path) -> None:
+    """An older quarter prints "Total investments 50.0%" instead of a bare total.
+
+    The date is "December 31, 2024" and the listed total is labelled, so the
+    issuer rule's second total pattern has to find it; the right-column
+    holdings must still parse to the same rows.
+    """
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_vanguard_older_lookalike(tmp_path / "vanguard_old.pdf"),
+            source_id="vanguard_ca_qpd",
+            fund_ticker="OLD",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    assert parsed.as_of_date == date(2024, 12, 31)
+    assert parsed.frame.height == 6
+    stated = float(
+        next(
+            note.split("=", 1)[1]
+            for note in parsed.notes
+            if note.startswith("stated_total_fraction=")
+        )
+    )
+    assert stated == pytest.approx(0.50)
+    assert round(float(parsed.frame["weight"].sum()), 4) == 0.50
 
 
 @pytest.mark.network

@@ -435,7 +435,9 @@ def write_bmo_lookalike(path: Path) -> Path:
     return path
 
 
-def write_purpose_lookalike(path: Path, *, as_of: str = "June 30, 2026") -> Path:
+def write_purpose_lookalike(
+    path: Path, *, as_of: str = "June 30, 2026", heading: str = "TOP 25 HOLDINGS"
+) -> Path:
     """Write a fictional Purpose-style two-column disclosure.
 
     The sector and asset mixes sit down the left column and the Top 25
@@ -455,7 +457,7 @@ def write_purpose_lookalike(path: Path, *, as_of: str = "June 30, 2026") -> Path
     pdf.setFont("Helvetica", 10)
     pdf.drawString(_LEFT, _TOP - 16, f"As At {as_of}")
     pdf.setFont("Helvetica-Bold", 9)
-    pdf.drawString(right, _TOP - 16, "TOP 25 HOLDINGS")
+    pdf.drawString(right, _TOP - 16, heading)
     pdf.setFont("Helvetica", 9)
     pdf.drawString(right, _TOP - 30, "% of Fund's Net")
     pdf.drawString(right, _TOP - 42, "Asset Value")
@@ -850,6 +852,66 @@ def write_vanguard_lookalike(path: Path, *, as_of: str = "June 30, 2026") -> Pat
     return path
 
 
+def write_vanguard_older_lookalike(path: Path) -> Path:
+    """Write a fictional older Vanguard-style disclosure.
+
+    Mirrors the same two-column table with an older quarter's date and the
+    older total wording ("Total investments 50.0%") instead of an unlabelled
+    number above "Total net asset value", so the issuer's second total pattern
+    has to carry the check.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+    pdf.setCreator("etfh test fixtures")
+    right = 330.0
+
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP, "Quarterly Portfolio Disclosure | December 31, 2024")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 16, "Vanguard Fictional 500 Index ETF")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 30, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(_LEFT, _TOP - 50, "Sector Allocation")
+    pdf.drawString(right, _TOP - 50, "Top 25 Holdings")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "As at December 31, 2024")
+    pdf.drawString(right, _TOP - 62, "As at December 31, 2024")
+    pdf.drawString(_LEFT, _TOP - 74, "% of")
+    pdf.drawRightString(_RIGHT, _TOP - 74, "% of Underlying Fund")
+
+    sectors = [("Financials", "32.9%"), ("Energy", "18.0"), ("Technology", "7.7")]
+    y = _TOP - 96
+    for name, weight in sectors:
+        pdf.drawString(_LEFT, y, name)
+        pdf.drawRightString(290.0, y, weight)
+        y -= 14
+    pdf.drawString(_LEFT, y, "100.0")
+
+    holdings = [
+        ("Northwind Materials Inc.", "12.50%"),
+        ("Pineview Software Corp.", "10.00%"),
+        ("Northgate Bank", "8.50%"),
+        ("Maplecrest Properties", "7.00%"),
+        ("Juniper Health Corp.", "6.50%"),
+        ("Cedarline Energy Corp.", "5.50"),
+    ]
+    y = _TOP - 96
+    for name, weight in holdings:
+        pdf.drawString(right, y, name)
+        pdf.drawRightString(_RIGHT, y, weight)
+        y -= 14
+    pdf.drawString(right, y, "Total investments 50.0%")
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(_LEFT, y - 14, "The summary of investment portfolio may change.")
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(right, y - 28, "Total net asset value $12,345,678,901")
+    pdf.save()
+    return path
+
+
 def write_backfill_config(
     directory: Path,
     *,
@@ -860,6 +922,7 @@ def write_backfill_config(
     min_interval_seconds: float | None = None,
     kind: SourceKind = SourceKind.quarterly_disclosure,
     file_format: FileFormat = FileFormat.pdf,
+    params: str = "",
 ) -> Path:
     """Write a minimal ``sources.yaml`` and ``funds.csv`` and return the directory."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -895,7 +958,7 @@ def write_backfill_config(
         )
         for ticker in tickers:
             writer.writerow(
-                [ticker, issuer, f"Fictional {ticker} Fund", "equity", source_id, "XTSE", ""]
+                [ticker, issuer, f"Fictional {ticker} Fund", "equity", source_id, "XTSE", params]
             )
     return directory
 

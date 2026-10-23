@@ -64,6 +64,32 @@ def test_purpose_lookalike_parses(tmp_path: Path) -> None:
     assert round(float(parsed.frame["weight"].sum()), 4) == 0.221
 
 
+def test_purpose_older_top_n_heading_is_a_partial_list(tmp_path: Path) -> None:
+    """Older Purpose documents head the table "TOP 10 HOLDINGS", not "TOP 25".
+
+    The listed holdings still have no stated total, so the heading must start
+    the partial section and the file must not demand a total it never prints.
+    """
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_purpose_lookalike(
+                tmp_path / "purpose_top10.pdf",
+                as_of="December 31, 2024",
+                heading="TOP 10 HOLDINGS",
+            ),
+            source_id="purpose_qpd",
+            fund_ticker="PDF",
+            issuer="purpose",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    assert parsed.as_of_date == date(2024, 12, 31)
+    assert parsed.frame.height == 5
+    assert "partial_list=true" in parsed.notes
+    assert not any(note.startswith("stated_total_fraction=") for note in parsed.notes)
+    assert round(float(parsed.frame["weight"].sum()), 4) == 0.221
+
+
 def test_purpose_wrapped_option_names_are_names_not_weights(tmp_path: Path) -> None:
     """The real BNC failure: a strike price on a wrapped option line read as a weight.
 
