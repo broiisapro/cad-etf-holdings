@@ -60,6 +60,11 @@ EXPECTED_REPORT = (
     "      synthetic 100.00%\n"
     "    worst funds:\n"
     "      SYNF as_of=2026-09-30 source=syn_pdf share=100.00%\n"
+    "fund metrics:\n"
+    "  files: 0 total (0 included, 0 excluded)\n"
+    "  funds with metrics: 0\n"
+    "  latest as-of per issuer: none\n"
+    "  findings: 0 error(s), 0 warning(s), 0 info(s)\n"
 )
 
 

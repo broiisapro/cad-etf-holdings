@@ -815,6 +815,49 @@ def _render_share(line_prefix: str, row: UnmatchedShare) -> str:
     )
 
 
+def _render_metrics_file(
+    entry: MetricsFile | InconsistentMetricsFile,
+) -> str:
+    as_of = entry.as_of_date.isoformat() if entry.as_of_date is not None else "-"
+    return (
+        f"as_of={as_of} source={entry.source_id} "
+        f"funds={','.join(entry.fund_tickers)} versions={entry.versions}"
+    )
+
+
+def _render_metrics(metrics: MetricsSummary) -> list[str]:
+    """The fund-metrics health section (D66)."""
+    total = metrics.files_included + metrics.files_excluded
+    lines = [
+        "fund metrics:",
+        f"  files: {total} total ({metrics.files_included} included, "
+        f"{metrics.files_excluded} excluded)",
+        f"  funds with metrics: {len(metrics.funds)}",
+    ]
+    if metrics.latest_by_issuer:
+        lines.append("  latest as-of per issuer:")
+        lines.extend(
+            f"    {issuer} {latest.isoformat()}" for issuer, latest in metrics.latest_by_issuer
+        )
+    else:
+        lines.append("  latest as-of per issuer: none")
+    lines.append(
+        f"  findings: {metrics.errors} error(s), {metrics.warnings} warning(s), "
+        f"{metrics.infos} info(s)"
+    )
+    if metrics.excluded_files:
+        lines.append("  excluded files:")
+        for entry in metrics.excluded_files:
+            lines.append(f"    {_render_metrics_file(entry)}")
+            lines.extend(_render_findings("      ", entry.findings))
+    if metrics.inconsistent_files:
+        lines.append("  inconsistent:")
+        for inconsistent in metrics.inconsistent_files:
+            lines.append(f"    {_render_metrics_file(inconsistent)}: {inconsistent.reason}")
+            lines.extend(_render_findings("      ", inconsistent.findings))
+    return lines
+
+
 def render(summary: QaSummary) -> str:
     """Render a deterministic, human-readable QA report."""
     if summary.tables_missing:
@@ -879,6 +922,7 @@ def render(summary: QaSummary) -> str:
             lines.extend(_render_share("  ", row) for row in summary.unmatched_over_threshold)
         else:
             lines.append(f"unmatched threshold {threshold}: no included daily file exceeds it")
+    lines.extend(_render_metrics(summary.metrics))
     return "\n".join(lines) + "\n"
 
 
