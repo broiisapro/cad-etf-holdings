@@ -1,8 +1,8 @@
 """QA summary, text report and exit code for a built database.
 
-Reads ``file_versions``, ``qa_events`` and (when present) ``holdings`` from a
-DuckDB built by ``etfh build``; the additive ``sources`` table (D53) supplies
-the issuer, source kind and format when it exists.
+Reads ``file_versions``, ``qa_events`` and (when present) ``holdings`` and
+``fund_metrics`` from a DuckDB built by ``etfh build``; the additive ``sources``
+table (D53) supplies the issuer, source kind and format when it exists.
 
 The report keeps daily holdings and quarterly portfolio disclosures in
 separate quality sections: each gets its own per-issuer median unmatched weight
@@ -10,11 +10,29 @@ share and its own worst-funds list (only funds with a share above zero, so a
 clean portfolio does not pad the list), and the shares are derived from the
 source kind, never from weight-sum heuristics.
 
+Fund metrics (D66, interfaces wave 06 §4) get their own section: how many
+metrics inputs were included or excluded, how many funds have metrics, the
+latest metrics date per issuer, the finding counts, and every excluded or
+inconsistent metrics input with its findings. Findings belong to metrics when
+their source is a ``fund_metrics`` source or when the build recorded them as a
+``metrics_parse_error`` against the raw file's own source (there is no metrics
+version to attach in that case). Metrics findings never change a holdings
+file's status, and their errors are counted in the exit code the same way: an
+errored metrics input must be excluded (or listed as inconsistent) for QA to
+pass.
+
 Rules the report and exit code encode:
 
-- every raw file with an ``error`` finding is listed; a file that is errored
-  but not excluded (or has no ``file_versions`` row at all) is additionally
-  reported under ``inconsistent:`` and keeps exit code 1;
+- a *file* is one stored raw input per source (SHA-256 + source id), so a
+  metrics history that yields many dated versions still counts once; the
+  top-line totals cover holdings inputs, and fund metrics are counted in their
+  own section;
+- every errored holdings file is listed; a file that is errored but not
+  excluded (or has no ``file_versions`` row at all) is additionally reported
+  under ``inconsistent:`` and keeps exit code 1;
+- every errored metrics input is listed under ``fund metrics``; one that is
+  included, has no metrics version, or disagrees with its versions is reported
+  as inconsistent there and keeps exit code 1;
 - exit code 1 means the tables are missing or the database is inconsistent;
 - exit code 3 means a ``--max-unmatched-share`` threshold was exceeded by an
   included daily file (quarterly disclosures are partial by nature and never
@@ -24,7 +42,7 @@ Rules the report and exit code encode:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from statistics import median
 
@@ -33,10 +51,14 @@ import polars as pl
 from polars.datatypes import DataType, DataTypeClass
 
 from etfh import analytics
+from etfh.types import SourceKind
 
 __all__ = [
     "ExcludedFile",
     "InconsistentFile",
+    "InconsistentMetricsFile",
+    "MetricsFile",
+    "MetricsSummary",
     "QaSummary",
     "UnmatchedQuality",
     "UnmatchedShare",
@@ -48,6 +70,7 @@ __all__ = [
 
 _DAILY_KIND = "daily_holdings"
 _QUARTERLY_KIND = "quarterly_disclosure"
+_METRICS_KIND = SourceKind.fund_metrics.value
 _PDF_FORMAT = "pdf"
 _QUALITY_DAILY = "daily"
 _QUALITY_QUARTERLY = "quarterly"
@@ -55,6 +78,16 @@ _QUALITY_QUARTERLY = "quarterly"
 _QUALITY_KINDS = (_QUALITY_DAILY, _QUALITY_QUARTERLY)
 _MAX_WORST_FUNDS = 10
 _NON_SECURITY_CLASSES = ("cash", "fx", "derivative")
+#: Checks only the fund-metrics validator emits (interfaces wave 06 §4). They
+#: identify a metrics source even when its recorded kind predates ``fund_metrics``
+#: (a test config, or a database built before the kind existed).
+_METRICS_ROW_CHECKS = frozenset(
+    {"nav_positive", "shares_nonnegative", "aum_consistency", "duplicate_date"}
+)
+#: The build records a metrics parser failure against the raw file's own
+#: source, so the check name is the only way to tell it apart (D66).
+_METRICS_PARSE_CHECK = "metrics_parse_error"
+_METRICS_CHECKS = _METRICS_ROW_CHECKS | {_METRICS_PARSE_CHECK}
 _SHARE_COLUMNS = (
     "fund_ticker",
     "as_of_date",
@@ -117,6 +150,55 @@ class UnmatchedQuality:
 
 
 @dataclass(frozen=True, slots=True)
+class MetricsFile:
+    """One excluded fund-metrics input (raw file + metrics source)."""
+
+    source_id: str
+    fund_tickers: tuple[str, ...]
+    as_of_date: date | None
+    versions: int
+    findings: tuple[tuple[str, str, str], ...]  # (check, severity, detail)
+
+
+@dataclass(frozen=True, slots=True)
+class InconsistentMetricsFile:
+    """An errored fund-metrics input that is not accounted for by exclusion."""
+
+    source_id: str
+    fund_tickers: tuple[str, ...]
+    as_of_date: date | None
+    versions: int
+    reason: str
+    findings: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MetricsSummary:
+    """Fund-metrics health read from ``file_versions``, ``qa_events`` and ``fund_metrics``."""
+
+    files_included: int = 0
+    files_excluded: int = 0
+    excluded_files: tuple[MetricsFile, ...] = ()
+    inconsistent_files: tuple[InconsistentMetricsFile, ...] = ()
+    funds: tuple[str, ...] = ()
+    latest_by_issuer: tuple[tuple[str, date], ...] = ()
+    errors: int = 0
+    warnings: int = 0
+    infos: int = 0
+
+
+@dataclass
+class _Input:
+    """Working state for one stored input (raw file + source) while summarizing."""
+
+    source_id: str
+    fund_tickers: set[str] = field(default_factory=set)
+    dates: list[date] = field(default_factory=list)
+    versions: int = 0
+    statuses: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True, slots=True)
 class QaSummary:
     """Totals, files and unmatched-weight measurements read from the database."""
 
@@ -131,6 +213,7 @@ class QaSummary:
     unmatched_quality: tuple[UnmatchedQuality, ...] = ()
     max_unmatched_share: float | None = None
     unmatched_over_threshold: tuple[UnmatchedShare, ...] = ()
+    metrics: MetricsSummary = field(default_factory=MetricsSummary)
     tables_missing: bool = False
 
 
@@ -272,6 +355,74 @@ def _issuer_of(metadata: dict[str, tuple[str, str, str]], source_id: str) -> str
     return metadata.get(source_id, (source_id, _DAILY_KIND, ""))[0]
 
 
+def _is_metrics_check(check: str, source_id: str, metrics_sources: set[str]) -> bool:
+    """Whether one ``qa_events`` row belongs to the fund-metrics path (D66).
+
+    Row-level findings carry the metrics source id, so the ``sources`` table
+    (or the rows in ``fund_metrics``) identifies them. A metrics parser failure
+    has no metrics source to attach: the build records it against the raw
+    file's own source, which is why the check name is matched too.
+    """
+    return source_id in metrics_sources or check in _METRICS_CHECKS
+
+
+def _metrics_source_ids(
+    con: duckdb.DuckDBPyConnection, metadata: dict[str, tuple[str, str, str]]
+) -> set[str]:
+    """Every source that produced or is declared to produce fund metrics.
+
+    The ``sources`` table gives the declared kind; the ``fund_metrics`` table
+    covers databases whose config predates the ``fund_metrics`` kind (and
+    hand-made databases without a ``sources`` table). A missing
+    ``fund_metrics`` table simply contributes nothing.
+    """
+    ids = {
+        source_id
+        for source_id, (_issuer, kind, _source_format) in metadata.items()
+        if kind == _METRICS_KIND
+    }
+    try:
+        rows = con.execute("SELECT DISTINCT source_id FROM fund_metrics").fetchall()
+    except duckdb.Error:
+        return ids
+    ids.update(str(row[0]) for row in rows if row[0] is not None)
+    return ids
+
+
+def _metrics_universe(
+    con: duckdb.DuckDBPyConnection, metadata: dict[str, tuple[str, str, str]]
+) -> tuple[tuple[str, ...], tuple[tuple[str, date], ...]]:
+    """Funds with metrics rows and the latest metrics date per issuer.
+
+    Returns empty tuples when the database has no ``fund_metrics`` table, so
+    the report degrades to "no metrics" instead of failing.
+    """
+    try:
+        fund_rows = con.execute(
+            "SELECT DISTINCT fund_ticker FROM fund_metrics ORDER BY fund_ticker"
+        ).fetchall()
+        date_rows = con.execute(
+            "SELECT source_id, max(as_of_date) FROM fund_metrics GROUP BY source_id"
+        ).fetchall()
+    except duckdb.Error:
+        return (), ()
+    funds = tuple(str(row[0]) for row in fund_rows)
+    latest: dict[str, date] = {}
+    for source_id, latest_date in date_rows:
+        if latest_date is None:
+            continue
+        issuer = _issuer_of(metadata, str(source_id))
+        current = latest.get(issuer)
+        if current is None or latest_date > current:
+            latest[issuer] = latest_date
+    return funds, tuple(sorted(latest.items()))
+
+
+def _input_key(sha: object, source_id: object) -> tuple[str, str]:
+    """The (SHA-256, source) input a ``file_versions`` or ``qa_events`` row belongs to."""
+    return (str(sha), str(source_id))
+
+
 def _share_rows(frame: pl.DataFrame) -> list[UnmatchedShare]:
     return [
         UnmatchedShare(
@@ -302,9 +453,12 @@ def summarize(
 ) -> QaSummary:
     """Read the built tables and collect everything the report needs.
 
-    ``max_unmatched_share``, when set, flags included ``daily_holdings`` file
-    versions whose unmatched weight share exceeds it; :func:`exit_code` then
-    returns 3.
+    ``max_unmatched_share``, when set, flags included ``daily_holdings`` inputs
+    whose unmatched weight share exceeds it; :func:`exit_code` then returns 3.
+    A *file* is one stored raw input per source (SHA-256 + source id): a
+    republished file is a new input, while a metrics history that yields many
+    dated versions is still one. The top-line counts cover holdings inputs only;
+    fund-metrics inputs have their own section (D66).
     """
     if max_unmatched_share is not None and not 0.0 <= max_unmatched_share <= 1.0:
         raise ValueError("max_unmatched_share must be between 0 and 1")
@@ -319,44 +473,94 @@ def summarize(
     except duckdb.Error:
         return _missing_tables()
 
-    findings_by_sha: dict[str, list[tuple[str, str, str]]] = {}
+    metadata = _source_metadata(con)
+    metrics_sources = _metrics_source_ids(con, metadata)
+    # A metrics-only check identifies its source even when the config's kind
+    # predates ``fund_metrics`` (or the sources table is absent).
+    metrics_sources.update(
+        str(source_id)
+        for _sha, source_id, _fund_ticker, _as_of, check, _severity, _detail in event_rows
+        if str(check) in _METRICS_ROW_CHECKS
+    )
+
+    # Sort before grouping: the report must not depend on table row order.
+    file_rows.sort(
+        key=lambda row: (
+            *_input_key(row[0], row[1]),
+            str(row[2]),
+            row[3] or date.min,
+            str(row[4]),
+        )
+    )
+    event_rows.sort(
+        key=lambda row: (
+            *_input_key(row[0], row[1]),
+            str(row[2]),
+            row[3] or date.min,
+            str(row[4]),
+            str(row[5]),
+            str(row[6]),
+        )
+    )
+
     warnings = 0
-    event_info_by_sha: dict[str, tuple[str, str, date | None]] = {}
+    metric_counts = {"error": 0, "warning": 0, "info": 0}
+    holdings_findings: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+    metrics_findings: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+    event_info: dict[tuple[str, str], tuple[str, str, date | None]] = {}
     for sha, source_id, fund_ticker, as_of_date, check, severity, detail in event_rows:
-        key = str(sha)
-        findings_by_sha.setdefault(key, []).append((str(check), str(severity), str(detail)))
-        event_info_by_sha.setdefault(key, (str(source_id), str(fund_ticker), as_of_date))
+        key = _input_key(sha, source_id)
+        finding = (str(check), str(severity), str(detail))
+        event_info.setdefault(key, (str(fund_ticker), str(source_id), as_of_date))
+        if _is_metrics_check(str(check), str(source_id), metrics_sources):
+            metrics_findings.setdefault(key, []).append(finding)
+            metric_counts[str(severity)] = metric_counts.get(str(severity), 0) + 1
+        else:
+            holdings_findings.setdefault(key, []).append(finding)
         if severity == "warning":
             warnings += 1
-    error_shas = {
-        sha
-        for sha, findings in findings_by_sha.items()
-        if any(severity == "error" for _check, severity, _detail in findings)
-    }
 
-    versions_by_sha: dict[str, list[tuple[str, str, date | None, str]]] = {}
-    files_included = 0
-    files_excluded = 0
+    inputs: dict[tuple[str, str], _Input] = {}
+    versions_by_input: dict[tuple[str, str], list[tuple[str, date | None, str]]] = {}
+    input_status: dict[tuple[str, str], str] = {}
     for sha, source_id, fund_ticker, as_of_date, status in file_rows:
-        keyword = str(sha)
-        versions_by_sha.setdefault(keyword, []).append(
-            (str(source_id), str(fund_ticker), as_of_date, str(status))
-        )
-        if status == "included":
-            files_included += 1
-        elif status == "excluded":
-            files_excluded += 1
+        key = _input_key(sha, source_id)
+        entry = inputs.get(key)
+        if entry is None:
+            entry = _Input(source_id=str(source_id))
+            inputs[key] = entry
+        entry.fund_tickers.add(str(fund_ticker))
+        entry.versions += 1
+        entry.statuses.add(str(status))
+        if as_of_date is not None:
+            entry.dates.append(as_of_date)
+        versions_by_input.setdefault(key, []).append((str(fund_ticker), as_of_date, str(status)))
+        if str(status) == "included":
+            input_status[key] = "included"
+        elif key not in input_status:
+            input_status[key] = str(status)
+
+    files_included = sum(
+        1
+        for key, status in input_status.items()
+        if status == "included" and key[1] not in metrics_sources
+    )
+    files_excluded = sum(
+        1
+        for key, status in input_status.items()
+        if status == "excluded" and key[1] not in metrics_sources
+    )
 
     excluded_files: list[ExcludedFile] = []
     for sha, source_id, fund_ticker, as_of_date, status in file_rows:
-        if status != "excluded":
+        if status != "excluded" or str(source_id) in metrics_sources:
             continue
         excluded_files.append(
             ExcludedFile(
                 fund_ticker=str(fund_ticker),
                 as_of_date=as_of_date,
                 source_id=str(source_id),
-                findings=tuple(sorted(findings_by_sha.get(str(sha), []))),
+                findings=tuple(sorted(holdings_findings.get(_input_key(sha, source_id), []))),
             )
         )
     excluded_files.sort(
@@ -369,31 +573,36 @@ def summarize(
     )
 
     inconsistent_files: list[InconsistentFile] = []
-    for sha in sorted(error_shas):
-        findings = tuple(sorted(findings_by_sha[sha]))
-        versions = versions_by_sha.get(sha)
+    error_inputs = sorted(
+        key
+        for key, findings in holdings_findings.items()
+        if any(severity == "error" for _check, severity, _detail in findings)
+    )
+    for key in error_inputs:
+        findings = tuple(sorted(holdings_findings[key]))
+        versions = versions_by_input.get(key)
         if not versions:
-            source_id, fund_ticker, as_of_date = event_info_by_sha[sha]
+            fund_ticker, source_id, as_of_date = event_info[key]
             inconsistent_files.append(
                 InconsistentFile(
                     fund_ticker=fund_ticker,
                     as_of_date=as_of_date,
                     source_id=source_id,
-                    sha256=sha,
+                    sha256=key[0],
                     reason="errored file has no file_versions row",
                     findings=findings,
                 )
             )
             continue
-        for source_id, fund_ticker, as_of_date, status in versions:
+        for fund_ticker, as_of_date, status in versions:
             if status == "excluded":
                 continue
             inconsistent_files.append(
                 InconsistentFile(
                     fund_ticker=fund_ticker,
                     as_of_date=as_of_date,
-                    source_id=source_id,
-                    sha256=sha,
+                    source_id=key[1],
+                    sha256=key[0],
                     reason=f"errored but not excluded (status={status})",
                     findings=findings,
                 )
@@ -405,6 +614,17 @@ def summarize(
             entry.source_id,
             entry.sha256,
         )
+    )
+
+    metrics = _metrics_summary(
+        con=con,
+        metadata=metadata,
+        inputs=inputs,
+        versions_by_input=versions_by_input,
+        metrics_findings=metrics_findings,
+        metrics_sources=metrics_sources,
+        event_info=event_info,
+        counts=metric_counts,
     )
 
     try:
@@ -422,7 +642,6 @@ def summarize(
         return _missing_tables()
 
     shares = _share_rows(shares_frame)
-    metadata = _source_metadata(con)
 
     by_quality_issuer: dict[str, dict[str, list[float]]] = {kind: {} for kind in _QUALITY_KINDS}
     worst_by_quality_fund: dict[str, dict[str, UnmatchedShare]] = {
@@ -478,6 +697,111 @@ def summarize(
         unmatched_quality=tuple(quality_summaries),
         max_unmatched_share=max_unmatched_share,
         unmatched_over_threshold=over_threshold,
+        metrics=metrics,
+    )
+
+
+def _metrics_summary(
+    *,
+    con: duckdb.DuckDBPyConnection,
+    metadata: dict[str, tuple[str, str, str]],
+    inputs: dict[tuple[str, str], _Input],
+    versions_by_input: dict[tuple[str, str], list[tuple[str, date | None, str]]],
+    metrics_findings: dict[tuple[str, str], list[tuple[str, str, str]]],
+    metrics_sources: set[str],
+    event_info: dict[tuple[str, str], tuple[str, str, date | None]],
+    counts: dict[str, int],
+) -> MetricsSummary:
+    """Build the fund-metrics section of the summary (D66, interfaces wave 06 §4).
+
+    A metrics input is one raw file parsed for one metrics source. Its versions
+    may span many dates (a NAV history), so inclusion is accounted per input
+    while findings, funds and the latest date per issuer come from the rows.
+    An errored input passes only when its versions are all excluded; an errored
+    input with no version at all (a metrics parser failure recorded against the
+    raw file's source) is inconsistent, because nothing was excluded.
+    """
+    metric_keys = {key for key in inputs if key[1] in metrics_sources} | set(metrics_findings)
+    excluded: list[MetricsFile] = []
+    inconsistent: list[InconsistentMetricsFile] = []
+    files_included = 0
+    files_excluded = 0
+    for key in sorted(metric_keys):
+        # A finding can be recorded against the raw file's own source (a
+        # metrics parser failure): the versions under that key are holdings
+        # versions, so no metrics input exists for it.
+        entry = inputs.get(key) if key[1] in metrics_sources else None
+        findings = tuple(sorted(metrics_findings.get(key, [])))
+        has_error = any(severity == "error" for _check, severity, _detail in findings)
+        has_included = entry is not None and "included" in entry.statuses
+        has_excluded = entry is not None and "excluded" in entry.statuses
+        if entry is not None:
+            if has_included:
+                files_included += 1
+            elif has_excluded:
+                files_excluded += 1
+            if has_excluded:
+                excluded.append(
+                    MetricsFile(
+                        source_id=entry.source_id,
+                        fund_tickers=tuple(sorted(entry.fund_tickers)),
+                        as_of_date=max(entry.dates) if entry.dates else None,
+                        versions=entry.versions,
+                        findings=findings,
+                    )
+                )
+        if not has_error or (has_excluded and not has_included):
+            continue
+        if entry is None:
+            fund_ticker, source_id, as_of_date = event_info[key]
+            inconsistent.append(
+                InconsistentMetricsFile(
+                    source_id=source_id,
+                    fund_tickers=(fund_ticker,),
+                    as_of_date=as_of_date,
+                    versions=0,
+                    reason="errored metrics file has no file_versions row",
+                    findings=findings,
+                )
+            )
+            continue
+        inconsistent.append(
+            InconsistentMetricsFile(
+                source_id=entry.source_id,
+                fund_tickers=tuple(sorted(entry.fund_tickers)),
+                as_of_date=max(entry.dates) if entry.dates else None,
+                versions=entry.versions,
+                reason="errored but not excluded (status=included)",
+                findings=findings,
+            )
+        )
+    excluded.sort(key=_metrics_file_sort_key)
+    inconsistent.sort(key=_metrics_file_sort_key)
+
+    funds, latest_by_issuer = _metrics_universe(con, metadata)
+    return MetricsSummary(
+        files_included=files_included,
+        files_excluded=files_excluded,
+        excluded_files=tuple(excluded),
+        inconsistent_files=tuple(inconsistent),
+        funds=funds,
+        latest_by_issuer=latest_by_issuer,
+        errors=counts.get("error", 0),
+        warnings=counts.get("warning", 0),
+        infos=counts.get("info", 0),
+    )
+
+
+def _metrics_file_sort_key(
+    entry: MetricsFile | InconsistentMetricsFile,
+) -> tuple[str, tuple[str, ...], date, int, tuple[tuple[str, str, str], ...]]:
+    """Deterministic order for metrics entries, independent of insertion order."""
+    return (
+        entry.source_id,
+        entry.fund_tickers,
+        entry.as_of_date or date.min,
+        entry.versions,
+        entry.findings,
     )
 
 
@@ -490,6 +814,49 @@ def _render_share(line_prefix: str, row: UnmatchedShare) -> str:
         f"{line_prefix}{row.fund_ticker} as_of={row.as_of_date.isoformat()} "
         f"source={row.source_id} share={row.share:.2%}"
     )
+
+
+def _render_metrics_file(
+    entry: MetricsFile | InconsistentMetricsFile,
+) -> str:
+    as_of = entry.as_of_date.isoformat() if entry.as_of_date is not None else "-"
+    return (
+        f"as_of={as_of} source={entry.source_id} "
+        f"funds={','.join(entry.fund_tickers)} versions={entry.versions}"
+    )
+
+
+def _render_metrics(metrics: MetricsSummary) -> list[str]:
+    """The fund-metrics health section (D66)."""
+    total = metrics.files_included + metrics.files_excluded
+    lines = [
+        "fund metrics:",
+        f"  files: {total} total ({metrics.files_included} included, "
+        f"{metrics.files_excluded} excluded)",
+        f"  funds with metrics: {len(metrics.funds)}",
+    ]
+    if metrics.latest_by_issuer:
+        lines.append("  latest as-of per issuer:")
+        lines.extend(
+            f"    {issuer} {latest.isoformat()}" for issuer, latest in metrics.latest_by_issuer
+        )
+    else:
+        lines.append("  latest as-of per issuer: none")
+    lines.append(
+        f"  findings: {metrics.errors} error(s), {metrics.warnings} warning(s), "
+        f"{metrics.infos} info(s)"
+    )
+    if metrics.excluded_files:
+        lines.append("  excluded files:")
+        for entry in metrics.excluded_files:
+            lines.append(f"    {_render_metrics_file(entry)}")
+            lines.extend(_render_findings("      ", entry.findings))
+    if metrics.inconsistent_files:
+        lines.append("  inconsistent:")
+        for inconsistent in metrics.inconsistent_files:
+            lines.append(f"    {_render_metrics_file(inconsistent)}: {inconsistent.reason}")
+            lines.extend(_render_findings("      ", inconsistent.findings))
+    return lines
 
 
 def render(summary: QaSummary) -> str:
@@ -556,13 +923,14 @@ def render(summary: QaSummary) -> str:
             lines.extend(_render_share("  ", row) for row in summary.unmatched_over_threshold)
         else:
             lines.append(f"unmatched threshold {threshold}: no included daily file exceeds it")
+    lines.extend(_render_metrics(summary.metrics))
     return "\n".join(lines) + "\n"
 
 
 def exit_code(summary: QaSummary) -> int:
     """1 when tables are missing or the database is inconsistent, 3 when the
     unmatched threshold is exceeded, 0 otherwise."""
-    if summary.tables_missing or summary.inconsistent_files:
+    if summary.tables_missing or summary.inconsistent_files or summary.metrics.inconsistent_files:
         return 1
     if summary.unmatched_over_threshold:
         return 3
