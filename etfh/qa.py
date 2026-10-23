@@ -30,6 +30,9 @@ from statistics import median
 
 import duckdb
 import polars as pl
+from polars.datatypes import DataType, DataTypeClass
+
+from etfh import analytics
 
 __all__ = [
     "ExcludedFile",
@@ -51,6 +54,23 @@ _QUALITY_QUARTERLY = "quarterly"
 # Fixed order: the report must not depend on dict or database row order.
 _QUALITY_KINDS = (_QUALITY_DAILY, _QUALITY_QUARTERLY)
 _MAX_WORST_FUNDS = 10
+_NON_SECURITY_CLASSES = ("cash", "fx", "derivative")
+_SHARE_COLUMNS = (
+    "fund_ticker",
+    "as_of_date",
+    "source_id",
+    "unmatched_weight",
+    "total_weight",
+    "share",
+)
+_SHARE_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "source_id": pl.String,
+    "unmatched_weight": pl.Float64,
+    "total_weight": pl.Float64,
+    "share": pl.Float64,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,18 +138,30 @@ def _missing_tables() -> QaSummary:
     return QaSummary(tables_missing=True)
 
 
-def unmatched_shares(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
-    """Unmatched non-cash weight share per included fund/as-of/source.
+def unmatched_shares(con: duckdb.DuckDBPyConnection, asof: date | None = None) -> pl.DataFrame:
+    """Unmatched non-cash weight share per included file version.
 
-    For every ``(fund_ticker, as_of_date, source_id)`` the latest included
-    ``file_version`` is used (the version analytics select for that date, so a
-    republished file is measured once, not accumulated). ``unmatched`` is the
-    sum of ``abs(weight)`` over rows with a null ``security_id`` whose
-    ``asset_class`` is not one of cash/fx/derivative; ``total`` is the same sum
-    over every non-cash/fx/derivative row. The share is 0 when the total is 0.
-    Returns the columns ``fund_ticker, as_of_date, source_id,
-    unmatched_weight, total_weight, share``.
+    Without ``asof``, every ``(fund_ticker, as_of_date, source_id)`` uses its
+    latest included ``file_version`` (so a republished file is measured once,
+    not accumulated). With ``asof``, the frame instead holds one row per fund
+    for exactly the version :func:`etfh.analytics.holdings_asof` selects: only
+    versions whose ``known_at`` is before ``cutoff_utc(asof)`` compete, daily
+    holdings win over quarterly disclosures (D42, D53), then the latest
+    ``as_of_date`` and the highest ``file_version``. Reading the selected rows
+    from analytics keeps the two views in lockstep, so a file republished after
+    ``asof`` cannot change the share reported for that date. Like analytics, the
+    ``asof`` path needs the build's additive ``sources`` table (D53), which
+    every build writes.
+
+    In both cases ``unmatched`` is the sum of ``abs(weight)`` over rows with a
+    null ``security_id`` whose ``asset_class`` is not one of
+    cash/fx/derivative, and ``total`` is the same sum over every
+    non-cash/fx/derivative row. The share is 0 when the total is 0. Returns the
+    columns ``fund_ticker, as_of_date, source_id, unmatched_weight,
+    total_weight, share``.
     """
+    if asof is not None:
+        return _unmatched_shares_asof(con, asof)
     rows = con.execute(
         """
         WITH latest AS (
@@ -163,14 +195,38 @@ def unmatched_shares(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         .then(pl.col("unmatched_weight") / pl.col("total_weight"))
         .otherwise(0.0)
         .alias("share")
-    ).select(
-        "fund_ticker",
-        "as_of_date",
-        "source_id",
-        "unmatched_weight",
-        "total_weight",
-        "share",
+    ).select(_SHARE_COLUMNS)
+
+
+def _unmatched_shares_asof(con: duckdb.DuckDBPyConnection, asof: date) -> pl.DataFrame:
+    """One row per fund for the version analytics selects as of ``asof``."""
+    rows: list[dict[str, object]] = []
+    for fund in analytics.funds_available(con):
+        selected = analytics.holdings_asof(con, fund, asof)
+        if selected.is_empty():
+            continue
+        rows.append(_asof_share_row(selected))
+    return pl.DataFrame(rows, schema=_SHARE_SCHEMA)
+
+
+def _asof_share_row(selected: pl.DataFrame) -> dict[str, object]:
+    """The unmatched share of one analytics-selected holdings frame."""
+    securities = selected.filter(
+        ~pl.col("asset_class").str.to_lowercase().is_in(_NON_SECURITY_CLASSES)
     )
+    unmatched_weight = float(
+        securities.filter(pl.col("security_id").is_null())["weight"].abs().sum()
+    )
+    total_weight = float(securities["weight"].abs().sum())
+    first = selected.row(0, named=True)
+    return {
+        "fund_ticker": str(first["fund_ticker"]),
+        "as_of_date": first["as_of_date"],
+        "source_id": str(first["source_id"]),
+        "unmatched_weight": unmatched_weight,
+        "total_weight": total_weight,
+        "share": unmatched_weight / total_weight if total_weight > 0 else 0.0,
+    }
 
 
 def _source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, str, str]]:

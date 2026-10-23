@@ -12,6 +12,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from etfh import analytics
 from etfh.qa import (
     QaSummary,
     UnmatchedQuality,
@@ -64,10 +65,11 @@ def _file_version(
     as_of: date = AS_OF,
     status: str = "included",
     version: int = 1,
+    known_at: datetime = NOW,
 ) -> None:
     con.execute(
         "INSERT INTO file_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [source, fund, as_of, version, NOW, sha, f"raw/{sha}.csv", status],
+        [source, fund, as_of, version, known_at, sha, f"raw/{sha}.csv", status],
     )
 
 
@@ -102,13 +104,14 @@ def _holding(
     asset_class: str = "equity",
     weight: float = 0.01,
     name: str | None = None,
+    known_at: datetime = NOW,
 ) -> None:
     con.execute(
         "INSERT INTO holdings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             fund,
             as_of,
-            NOW,
+            known_at,
             version,
             security_id,
             name or f"Synthetic Name {index:02d}",
@@ -307,10 +310,13 @@ def test_unmatched_shares_empty_tables(tmp_path: Path) -> None:
     frame = unmatched_shares(con)
     assert frame.columns == _SHARE_COLUMNS
     assert frame.is_empty()
+    asof_frame = unmatched_shares(con, AS_OF)
+    assert asof_frame.columns == _SHARE_COLUMNS
+    assert asof_frame.is_empty()
 
 
 def test_share_is_zero_when_only_non_security_rows_exist(tmp_path: Path) -> None:
-    con = _connect(tmp_path)
+    con = _connect(tmp_path, sources=True)
     _file_version(con, SHA_A)
     _holding(con, 0, security_id=None, asset_class="cash", weight=0.6)
     _holding(con, 1, security_id=None, asset_class="fx", weight=-0.4)
@@ -320,6 +326,170 @@ def test_share_is_zero_when_only_non_security_rows_exist(tmp_path: Path) -> None
     assert row["unmatched_weight"] == 0.0
     assert row["total_weight"] == 0.0
     assert row["share"] == 0.0
+    asof_row = unmatched_shares(con, date(2026, 11, 4)).row(0, named=True)
+    assert asof_row["unmatched_weight"] == 0.0
+    assert asof_row["total_weight"] == 0.0
+    assert asof_row["share"] == 0.0
+
+
+def _versioned_share(
+    con: duckdb.DuckDBPyConnection,
+    sha: str,
+    *,
+    fund: str = "SYNA",
+    source: str = "syn_csv",
+    as_of: date = AS_OF,
+    version: int = 1,
+    known_at: datetime = NOW,
+    unmatched: float = 0.4,
+    matched: float = 0.5,
+) -> None:
+    """One included file version with an unmatched and a matched row."""
+    _file_version(
+        con,
+        sha,
+        fund=fund,
+        source=source,
+        as_of=as_of,
+        version=version,
+        known_at=known_at,
+    )
+    _holding(
+        con,
+        0,
+        security_id=None,
+        fund=fund,
+        source=source,
+        as_of=as_of,
+        sha=sha,
+        version=version,
+        known_at=known_at,
+        weight=unmatched,
+    )
+    _holding(
+        con,
+        1,
+        security_id="ISIN:CA600000AA15",
+        fund=fund,
+        source=source,
+        as_of=as_of,
+        sha=sha,
+        version=version,
+        known_at=known_at,
+        weight=matched,
+    )
+
+
+def test_unmatched_shares_asof_uses_only_the_version_known_by_then(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_csv", issuer="synthetic", kind="daily_holdings")
+    _versioned_share(
+        con,
+        SHA_A,
+        version=1,
+        known_at=datetime(2026, 11, 2, 22, tzinfo=UTC),
+        unmatched=0.4,
+        matched=0.5,
+    )
+    _versioned_share(
+        con,
+        SHA_D,
+        version=2,
+        known_at=datetime(2026, 11, 5, 22, tzinfo=UTC),
+        unmatched=0.9,
+        matched=0.1,
+    )
+    latest = unmatched_shares(con)
+    assert latest.height == 1
+    assert latest["share"][0] == pytest.approx(0.9)
+    before_republish = unmatched_shares(con, date(2026, 11, 4))
+    assert before_republish.height == 1
+    row = before_republish.row(0, named=True)
+    assert row["as_of_date"] == AS_OF
+    assert row["source_id"] == "syn_csv"
+    assert row["unmatched_weight"] == pytest.approx(0.4)
+    assert row["total_weight"] == pytest.approx(0.9)
+    assert row["share"] == pytest.approx(0.4 / 0.9)
+    # The version chosen is the one analytics uses for the same date.
+    selected = analytics.holdings_asof(con, "SYNA", date(2026, 11, 4))
+    assert selected["raw_file_sha256"].unique().to_list() == [SHA_A]
+    after_republish = unmatched_shares(con, date(2026, 11, 6))
+    assert after_republish["share"][0] == pytest.approx(0.9)
+
+
+def test_unmatched_shares_asof_keeps_the_latest_portfolio_date_known_by_then(
+    tmp_path: Path,
+) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_csv", issuer="synthetic", kind="daily_holdings")
+    _versioned_share(
+        con,
+        SHA_A,
+        as_of=date(2026, 11, 2),
+        known_at=datetime(2026, 11, 2, 22, tzinfo=UTC),
+        unmatched=0.2,
+        matched=0.8,
+    )
+    _versioned_share(
+        con,
+        SHA_D,
+        as_of=date(2026, 11, 3),
+        known_at=datetime(2026, 11, 10, 22, tzinfo=UTC),
+        unmatched=0.7,
+        matched=0.3,
+    )
+    before = unmatched_shares(con, date(2026, 11, 4)).row(0, named=True)
+    assert before["as_of_date"] == date(2026, 11, 2)
+    assert before["share"] == pytest.approx(0.2)
+    after = unmatched_shares(con, date(2026, 11, 11)).row(0, named=True)
+    assert after["as_of_date"] == date(2026, 11, 3)
+    assert after["share"] == pytest.approx(0.7)
+
+
+def test_unmatched_shares_asof_follows_the_daily_over_quarterly_priority(
+    tmp_path: Path,
+) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "alpha_daily", issuer="alpha", kind="daily_holdings")
+    _source(con, "alpha_qpd", issuer="alpha", kind="quarterly_disclosure", format="pdf")
+    _versioned_share(
+        con,
+        SHA_A,
+        source="alpha_daily",
+        as_of=date(2026, 10, 30),
+        known_at=datetime(2026, 10, 30, 22, tzinfo=UTC),
+        unmatched=0.1,
+        matched=0.9,
+    )
+    _versioned_share(
+        con,
+        SHA_B,
+        source="alpha_qpd",
+        as_of=date(2026, 9, 30),
+        known_at=datetime(2026, 10, 15, 12, tzinfo=UTC),
+        unmatched=0.9,
+        matched=0.1,
+    )
+    row = unmatched_shares(con, date(2026, 11, 4)).row(0, named=True)
+    assert row["source_id"] == "alpha_daily"
+    assert row["as_of_date"] == date(2026, 10, 30)
+    assert row["share"] == pytest.approx(0.1)
+    selected = analytics.holdings_asof(con, "SYNA", date(2026, 11, 4))
+    assert selected["source_id"].unique().to_list() == ["alpha_daily"]
+
+
+def test_unmatched_shares_asof_skips_a_fund_with_nothing_known_yet(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True)
+    _source(con, "syn_csv", issuer="synthetic", kind="daily_holdings")
+    _versioned_share(
+        con,
+        SHA_A,
+        known_at=datetime(2026, 11, 10, 22, tzinfo=UTC),
+        unmatched=0.4,
+        matched=0.6,
+    )
+    assert unmatched_shares(con, date(2026, 11, 4)).is_empty()
+    assert unmatched_shares(con).height == 1
 
 
 def _unmatched_version(

@@ -32,6 +32,12 @@ reports ``unmatched.csv``, ``fuzzy_proposals.csv`` and ``name_proposals.csv``.
 Name proposals come from identifier-backed rows in this build only; approving
 one is a separate human action (D54).
 
+A few parser notes explain how a file was read rather than what it contains
+(``partial_list``, ``weight_capped_percent``, ``commodity_quantity``,
+``exchange_codes``). Those are kept as ``qa_events`` ``info`` rows, one per
+note, with the note name as the check and its value as the detail; other notes
+stay on the parsed file only. They never change a file's status.
+
 Every table is sorted on a documented key before writing (D15):
 
 - ``file_versions``: source_id, fund_ticker, as_of_date, file_version
@@ -81,6 +87,20 @@ if TYPE_CHECKING:
 __all__ = ["CHANGE_THRESHOLD", "NAME_PROPOSAL_COLUMNS", "BuildResult", "build", "connect"]
 
 CHANGE_THRESHOLD = 0.001
+
+#: Parser notes the build keeps as ``qa_events`` ``info`` rows. They record how
+#: a file was interpreted (a source-declared partial list, a weight the document
+#: printed above 100%, a physical-quantity commodity line, the exchange codes a
+#: parser had to resolve) without changing the file's status. The note name
+#: becomes the check and the text after the first ``=`` becomes the detail.
+_PERSISTED_NOTES: frozenset[str] = frozenset(
+    {
+        "partial_list",
+        "weight_capped_percent",
+        "commodity_quantity",
+        "exchange_codes",
+    }
+)
 
 DDL_SOURCES = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -412,20 +432,16 @@ def build(
                 "status": "excluded" if excluded else "included",
             }
         )
-        partial_note = next(
-            (note for note in candidate.parsed.notes if note.startswith("partial_list=")),
-            None,
-        )
-        if partial_note is not None:
+        for name, value in _persisted_notes(candidate.parsed.notes):
             qa_rows.append(
                 {
                     "raw_file_sha256": version.raw.sha256,
                     "source_id": version.source_id,
                     "fund_ticker": version.fund_ticker,
                     "as_of_date": version.as_of_date,
-                    "check": "partial_list",
+                    "check": name,
                     "severity": "info",
-                    "detail": partial_note,
+                    "detail": value,
                     "excluded": excluded,
                 }
             )
@@ -542,6 +558,21 @@ def _qa_row(
         "detail": detail,
         "excluded": excluded,
     }
+
+
+def _persisted_notes(notes: Iterable[str]) -> list[tuple[str, str]]:
+    """``(check, detail)`` for the parser notes the build keeps as info events.
+
+    Only the names in :data:`_PERSISTED_NOTES` are selected, matched exactly so
+    a note such as ``partial_list_hint=...`` is not mistaken for ``partial_list``.
+    The detail is the text after the first ``=``.
+    """
+    selected: list[tuple[str, str]] = []
+    for note in notes:
+        name, separator, value = note.partition("=")
+        if separator and name in _PERSISTED_NOTES:
+            selected.append((name, value))
+    return selected
 
 
 def _holdings_frame(frame: pl.DataFrame, *, known_at: datetime, file_version: int) -> pl.DataFrame:

@@ -14,6 +14,7 @@ import pytest
 
 from etfh.build import NAME_PROPOSAL_COLUMNS, BuildResult, build, connect
 from etfh.storage import RawStore
+from etfh.types import ParsedFile
 from tests._build_helpers import CONFIG_DIR, RAW_ROOT, build_fixture_db, copy_raw_files
 
 _SYNA_2026_10_29 = RAW_ROOT / "synthetic" / "SYNA" / "2026-10-29" / "20261029T220000Z.csv"
@@ -317,6 +318,68 @@ def test_partial_list_files_get_an_info_event_not_an_exclusion(
         out_dir,
         "SELECT status FROM file_versions WHERE fund_ticker = 'SYNF'",
     )
+    assert status["status"].to_list() == ["included"]
+
+
+def test_selected_parser_notes_become_info_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The explanatory notes are kept; other notes stay off ``qa_events``."""
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    import etfh.build as build_module
+
+    real_find_parser = build_module.find_parser
+    notes = [
+        "declared_unit=percent",
+        "weight_decimals=2",
+        "partial_list=true",
+        "weight_capped_percent=101",
+        "commodity_quantity=128,450 oz; 10,000 oz",
+        "exchange_codes=CN,LN,US",
+        "partial_list_hint=not a persisted note",
+        "stated_total_fraction=0.82",
+    ]
+
+    def find_parser_with_notes(raw: Any, source: Any) -> Any:
+        parser = real_find_parser(raw, source)
+        assert parser is not None
+
+        class NotesParser:
+            def parse(self, inner_raw: Any) -> ParsedFile:
+                parsed = parser.parse(inner_raw)
+                return ParsedFile(
+                    raw=parsed.raw,
+                    as_of_date=parsed.as_of_date,
+                    published_at=parsed.published_at,
+                    frame=parsed.frame,
+                    notes=notes,
+                )
+
+        return NotesParser()
+
+    monkeypatch.setattr(build_module, "find_parser", find_parser_with_notes)
+    build_fixture_db(tmp_path / "out", raw_root=raw_root)
+    events = _query(
+        tmp_path / "out",
+        'SELECT "check", severity, detail, excluded FROM qa_events ORDER BY "check"',
+    )
+    assert events.rows() == [
+        ("commodity_quantity", "info", "128,450 oz; 10,000 oz", False),
+        ("exchange_codes", "info", "CN,LN,US", False),
+        ("partial_list", "info", "true", False),
+        ("weight_capped_percent", "info", "101", False),
+    ]
+    status = _query(tmp_path / "out", "SELECT status FROM file_versions")
     assert status["status"].to_list() == ["included"]
 
 

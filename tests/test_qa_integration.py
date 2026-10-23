@@ -12,13 +12,16 @@ validation rule changes what it produces for them.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import duckdb
+import polars as pl
 import pytest
 
+from etfh import analytics
 from etfh.build import BuildResult, build
-from etfh.qa import QaSummary, exit_code, render, summarize
+from etfh.qa import QaSummary, exit_code, render, summarize, unmatched_shares
 from etfh.registry import load_sources
 
 FIXTURE_RAW = Path(__file__).resolve().parent / "fixtures" / "raw_synthetic"
@@ -112,3 +115,44 @@ def test_exit_code_is_zero_with_the_two_bad_files_excluded(summary: QaSummary) -
 
 def test_render_matches_the_snapshot(summary: QaSummary) -> None:
     assert render(summary) == EXPECTED_REPORT
+
+
+def test_asof_unmatched_shares_match_the_version_analytics_selects(
+    build_result: BuildResult,
+) -> None:
+    con = duckdb.connect(str(build_result.db_path), read_only=True)
+    try:
+        for asof in (date(2026, 10, 28), date(2026, 10, 29), date(2026, 10, 31), date(2026, 11, 3)):
+            frame = unmatched_shares(con, asof)
+            assert frame.columns == [
+                "fund_ticker",
+                "as_of_date",
+                "source_id",
+                "unmatched_weight",
+                "total_weight",
+                "share",
+            ]
+            funds = analytics.funds_available(con)
+            assert frame["fund_ticker"].n_unique() == frame.height
+            for fund in funds:
+                selected = analytics.holdings_asof(con, fund, asof)
+                match = frame.filter(pl.col("fund_ticker") == fund)
+                if selected.is_empty():
+                    assert match.is_empty(), (asof, fund)
+                    continue
+                assert match.height == 1, (asof, fund)
+                securities = selected.filter(
+                    ~pl.col("asset_class").str.to_lowercase().is_in(["cash", "fx", "derivative"])
+                )
+                unmatched = float(
+                    securities.filter(pl.col("security_id").is_null())["weight"].abs().sum()
+                )
+                total = float(securities["weight"].abs().sum())
+                row = match.row(0, named=True)
+                assert row["as_of_date"] == selected["as_of_date"][0]
+                assert row["source_id"] == selected["source_id"][0]
+                assert row["unmatched_weight"] == pytest.approx(unmatched)
+                assert row["total_weight"] == pytest.approx(total)
+                assert row["share"] == pytest.approx(unmatched / total if total else 0.0)
+    finally:
+        con.close()
