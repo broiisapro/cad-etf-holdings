@@ -16,6 +16,7 @@ from etfh.collect.purpose_evolve_qpd import (
     PurposeQpdCollector,
     evolve_disclosure_links,
     evolve_disclosure_url,
+    purpose_disclosure_entries,
     purpose_disclosure_url,
 )
 from etfh.collect.registry import CollectError
@@ -35,6 +36,14 @@ PURPOSE_SLUG = "purpose-fictional-dividend-fund"
 PURPOSE_PDF = (
     "https://documents.purposeinvest.com/Docs/PDF/quarterly_portfolio_disclosure/en/"
     "Purpose%20Fictional%20Dividend%20Fund%20Quarterly%20Portfolio%20Disclosure%202026-06-30.pdf"
+)
+PURPOSE_OLD_PDF = (
+    "https://documents.purposeinvest.com/Docs/PDF/quarterly_portfolio_disclosure/en/"
+    "Purpose%20Fictional%20Dividend%20Fund%20Quarterly%20Portfolio%20Disclosure%202025-09-30.pdf"
+)
+PURPOSE_NEW_PDF = (
+    "https://documents.purposeinvest.com/Docs/PDF/quarterly_portfolio_disclosure/en/"
+    "Purpose%20Fictional%20Dividend%20Fund%20Quarterly%20Portfolio%20Disclosure%202026-03-31.pdf"
 )
 EVOLVE_PRODUCT_PATH = "/product/CYBX/"
 EVOLVE_OLD = (
@@ -504,3 +513,117 @@ def test_evolve_fetch_historical_reads_the_page_once(tmp_path: Path, fake_clock:
     finally:
         client.close()
     assert page_calls == 1
+
+
+def _purpose_history_payload() -> dict[str, object]:
+    return {
+        "documents": {
+            "fund": [
+                {
+                    "quarterly_portfolio_disclosure": {
+                        "dt": "2025-09-30",
+                        "url": PURPOSE_OLD_PDF,
+                    }
+                },
+                {
+                    "quarterly_portfolio_disclosure": {
+                        "dt": "2026-03-31",
+                        "url": PURPOSE_NEW_PDF,
+                    }
+                },
+            ],
+            "series": [],
+        }
+    }
+
+
+def test_purpose_fetch_historical_reads_the_documents_list(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    pdfs = {
+        PURPOSE_OLD_PDF: write_purpose_lookalike(
+            tmp_path / "purpose-old.pdf", as_of="September 30, 2025"
+        ).read_bytes(),
+        PURPOSE_NEW_PDF: write_purpose_lookalike(
+            tmp_path / "purpose-new.pdf", as_of="March 31, 2026"
+        ).read_bytes(),
+    }
+    json_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal json_calls
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.host == "www.purposeinvest.com":
+            json_calls += 1
+            return httpx.Response(200, json=_purpose_history_payload())
+        if str(request.url) in pdfs:
+            return httpx.Response(
+                200,
+                content=pdfs[str(request.url)],
+                headers={"content-type": "application/pdf"},
+            )
+        return httpx.Response(404)
+
+    collector = PurposeQpdCollector(source=_purpose_source())
+    store = RawStore(tmp_path / "raw")
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        old = collector.fetch_historical(_purpose_fund(), date(2025, 9, 30), client, store)
+        new = collector.fetch_historical(_purpose_fund(), date(2026, 3, 31), client, store)
+        with pytest.raises(CollectError, match="not published.*2025-12-31"):
+            collector.fetch_historical(_purpose_fund(), date(2025, 12, 31), client, store)
+    finally:
+        client.close()
+    assert [raw.url for raw in old] == [PURPOSE_OLD_PDF]
+    assert [raw.url for raw in new] == [PURPOSE_NEW_PDF]
+    assert old[0].as_of_hint == date(2025, 9, 30)
+    assert new[0].as_of_hint == date(2026, 3, 31)
+    assert json_calls == 1
+
+
+def test_purpose_fetch_historical_respects_the_terms_gate(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    collector = PurposeQpdCollector(
+        source=qpd_source("purpose_qpd", issuer="purpose", decision=Decision.not_allowed)
+    )
+    client = _client(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(TermsNotAllowedError, match="skipped: terms"):
+            collector.fetch_historical(
+                _purpose_fund(), date(2025, 9, 30), client, RawStore(tmp_path)
+            )
+    finally:
+        client.close()
+    assert calls == []
+
+
+def test_purpose_disclosure_entries_reads_both_shapes_and_url_dates() -> None:
+    payload = {
+        "documents": {
+            "fund": {
+                "quarterly_portfolio_disclosure": {
+                    "dt": "2026-03-31",
+                    "url": PURPOSE_NEW_PDF,
+                }
+            },
+            "series": [
+                {
+                    "quarterly_portfolio_disclosure": {
+                        "url": PURPOSE_OLD_PDF,
+                    }
+                }
+            ],
+        }
+    }
+    assert purpose_disclosure_entries(payload) == [
+        (date(2025, 9, 30), PURPOSE_OLD_PDF),
+        (date(2026, 3, 31), PURPOSE_NEW_PDF),
+    ]
+    assert purpose_disclosure_entries({"documents": {}}) == []
+    assert purpose_disclosure_entries([]) == []

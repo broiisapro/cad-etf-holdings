@@ -17,6 +17,8 @@ from tests._qpd_helpers import (
     write_backfill_config,
     write_evolve_lookalike,
     write_globalx_lookalike,
+    write_purpose_lookalike,
+    write_vanguard_lookalike,
 )
 from tests.conftest import FakeClock
 
@@ -428,3 +430,117 @@ def test_fund_filter_and_unknown_ticker(tmp_path: Path, fake_clock: FakeClock) -
             )
     finally:
         client.close()
+
+
+def test_backfill_purpose_reads_the_fund_document_index(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    old = (
+        "https://documents.purposeinvest.com/Docs/PDF/quarterly_portfolio_disclosure/en/"
+        "Purpose%20Fictional%20PDF%20Fund%20Quarterly%20Portfolio%20Disclosure%202025-09-30.pdf"
+    )
+    new = (
+        "https://documents.purposeinvest.com/Docs/PDF/quarterly_portfolio_disclosure/en/"
+        "Purpose%20Fictional%20PDF%20Fund%20Quarterly%20Portfolio%20Disclosure%202026-03-31.pdf"
+    )
+    payload = {
+        "documents": {
+            "fund": [
+                {"quarterly_portfolio_disclosure": {"dt": "2025-09-30", "url": old}},
+                {"quarterly_portfolio_disclosure": {"dt": "2026-03-31", "url": new}},
+            ],
+            "series": [],
+        }
+    }
+    pdfs = {
+        old: write_purpose_lookalike(tmp_path / "purpose-old.pdf", as_of="September 30, 2025"),
+        new: write_purpose_lookalike(tmp_path / "purpose-new.pdf", as_of="March 31, 2026"),
+    }
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.host == "www.purposeinvest.com":
+            return httpx.Response(200, json=payload)
+        if str(request.url) in pdfs:
+            return httpx.Response(
+                200,
+                content=pdfs[str(request.url)].read_bytes(),
+                headers={"content-type": "application/pdf"},
+            )
+        return httpx.Response(404)
+
+    config = write_backfill_config(
+        tmp_path / "config",
+        source_id="purpose_qpd",
+        issuer="purpose",
+        tickers=["PDF"],
+        params="purpose_slug=purpose-fictional-pdf-fund",
+    )
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        results = backfill_qpd(
+            "purpose",
+            3,
+            tmp_path / "raw",
+            config_dir=config,
+            client=client,
+            today=date(2026, 4, 15),
+        )
+    finally:
+        client.close()
+
+    by_quarter = _by_quarter(results)
+    assert by_quarter[date(2025, 9, 30)].status == "fetched"
+    assert by_quarter[date(2026, 3, 31)].status == "fetched"
+    assert by_quarter[date(2025, 12, 31)].status == "missing"
+    assert "not published" in by_quarter[date(2025, 12, 31)].detail
+    assert calls.count("/api/funds/purpose-fictional-pdf-fund") == 1
+    assert len([path for path in calls if path.endswith(".pdf")]) == 2
+
+
+def test_backfill_vanguard_reports_present_and_missing(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    store = RawStore(tmp_path / "raw")
+    pdf = write_vanguard_lookalike(tmp_path / "vanguard.pdf", as_of="June 30, 2026")
+    seed_qpd_raw(
+        store,
+        pdf,
+        source_id="vanguard_ca_qpd",
+        issuer="vanguard_ca",
+        ticker="VFV",
+        as_of=None,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    config = write_backfill_config(
+        tmp_path / "config",
+        source_id="vanguard_ca_qpd",
+        issuer="vanguard_ca",
+        tickers=["VFV"],
+    )
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        results = backfill_qpd(
+            "vanguard_ca",
+            3,
+            store.root,
+            config_dir=config,
+            client=client,
+            today=date(2026, 10, 23),
+        )
+    finally:
+        client.close()
+    by_quarter = _by_quarter(results)
+    assert by_quarter[date(2026, 6, 30)].status == "present"
+    for end in (date(2026, 3, 31), date(2026, 9, 30)):
+        assert by_quarter[end].status == "missing"
+        assert "not published: Vanguard" in by_quarter[end].detail
+    assert calls == []
