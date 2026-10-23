@@ -25,6 +25,11 @@ Non-security lines (``CASH:``, ``DERIV:``) and unmatched rows (null
 identity. Concentration counts every security row, including unmatched ones:
 they are securities with an unknown identifier, and leaving them out would
 report a names-only quarterly disclosure as an empty portfolio.
+
+Fund metrics (D66, D67) live in their own table and get their own as-of
+functions: ``metrics_asof`` returns the latest known version of each as-of date
+and ``flows`` turns consecutive share counts into estimated flows. They never
+borrow a figure from another date: a missing NAV or shares figure stays null.
 """
 
 from __future__ import annotations
@@ -41,17 +46,24 @@ from etfh.asof import cutoff_utc
 from etfh.types import FileFormat, SourceKind
 
 __all__ = [
+    "FLOW_METHOD",
     "Concentration",
     "FundNotFoundError",
     "OverlapResult",
     "breakdown",
     "changes",
     "concentration",
+    "flows",
     "funds_available",
     "holdings_asof",
+    "metrics_asof",
     "overlap",
     "overlap_matrix",
 ]
+
+#: Label every flow row carries (D67). A flow estimate is not an official
+#: creation/redemption figure: it ignores distributions and in-kind activity.
+FLOW_METHOD = "Δshares × NAV (estimate; ignores distributions and in-kind effects)"
 
 _NON_SECURITY_PREFIXES = ("CASH:", "DERIV:")
 _NON_SECURITY_CLASSES = ("cash", "fx", "derivative")
@@ -242,6 +254,53 @@ def overlap_matrix(
     return pl.DataFrame(
         rows, schema={"fund_a": pl.String, "fund_b": pl.String, "overlap": pl.Float64}
     )
+
+
+def metrics_asof(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> pl.DataFrame:
+    """Fund-metrics history for ``fund`` as known on ``asof``.
+
+    One row per ``as_of_date``: the latest known version of that date (D20:
+    highest ``known_at``, then ``file_version``, then ``source_id``). Rows are
+    ordered by ``as_of_date`` and keep the ``fund_metrics`` columns, so callers
+    can read ``nav_per_unit``, ``shares_outstanding``, ``aum`` and ``currency``
+    exactly as the source published them (nulls stay null, D67). Only versions
+    with ``known_at`` strictly before ``cutoff_utc(asof)`` are visible (D30).
+
+    Raises :class:`FundNotFoundError` when the database has no metrics rows for
+    ``fund`` at all; returns an empty frame when the fund exists but nothing is
+    known by ``asof``.
+    """
+    raise NotImplementedError("fund-metrics analytics are implemented in issue 151")
+
+
+def flows(
+    con: duckdb.DuckDBPyConnection,
+    fund: str,
+    start: date,
+    end: date,
+    *,
+    asof: date | None = None,
+) -> pl.DataFrame:
+    """Estimated daily creation/redemption flows for ``fund`` (D67, FR-2.1).
+
+    Columns, one row per metrics date in ``[start, end]``:
+
+    - ``as_of_date``, ``shares_outstanding``, ``nav_per_unit`` — the figures of
+      that date, from the same row (never mixed across dates);
+    - ``prev_as_of_date``, ``prev_shares`` — the previous as-of date that has a
+      shares figure; dates without one are skipped when looking back, never
+      forward-filled;
+    - ``gap_days`` — business days (Mon–Fri) between the two dates, so a normal
+      weekend is 1 and a missing business day is more than 1;
+    - ``flow_estimate`` — ``(shares - prev_shares) * nav_per_unit``, null when
+      any input is missing;
+    - ``method`` — :data:`FLOW_METHOD` on every row.
+
+    ``asof`` defaults to ``end``: the result uses only versions known by then,
+    so a republished metrics file becomes visible only on its own ``known_at``.
+    Raises :class:`FundNotFoundError` when the fund has no metrics rows at all.
+    """
+    raise NotImplementedError("fund-metrics analytics are implemented in issue 151")
 
 
 def changes(con: duckdb.DuckDBPyConnection, fund: str, start: date, end: date) -> pl.DataFrame:
