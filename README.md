@@ -4,7 +4,7 @@ cad-etf-holdings collects the portfolio holdings Canadian ETF issuers publish, n
 
 ![Dashboard overlap view: two synthetic funds share 24.84% of their portfolios](docs/img/overlap.png)
 
-Status: Phase 1 release candidate. The pipeline runs end to end on the committed synthetic fixtures and on live files from the approved sources; the public release waits for the final scheduled-collection checks.
+Status: Phase 2 in progress. The pipeline runs end to end on the committed synthetic fixtures and on live files from the approved sources; flows and quarterly backfill are implemented, and the public release waits for the final scheduled-collection checks.
 
 ## What it does
 
@@ -13,6 +13,7 @@ Status: Phase 1 release candidate. The pipeline runs end to end on the committed
 - **Keeps it point-in-time.** Every distinct file content is a version with a `known_at` timestamp; analytics for a date use only files known by then, and a republished file becomes a new version instead of overwriting the old one.
 - **Detects changes.** Adds, drops and weight changes between consecutive portfolio dates, per fund.
 - **Measures overlap and concentration.** Pairwise overlap (`Σ min(wᵢ, wⱼ)`), top-10 weight, Herfindahl index, holding counts and sector/country breakdowns, shown in a Streamlit dashboard and available through the CLI and derived-aggregate exports.
+- **Estimates flows and recovers history.** Daily NAV per unit, shares outstanding and AUM become creation/redemption flow estimates, and historical quarterly disclosures extend the holdings panel backwards.
 
 ## Responsible collection
 
@@ -54,6 +55,7 @@ uv run streamlit run streamlit_app.py
 
 ```bash
 uv run etfh collect --date today --raw ./raw     # logs one line per fund/source; terms-refused sources print "skipped: terms"
+uv run etfh collect-aum --date today --raw ./raw # daily NAV, shares outstanding and AUM (Phase 2)
 uv run etfh build --raw ./raw --out ./build      # add --openfigi for cached composite FIGI ids
 uv run etfh qa --db ./build/etfh.duckdb          # exit 0 only when every errored file is excluded and reported
 ```
@@ -67,11 +69,26 @@ uv run etfh review approve --db ./build/etfh.duckdb --confidence exact \
 uv run etfh build --raw ./raw --out ./build      # overrides take effect on the next build
 ```
 
-`etfh qa --max-unmatched-share X` turns the unmatched weight share into a gate and exits 3 when an included daily file exceeds it (quarterly top-holdings lists are not held to it). `ops/run_collect.sh` runs the whole pass daily (it loads `.env` itself), and `ops/install_launchd.sh` installs that script as a launchd job; the job's exit status is QA's status.
+`etfh qa --max-unmatched-share X` turns the unmatched weight share into a gate and exits 3 when an included daily file exceeds it (quarterly top-holdings lists are not held to it). `ops/run_collect.sh` runs collect → collect-aum → build → qa in one pass (it loads `.env` itself), and `ops/install_launchd.sh` installs it behind a 30-minute daily guard: launchd polls every 30 minutes and at login, and the guard runs the pass at most once per local day after 18:00 (or immediately after a missed day), so a sleeping laptop still collects. The job's exit status is QA's status.
+
+## Phase 2: estimated flows and disclosure history
+
+```bash
+uv run etfh collect-aum --date today --raw ./raw     # NAV, shares outstanding and AUM only
+uv run etfh build --raw ./raw --out ./build          # writes the additive fund_metrics table
+uv run etfh flows --fund ZSP --from 2026-10-01 --to 2026-10-23 --db ./build/etfh.duckdb
+uv run etfh flows --fund PDF --from 2026-10-01 --to 2026-10-23 --db ./build/etfh.duckdb --json
+uv run etfh backfill-qpd --issuer globalx_ca --quarters 8 --raw ./raw
+```
+
+- **Metrics.** `collect-aum` runs only `fund_metrics` sources, through the same terms gate as `collect`. BMO publishes net assets and shares outstanding on its ETF factsheet PDFs; Evolve states NAV and total net assets on its product pages (units are derived from the two and flagged); `purpose_metrics` has no collector and is derived from the `purpose_daily` files already in the raw store. Vanguard and Global X have no static, non-JavaScript metrics source and stay `supported: false` (D65).
+- **Flow estimate (FR-2.1).** `etfh flows` prints `flow = (shares_t − shares_prev) × NAV_t`, where both figures come from the same fund and as-of date and `shares_prev` is the previous as-of date that has a share count — never a forward-filled value. A gap of more than one business day is flagged with `gap_days`. Every row, the table footer and the JSON carry the method label `Δshares × NAV (estimate; ignores distributions and in-kind effects)` (D67).
+- **Backfill (FR-2.2).** `etfh backfill-qpd` walks the issuer's own disclosure listing for the last N calendar quarter-ends and reports every fund-quarter as `fetched`, `present` (already in the raw store) or `missing` with a reason; nothing is guessed and a missing quarter does not fail the command (D68).
+- **As-of aware.** `fund_metrics` rows are versioned by SHA and `known_at` exactly like holdings, `etfh qa` has a "fund metrics" section, and `etfh qa --asof D` measures unmatched weight on the versions known by `D`.
 
 ## Architecture
 
-One deterministic pipeline: collectors write every downloaded file unmodified into a raw store with a SHA-256 sidecar; per-issuer parsers declare their weight unit and produce the frozen holdings schema; validation and the security master turn that into the included `holdings` table plus `qa_events`; the build writes DuckDB and parquet, file versions, the additive `sources` table and change detection; analytics reads only what was known by the requested date and feeds the CLI, the Streamlit dashboard and derived exports. The raw store is the source of truth and the build is always from scratch, so results are reproducible and auditable. The full design, package layout and decision records are in [`docs/architecture.md`](docs/architecture.md); per-epic detail is in [`docs/epic-00-foundation.md`](docs/epic-00-foundation.md), [`docs/epic-01-pipeline-core.md`](docs/epic-01-pipeline-core.md) and [`docs/epic-02-real-data-integration.md`](docs/epic-02-real-data-integration.md).
+One deterministic pipeline: collectors write every downloaded file unmodified into a raw store with a SHA-256 sidecar; per-issuer parsers declare their weight unit and produce the frozen holdings schema; validation and the security master turn that into the included `holdings` table plus `qa_events`; the build writes DuckDB and parquet, file versions, the additive `sources` and `fund_metrics` tables and change detection; analytics reads only what was known by the requested date and feeds the CLI, the Streamlit dashboard and derived exports. The raw store is the source of truth and the build is always from scratch, so results are reproducible and auditable. The full design, package layout and decision records are in [`docs/architecture.md`](docs/architecture.md); per-epic detail is in [`docs/epic-00-foundation.md`](docs/epic-00-foundation.md), [`docs/epic-01-pipeline-core.md`](docs/epic-01-pipeline-core.md), [`docs/epic-02-real-data-integration.md`](docs/epic-02-real-data-integration.md) and [`docs/epic-04-flows-and-history.md`](docs/epic-04-flows-and-history.md).
 
 ## Data quality
 
@@ -86,9 +103,11 @@ One deterministic pipeline: collectors write every downloaded file unmodified in
 - **Quarterly disclosures are top holdings only.** They are analysed as `partial` and labelled "top holdings only" in the dashboard; they never mix into a fund's daily series.
 - **Name-only issuers stay partly unmatched.** Exact name proposals have been reviewed and committed, but fuzzy matches require a human decision per name.
 - **OpenFIGI is optional and off by default.** Without `--openfigi`, ticker-only and ISIN issuers share fewer ids; with it, a cold cache needs network access.
-- **No history before collection started.** Historical backfill from older disclosures is Phase 2, not Phase 1.
+- **Flows are estimates, not cash flows.** `(Δshares × NAV)` ignores distributions, in-kind creations and redemptions, and fee timing; every output carries that label (D67). Funds with a single metrics date have no previous share count yet, so no flow is printed for that date.
+- **Metrics coverage follows static sources.** BMO factsheet PDFs and Evolve product pages are collected; Purpose metrics are derived from its daily files. Vanguard and Global X publish no static metrics source and stay unsupported. A BMO fund whose factsheet is not at the derived URL is reported as a collection error, not silently skipped.
+- **Backfill follows what issuers still publish.** `backfill-qpd` only fetches disclosures an issuer still links (or a documented stable URL pattern); quarters that have disappeared from the listing are reported `missing`, never reconstructed.
 - **Real holdings are not distributed.** Only derived aggregates are shareable; there is no public dataset of individual fund holdings.
-- **Scheduling is local.** Collection currently runs as a launchd job on one Mac; moving it to GitHub Actions is Phase 2.
+- **Scheduling is local.** Collection currently runs as a launchd job on one Mac behind the daily guard; moving it to GitHub Actions (FR-2.3) waits for the public ship.
 - **Research software.** This is an engineering and data-quality project, not investment advice.
 
 ## Licence

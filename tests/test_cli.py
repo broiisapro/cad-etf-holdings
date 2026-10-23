@@ -21,7 +21,7 @@ from etfh.cli import app
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.registry import Source, TermsNotAllowedError, load_sources
-from etfh.types import Decision, RawFile
+from etfh.types import Decision, RawFile, SourceKind
 from tests._build_helpers import CONFIG_DIR, FIXTURES, RAW_ROOT
 
 runner = CliRunner()
@@ -1072,17 +1072,13 @@ def test_review_approve_refuses_to_change_a_reviewed_decision(tmp_path: Path) ->
 
 
 class _FakeMetricsSource:
-    """A ``Source`` stand-in for the metrics commands.
-
-    ``kind`` is a plain string because ``SourceKind.fund_metrics`` is owned by
-    the registry workstream; the CLI compares kinds by value (D66).
-    """
+    """A ``Source`` stand-in for the metrics commands (registry models need a YAML file)."""
 
     def __init__(
         self,
         source_id: str,
         *,
-        kind: str = "fund_metrics",
+        kind: SourceKind = SourceKind.fund_metrics,
         issuer: str = "fake",
         decision: Decision = Decision.allowed_with_conditions,
         supported: bool = True,
@@ -1102,7 +1098,7 @@ def test_collect_aum_touches_metrics_sources_only_and_reports_derivations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sources = {
-        "fake_daily": _FakeMetricsSource("fake_daily", kind="daily_holdings"),
+        "fake_daily": _FakeMetricsSource("fake_daily", kind=SourceKind.daily_holdings),
         "purpose_metrics": _FakeMetricsSource("purpose_metrics", issuer="purpose"),
         "bmo_metrics": _FakeMetricsSource("bmo_metrics", issuer="bmo"),
     }
@@ -1196,7 +1192,7 @@ def _flows_fixture() -> pl.DataFrame:
 def test_flows_prints_rows_and_the_method_line(
     fixture_build: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etfh.cli._flows_frame", lambda *args, **kwargs: _flows_fixture())
+    monkeypatch.setattr("etfh.cli.compute_flows", lambda *args, **kwargs: _flows_fixture())
     result = runner.invoke(
         app,
         [
@@ -1226,7 +1222,7 @@ def test_flows_prints_rows_and_the_method_line(
 def test_flows_json_carries_the_method_and_decimal_strings(
     fixture_build: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etfh.cli._flows_frame", lambda *args, **kwargs: _flows_fixture())
+    monkeypatch.setattr("etfh.cli.compute_flows", lambda *args, **kwargs: _flows_fixture())
     result = runner.invoke(
         app,
         [
@@ -1267,7 +1263,7 @@ def test_flows_defaults_asof_to_the_end_and_honours_an_explicit_one(
         seen.append(asof)
         return _flows_fixture()
 
-    monkeypatch.setattr("etfh.cli._flows_frame", fake_flows)
+    monkeypatch.setattr("etfh.cli.compute_flows", fake_flows)
     base = [
         "flows",
         "--fund",
@@ -1290,7 +1286,7 @@ def test_flows_unknown_fund_exits_two(fixture_build: Path, monkeypatch: pytest.M
     def missing(*args: Any, **kwargs: Any) -> Any:
         raise FundNotFoundError("NOPE")
 
-    monkeypatch.setattr("etfh.cli._flows_frame", missing)
+    monkeypatch.setattr("etfh.cli.compute_flows", missing)
     result = runner.invoke(
         app,
         [
@@ -1312,7 +1308,7 @@ def test_flows_unknown_fund_exits_two(fixture_build: Path, monkeypatch: pytest.M
 def test_flows_with_no_rows_still_prints_the_method(
     fixture_build: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etfh.cli._flows_frame", lambda *args, **kwargs: _flows_fixture().clear())
+    monkeypatch.setattr("etfh.cli.compute_flows", lambda *args, **kwargs: _flows_fixture().clear())
     result = runner.invoke(
         app,
         [
@@ -1372,13 +1368,11 @@ def test_backfill_qpd_reports_every_fund_quarter_and_exits_zero(
         raw_root: Path,
         *,
         config_dir: Path,
-        client: PoliteClient,
     ) -> list[Any]:
         captured.update(issuer=issuer, quarters=quarters, raw_root=raw_root, config_dir=config_dir)
         return _backfill_results()
 
-    monkeypatch.setattr("etfh.cli._backfill_qpd", fake_backfill)
-    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    monkeypatch.setattr("etfh.cli.backfill_qpd", fake_backfill)
     result = runner.invoke(
         app,
         [
@@ -1428,7 +1422,11 @@ def test_backfill_qpd_rejects_an_issuer_without_an_approved_source(
             ],
         )
         assert result.exit_code == 2, result.output
-        assert f"no approved quarterly disclosure source for issuer '{issuer}'" in result.output
+        if issuer == "nope":
+            assert "unknown issuer 'nope'" in result.output
+        else:
+            assert "no approved quarterly disclosure source" in result.output
+            assert "ishares_ca_qpd" in result.output
 
 
 def test_backfill_qpd_rejects_zero_quarters(tmp_path: Path) -> None:
@@ -1516,3 +1514,38 @@ def test_qa_asof_feeds_the_max_unmatched_share_threshold(
     assert result.exit_code == 3, result.output
     assert "unmatched threshold 40.00% exceeded by 1 included daily file(s)" in result.output
     assert "SYNA as_of=2026-10-21 source=syn_csv share=50.00%" in result.output
+
+
+def test_collect_skips_metrics_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``collect`` owns holdings; ``collect-aum`` owns fund metrics (D66)."""
+    sources = {
+        "fake_daily": _FakeMetricsSource("fake_daily", kind=SourceKind.daily_holdings),
+        "fake_metrics": _FakeMetricsSource("fake_metrics"),
+    }
+    funds = [_fake_fund("FAKE", ("fake_daily", "fake_metrics"))]
+    lookups: list[str] = []
+    collector = FakeCollector("fake_daily")
+
+    def fake_collector_for(source: Any) -> Any:
+        lookups.append(source.id)
+        return collector
+
+    monkeypatch.setattr("etfh.cli.load_sources", lambda path: sources)
+    monkeypatch.setattr("etfh.cli.load_funds", lambda path, loaded: funds)
+    monkeypatch.setattr("etfh.cli.collector_for", fake_collector_for)
+    monkeypatch.setenv("ETFH_USER_AGENT", "etfh-tests/1 (tests@example.com)")
+    result = runner.invoke(
+        app,
+        [
+            "collect",
+            "--date",
+            "2026-11-02",
+            "--raw",
+            str(tmp_path / "raw"),
+            "--config",
+            str(tmp_path / "config"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip().splitlines() == ["unchanged source=fake_daily fund=FAKE"]
+    assert lookups == ["fake_daily"]

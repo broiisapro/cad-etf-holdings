@@ -41,14 +41,13 @@ Commands:
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 from statistics import median
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -58,7 +57,9 @@ import typer
 from etfh import qa as qa_module
 from etfh.analytics import FundNotFoundError, OverlapResult
 from etfh.analytics import changes as compute_changes
+from etfh.analytics import flows as compute_flows
 from etfh.analytics import overlap as compute_overlap
+from etfh.backfill import BackfillError, backfill_qpd
 from etfh.build import build as run_build
 from etfh.build import connect as connect_duckdb
 from etfh.collect.registry import CollectError, collector_for
@@ -81,9 +82,6 @@ _DEFAULT_OVERRIDES = Path("config") / "security_overrides.csv"
 
 # D67: every flows output carries this label, never a bare number.
 _FLOW_METHOD = "Δshares × NAV (estimate; ignores distributions and in-kind effects)"
-# ``SourceKind.fund_metrics`` (D66). Compared by value while the enum member is
-# still owned by another wave-06 workstream; the constants stay correct.
-_METRICS_KIND = "fund_metrics"
 # Metrics sources with no collector read files another source already stores
 # (interfaces-06 §1: purpose_metrics parses purpose_daily raw files).
 _DERIVED_METRICS = {"purpose_metrics": "purpose_daily"}
@@ -146,6 +144,12 @@ def collect(
     with PoliteClient() as client:
         for fund in sorted(funds, key=lambda fund: fund.ticker):
             for source_id in fund.source_ids:
+                source = sources.get(source_id)
+                # Fund metrics are collected by ``collect-aum`` (D66); the
+                # holdings pass must not touch them, exactly as the metrics
+                # pass ignores holdings sources.
+                if source is not None and _is_metrics_source(source):
+                    continue
                 _collect_pair(fund, source_id, sources, day, client, store)
 
 
@@ -251,6 +255,7 @@ def build(
         f"({result.n_included_files} included, {result.n_excluded_files} excluded)"
     )
     typer.echo(f"holdings {result.n_holdings} rows")
+    typer.echo(f"fund metrics {result.n_fund_metrics} rows")
     typer.echo(f"changes {result.n_changes} rows")
     typer.echo(f"qa events {result.n_qa_events}")
     typer.echo(f"unmatched {result.n_unmatched}")
@@ -397,7 +402,7 @@ def flows(
     asof_date = _parse_date(asof, "--asof") if asof is not None else end
     connection = _connect(db)
     try:
-        frame = _flows_frame(connection, fund, start, end, asof=asof_date)
+        frame = compute_flows(connection, fund, start, end, asof=asof_date)
     except FundNotFoundError as error:
         typer.echo(f"error: unknown fund {error.fund!r} in {db}", err=True)
         raise typer.Exit(code=2) from None
@@ -443,21 +448,11 @@ def backfill_qpd_command(
     if quarters < 1:
         typer.echo("error: --quarters must be at least 1", err=True)
         raise typer.Exit(code=2)
-    sources = load_sources(config / "sources.yaml")
-    if not _approved_qpd_sources(sources, issuer):
-        typer.echo(
-            f"error: no approved quarterly disclosure source for issuer {issuer!r}",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    with PoliteClient() as client:
-        results = _backfill_qpd(
-            issuer,
-            quarters,
-            raw,
-            config_dir=config,
-            client=client,
-        )
+    try:
+        results = backfill_qpd(issuer, quarters, raw, config_dir=config)
+    except BackfillError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
     counts = {"fetched": 0, "present": 0, "missing": 0}
     for result in results:
         counts[result.status] = counts.get(result.status, 0) + 1
@@ -724,20 +719,8 @@ def _gate_source(source_id: str, fund_ticker: str, source: Source | None) -> boo
 
 
 def _is_metrics_source(source: Source) -> bool:
-    """True for ``SourceKind.fund_metrics``, compared by value (D66)."""
-    return str(getattr(source.kind, "value", source.kind)) == _METRICS_KIND
-
-
-def _approved_qpd_sources(sources: Mapping[str, Source], issuer: str) -> list[Source]:
-    """Supported quarterly-disclosure sources for ``issuer`` whose terms allow it."""
-    return [
-        source
-        for source in sources.values()
-        if source.issuer == issuer
-        and source.kind is SourceKind.quarterly_disclosure
-        and source.supported
-        and source.terms.decision in (Decision.allowed, Decision.allowed_with_conditions)
-    ]
+    """True for ``SourceKind.fund_metrics`` (D66)."""
+    return source.kind is SourceKind.fund_metrics
 
 
 def _qa_summary(
@@ -844,42 +827,6 @@ def _qa_source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, 
             "quarterly" if quarterly else "daily",
         )
     return metadata
-
-
-def _flows_frame(
-    con: duckdb.DuckDBPyConnection,
-    fund: str,
-    start: date,
-    end: date,
-    *,
-    asof: date,
-) -> pl.DataFrame:
-    """Call ``etfh.analytics.flows`` (D #151), imported lazily until it merges."""
-    # importlib keeps ``etfh.cli`` importable on a tree where the analytics
-    # workstream's module-level symbol has not merged yet (wave-06 parallel work).
-    module: Any = importlib.import_module("etfh.analytics")
-    compute_flows: Callable[..., pl.DataFrame] = module.flows
-    return compute_flows(con, fund, start, end, asof=asof)
-
-
-def _backfill_qpd(
-    issuer: str,
-    quarters: int,
-    raw_root: Path,
-    *,
-    config_dir: Path,
-    client: PoliteClient,
-) -> Sequence[Any]:
-    """Call ``etfh.backfill.backfill_qpd`` (B #147), imported lazily until it merges."""
-    module_backfill: Any = importlib.import_module("etfh.backfill")
-    backfill_qpd: Callable[..., Sequence[Any]] = module_backfill.backfill_qpd
-    return backfill_qpd(
-        issuer,
-        quarters,
-        raw_root,
-        config_dir=config_dir,
-        client=client,
-    )
 
 
 def _flow_method(frame: pl.DataFrame) -> str:
