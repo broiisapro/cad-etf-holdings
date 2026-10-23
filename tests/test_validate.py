@@ -11,7 +11,6 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
-import etfh.schema as schema_module
 from etfh.registry import Source, load_funds, load_sources
 from etfh.types import AssetClass, ParsedFile, RawFile
 from etfh.units import WeightUnit, check_unit
@@ -25,7 +24,6 @@ from etfh.validate import (
     validate_metrics,
 )
 from tests._validate_helpers import (
-    ContractParsedFundMetrics,
     load_manifest,
     metrics_frame,
     metrics_row,
@@ -813,14 +811,6 @@ class TestNegativeWeight:
 
 class TestValidateMetrics:
     """Fund-metrics checks (interfaces wave 06 §4, D66)."""
-
-    @pytest.fixture(autouse=True)
-    def _metrics_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Use the contract stand-in only while the additive model is not merged."""
-        if not hasattr(schema_module, "ParsedFundMetrics"):
-            monkeypatch.setattr(
-                schema_module, "ParsedFundMetrics", ContractParsedFundMetrics, raising=False
-            )
 
     def _findings(
         self,

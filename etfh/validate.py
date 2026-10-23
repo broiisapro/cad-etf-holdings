@@ -30,20 +30,18 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from importlib import import_module
 from math import isfinite
 from pathlib import Path
 from typing import Literal, Self, cast
 from zoneinfo import ZoneInfo
 
-import pandera.polars as pa
 import polars as pl
 import yaml
 from pandera.errors import SchemaError, SchemaErrors
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from etfh.registry import Source
-from etfh.schema import ParsedHoldings
+from etfh.schema import ParsedFundMetrics, ParsedHoldings
 from etfh.types import AssetClass, FileFormat, ParsedFile, SourceKind
 from etfh.units import WeightUnit
 
@@ -572,17 +570,6 @@ _METRICS_NUMERIC_COLUMNS = ("nav_per_unit", "shares_outstanding", "aum")
 _METRICS_EXAMPLES = 3
 
 
-def _metrics_model() -> type[pa.DataFrameModel]:
-    """The additive fund-metrics contract from :mod:`etfh.schema` (D66).
-
-    Resolved on use: the holdings checks stay usable without the additive
-    metrics models, and the schema module remains the single owner of the
-    frozen column contract.
-    """
-    module = import_module("etfh.schema")
-    return cast("type[pa.DataFrameModel]", module.__dict__["ParsedFundMetrics"])
-
-
 def _numeric_column(frame: pl.DataFrame, name: str) -> pl.Series | None:
     """The column when it exists with a numeric dtype, else ``None``.
 
@@ -606,7 +593,7 @@ def _check_metrics_schema(parsed: ParsedFile, *, source: Source) -> list[QaFindi
     checked explicitly first: a metrics frame that omits a contract column is a
     schema error even when the remaining rows are valid.
     """
-    model = _metrics_model()
+    model = ParsedFundMetrics
     expected = tuple(model.to_schema().columns)
     missing = [name for name in expected if name not in parsed.frame.columns]
     if missing:

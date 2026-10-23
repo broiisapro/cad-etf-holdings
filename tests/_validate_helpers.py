@@ -21,7 +21,6 @@ from time import strptime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import pandera.polars as pa
 import pdfplumber
 import polars as pl
 from openpyxl import load_workbook
@@ -395,21 +394,3 @@ def parsed_metrics(
         frame=metrics_frame() if frame is None else frame,
         notes=list(notes or []),
     )
-
-
-class ContractParsedFundMetrics(pa.DataFrameModel):
-    """Stand-in for the additive ``ParsedFundMetrics`` model (D66).
-
-    Only used by tests while ``etfh.schema.ParsedFundMetrics`` is not on the
-    branch yet (it is owned by a parallel change); as soon as the real model is
-    importable the tests use it, so this file never becomes a second schema.
-    """
-
-    fund_ticker: str = pa.Field(str_length={"min_value": 1})
-    as_of_date: pl.Date
-    nav_per_unit: float | None = pa.Field(nullable=True, gt=0)
-    shares_outstanding: float | None = pa.Field(nullable=True, ge=0)
-    aum: float | None = pa.Field(nullable=True, ge=0)
-    currency: str | None = pa.Field(nullable=True)
-    source_id: str = pa.Field(str_length={"min_value": 1})
-    raw_file_sha256: str = pa.Field(str_matches=r"^[0-9a-f]{64}$")
