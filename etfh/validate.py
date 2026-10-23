@@ -707,13 +707,14 @@ def _check_aum_consistency(parsed: ParsedFile, *, config: ValidationConfig) -> l
             if relative <= config.aum_tolerance:
                 continue
             difference = f"relative={relative:.2%}"
-        as_of = row["as_of_date"]
+        as_of = row.get("as_of_date")
         as_of_text = as_of.isoformat() if isinstance(as_of, date) else "-"
+        fund = str(row.get("fund_ticker", ""))
         description = (
-            f"as_of={as_of_text} fund={row['fund_ticker']} aum={aum_value:.4f} "
+            f"as_of={as_of_text} fund={fund} aum={aum_value:.4f} "
             f"nav*shares={expected:.4f} ({difference})"
         )
-        offenders.append((as_of_text, str(row["fund_ticker"]), description))
+        offenders.append((as_of_text, fund, description))
     if not offenders:
         return []
     offenders.sort()

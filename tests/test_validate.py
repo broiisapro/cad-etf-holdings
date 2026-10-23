@@ -870,6 +870,13 @@ class TestValidateMetrics:
         assert [finding.check for finding in findings] == ["schema"]
         assert findings[0].severity == "error"
 
+    def test_missing_date_column_is_a_schema_error_without_crashing(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        findings = self._findings(metrics_frame().drop("as_of_date"), source_factory)
+        assert [finding.check for finding in findings] == ["schema"]
+        assert "as_of_date" in findings[0].detail
+
     def test_nav_must_be_positive_and_finite(self, source_factory: Callable[..., Source]) -> None:
         rows = [
             metrics_row(nav_per_unit=0.0),
