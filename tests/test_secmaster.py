@@ -408,8 +408,13 @@ def test_fx_and_derivative_ids_are_scoped_per_fund() -> None:
     ]
 
 
-def test_committed_overrides_file_is_header_only() -> None:
-    assert load_overrides(OVERRIDES_PATH) == []
+def test_committed_overrides_file_is_loadable_and_reviewed() -> None:
+    overrides = load_overrides(OVERRIDES_PATH)
+    data_rows = sum(
+        1 for line in OVERRIDES_PATH.read_text(encoding="utf-8").splitlines()[1:] if line.strip()
+    )
+    assert len(overrides) == data_rows
+    assert all(override.reviewer.strip() and override.reviewed_on for override in overrides)
 
 
 def test_load_overrides_parses_every_match_type(tmp_path: Path) -> None:
