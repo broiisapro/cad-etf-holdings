@@ -9,16 +9,19 @@ with subtotal lines, and French-style decimal commas.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import re
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
+import yaml
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 from etfh.registry import Fund, Source, TermsRecord
+from etfh.storage import RawStore
 from etfh.types import AssetClass, Decision, FileFormat, RawFile, SourceKind
 
 PdfRow = tuple[str, str] | str
@@ -182,8 +185,6 @@ def raw_file_for_pdf(
     issuer: str = "synthetic",
 ) -> RawFile:
     """Build the :class:`RawFile` a parser would receive for ``path``."""
-    from datetime import UTC, datetime
-
     content = path.read_bytes() if path.exists() else path.name.encode("utf-8")
     return RawFile(
         source_id=source_id,
@@ -247,7 +248,7 @@ def qpd_fund(
     )
 
 
-def write_globalx_lookalike(path: Path) -> Path:
+def write_globalx_lookalike(path: Path, *, as_of: str = "March 31, 2026") -> Path:
     """Write a fictional Global X-style disclosure with several tables."""
     path.parent.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
@@ -266,7 +267,7 @@ def write_globalx_lookalike(path: Path) -> Path:
     pdf.setFont("Helvetica-Bold", 11)
     pdf.drawString(_LEFT, _TOP - 18, "Summary of Investment Portfolio")
     pdf.setFont("Helvetica", 10)
-    pdf.drawString(_LEFT, _TOP - 32, "As at March 31, 2026")
+    pdf.drawString(_LEFT, _TOP - 32, f"As at {as_of}")
 
     pdf.setFont("Helvetica-Bold", 9)
     pdf.drawString(_LEFT, _TOP - 62, "Asset Mix")
@@ -434,7 +435,7 @@ def write_bmo_lookalike(path: Path) -> Path:
     return path
 
 
-def write_purpose_lookalike(path: Path) -> Path:
+def write_purpose_lookalike(path: Path, *, as_of: str = "June 30, 2026") -> Path:
     """Write a fictional Purpose-style two-column disclosure.
 
     The sector and asset mixes sit down the left column and the Top 25
@@ -452,7 +453,7 @@ def write_purpose_lookalike(path: Path) -> Path:
     pdf.setFont("Helvetica-Bold", 12)
     pdf.drawString(_LEFT, _TOP, "Fictional Meridian Dividend Fund")
     pdf.setFont("Helvetica", 10)
-    pdf.drawString(_LEFT, _TOP - 16, "As At June 30, 2026")
+    pdf.drawString(_LEFT, _TOP - 16, f"As At {as_of}")
     pdf.setFont("Helvetica-Bold", 9)
     pdf.drawString(right, _TOP - 16, "TOP 25 HOLDINGS")
     pdf.setFont("Helvetica", 9)
@@ -733,7 +734,7 @@ _EVOLVE_RIGHT = 360.0
 _EVOLVE_RIGHT_WEIGHT = 568.0
 
 
-def write_evolve_lookalike(path: Path) -> Path:
+def write_evolve_lookalike(path: Path, *, as_of: str = "June 30, 2026") -> Path:
     """Write a fictional Evolve-style two-column disclosure.
 
     Top 25 Positions on the left with the listed total at the foot of that
@@ -748,7 +749,7 @@ def write_evolve_lookalike(path: Path) -> Path:
     pdf.setFont("Helvetica-Bold", 12)
     pdf.drawString(44.0, _TOP, "Evolve Fictional Cyber Security Index Fund")
     pdf.setFont("Helvetica", 10)
-    pdf.drawString(44.0, _TOP - 16, "As at June 30, 2026")
+    pdf.drawString(44.0, _TOP - 16, f"As at {as_of}")
     pdf.setFont("Helvetica-Bold", 9)
     pdf.drawString(44.0, _TOP - 32, "Top 25 Positions % of Net Asset")
     pdf.drawString(44.0, _TOP - 44, "Value")
@@ -786,7 +787,7 @@ def write_evolve_lookalike(path: Path) -> Path:
     return path
 
 
-def write_vanguard_lookalike(path: Path) -> Path:
+def write_vanguard_lookalike(path: Path, *, as_of: str = "June 30, 2026") -> Path:
     """Write a fictional Vanguard-style two-column disclosure.
 
     Sector allocation down the left column, the Top 25 Holdings down the
@@ -801,7 +802,7 @@ def write_vanguard_lookalike(path: Path) -> Path:
     right = 330.0
 
     pdf.setFont("Helvetica", 9)
-    pdf.drawString(_LEFT, _TOP, "Quarterly Portfolio Disclosure | June 30, 2026")
+    pdf.drawString(_LEFT, _TOP, f"Quarterly Portfolio Disclosure | {as_of}")
     pdf.setFont("Helvetica-Bold", 11)
     pdf.drawString(_LEFT, _TOP - 16, "Vanguard Fictional 500 Index ETF")
     pdf.setFont("Helvetica", 10)
@@ -810,8 +811,8 @@ def write_vanguard_lookalike(path: Path) -> Path:
     pdf.drawString(_LEFT, _TOP - 50, "Sector Allocation")
     pdf.drawString(right, _TOP - 50, "Top 25 Holdings")
     pdf.setFont("Helvetica", 9)
-    pdf.drawString(_LEFT, _TOP - 62, "As at June 30, 2026")
-    pdf.drawString(right, _TOP - 62, "As at June 30, 2026")
+    pdf.drawString(_LEFT, _TOP - 62, f"As at {as_of}")
+    pdf.drawString(right, _TOP - 62, f"As at {as_of}")
     pdf.drawString(_LEFT, _TOP - 74, "% of")
     pdf.drawRightString(_RIGHT, _TOP - 74, "% of Underlying Fund")
     pdf.drawString(_RIGHT - 60, _TOP - 86, "Underlying Fund")
@@ -847,3 +848,78 @@ def write_vanguard_lookalike(path: Path) -> Path:
     pdf.drawString(right, y - 12, "Total net asset value $12,345,678,901")
     pdf.save()
     return path
+
+
+def write_backfill_config(
+    directory: Path,
+    *,
+    source_id: str,
+    issuer: str,
+    tickers: Sequence[str],
+    decision: Decision = Decision.allowed_with_conditions,
+    min_interval_seconds: float | None = None,
+    kind: SourceKind = SourceKind.quarterly_disclosure,
+    file_format: FileFormat = FileFormat.pdf,
+) -> Path:
+    """Write a minimal ``sources.yaml`` and ``funds.csv`` and return the directory."""
+    directory.mkdir(parents=True, exist_ok=True)
+    terms: dict[str, object] = {
+        "url": "https://example.invalid/terms",
+        "reviewer": "Test Reviewer",
+        "reviewed_on": date(2026, 10, 17),
+        "decision": decision.value,
+    }
+    if decision is Decision.allowed_with_conditions:
+        terms["conditions"] = ["internal research use only"]
+    if min_interval_seconds is not None:
+        terms["min_interval_seconds"] = min_interval_seconds
+    payload = {
+        "sources": [
+            {
+                "id": source_id,
+                "issuer": issuer,
+                "kind": kind.value,
+                "format": file_format.value,
+                "url_patterns": ["https://example.invalid/qpd.pdf"],
+                "update_frequency": "quarterly",
+                "supported": True,
+                "terms": terms,
+            }
+        ]
+    }
+    (directory / "sources.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with (directory / "funds.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["ticker", "issuer", "name", "asset_class", "source_ids", "exchange", "params"]
+        )
+        for ticker in tickers:
+            writer.writerow(
+                [ticker, issuer, f"Fictional {ticker} Fund", "equity", source_id, "XTSE", ""]
+            )
+    return directory
+
+
+def seed_qpd_raw(
+    store: RawStore,
+    pdf: Path,
+    *,
+    source_id: str,
+    issuer: str,
+    ticker: str,
+    as_of: date | None = None,
+    url: str = "https://example.invalid/qpd.pdf",
+    fetched_at: datetime | None = None,
+) -> RawFile:
+    """Store a disclosure PDF as if a collector had fetched it."""
+    return store.write(
+        pdf.read_bytes(),
+        source_id=source_id,
+        issuer=issuer,
+        fund_ticker=ticker,
+        url=url,
+        fetched_at=fetched_at or datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+        ext="pdf",
+        content_type="application/pdf",
+        as_of_hint=as_of,
+    )
