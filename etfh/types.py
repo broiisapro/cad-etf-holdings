@@ -29,6 +29,7 @@ class SourceKind(StrEnum):
 
     daily_holdings = "daily_holdings"
     quarterly_disclosure = "quarterly_disclosure"
+    fund_metrics = "fund_metrics"
     synthetic = "synthetic"
 
 
@@ -39,6 +40,7 @@ class FileFormat(StrEnum):
     xlsx = "xlsx"
     json = "json"
     pdf = "pdf"
+    html = "html"
 
 
 class AssetClass(StrEnum):
