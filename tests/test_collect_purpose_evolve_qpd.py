@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 from datetime import date
 from pathlib import Path
@@ -13,6 +14,7 @@ from etfh.collect.purpose_evolve_qpd import (
     COLLECTORS,
     EvolveQpdCollector,
     PurposeQpdCollector,
+    evolve_disclosure_links,
     evolve_disclosure_url,
     purpose_disclosure_url,
 )
@@ -396,3 +398,109 @@ def test_gate_refusal_does_not_touch_the_network(tmp_path: Path) -> None:
     finally:
         client.close()
     assert calls == []
+
+
+def test_evolve_fetch_historical_picks_the_quarter(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf = write_evolve_lookalike(tmp_path / "evolve.pdf").read_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.host == "evolveetfs.com":
+            return httpx.Response(200, text=EVOLVE_HTML)
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    collector = EvolveQpdCollector(source=_evolve_source())
+    store = RawStore(tmp_path / "raw")
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        old = collector.fetch_historical(
+            qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
+            date(2025, 9, 30),
+            client,
+            store,
+        )
+        new = collector.fetch_historical(
+            qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
+            date(2026, 3, 31),
+            client,
+            store,
+        )
+    finally:
+        client.close()
+    assert [raw.url for raw in old] == [EVOLVE_OLD]
+    assert [raw.url for raw in new] == [EVOLVE_NEW]
+    assert old[0].as_of_hint == date(2025, 9, 30)
+    assert new[0].path.parent.name == "2026-03-31"
+
+
+def test_evolve_fetch_historical_reports_an_unlisted_quarter(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    pdf_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.host == "evolveetfs.com":
+            return httpx.Response(200, text=EVOLVE_HTML)
+        pdf_calls.append(request.url.path)
+        return httpx.Response(200, content=b"%PDF-1.4")
+
+    collector = EvolveQpdCollector(source=_evolve_source())
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        with pytest.raises(CollectError, match="not published.*2025-06"):
+            collector.fetch_historical(
+                qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
+                date(2025, 6, 30),
+                client,
+                RawStore(tmp_path / "raw"),
+            )
+    finally:
+        client.close()
+    assert pdf_calls == []
+
+
+def test_evolve_quarter_style_names_are_scored() -> None:
+    page = """
+    <html><body>
+    <a href="https://cdn.example.invalid/CYBX-EN-QPD2025-Q3.pdf">Quarterly Portfolio Disclosure</a>
+    <a href="https://cdn.example.invalid/CYBX-EN-QPDQ4-2025.pdf">Quarterly Portfolio Disclosure</a>
+    </body></html>
+    """
+    assert evolve_disclosure_links(page) == [
+        ((2025, 9), "https://cdn.example.invalid/CYBX-EN-QPD2025-Q3.pdf"),
+        ((2025, 12), "https://cdn.example.invalid/CYBX-EN-QPDQ4-2025.pdf"),
+    ]
+    assert evolve_disclosure_url(page) == "https://cdn.example.invalid/CYBX-EN-QPDQ4-2025.pdf"
+
+
+def test_evolve_fetch_historical_reads_the_page_once(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf = write_evolve_lookalike(tmp_path / "evolve.pdf").read_bytes()
+    page_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal page_calls
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.host == "evolveetfs.com":
+            page_calls += 1
+            return httpx.Response(200, text=EVOLVE_HTML)
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    collector = EvolveQpdCollector(source=_evolve_source())
+    store = RawStore(tmp_path / "raw")
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        for quarter in (date(2025, 6, 30), date(2025, 9, 30), date(2026, 3, 31)):
+            with contextlib.suppress(CollectError):
+                collector.fetch_historical(
+                    qpd_fund("CYBX", issuer="evolve", source_id="evolve_qpd"),
+                    quarter,
+                    client,
+                    store,
+                )
+    finally:
+        client.close()
+    assert page_calls == 1

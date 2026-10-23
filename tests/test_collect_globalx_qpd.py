@@ -228,3 +228,101 @@ def test_pdf_request_is_conditional(tmp_path: Path, fake_clock: FakeClock) -> No
     assert len(first) == 1
     assert second == []
     assert seen["if-none-match"] == '"hxt-q1"'
+
+
+def test_fetch_historical_uses_the_link_for_that_quarter(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    pdf = write_globalx_lookalike(tmp_path / "globalx.pdf").read_bytes()
+    collector = GlobalXQpdCollector(source=_source())
+    client = _client(_handler(pdf), fake_clock)
+    try:
+        raw_files = collector.fetch_historical(
+            qpd_fund(TICKER), date(2025, 9, 30), client, RawStore(tmp_path / "raw")
+        )
+    finally:
+        client.close()
+    assert len(raw_files) == 1
+    assert raw_files[0].url == "https://www.globalx.ca" + PDF_2025
+    assert raw_files[0].as_of_hint == date(2025, 9, 30)
+    assert raw_files[0].path.parent.name == "2025-09-30"
+
+
+def test_fetch_historical_does_not_guess_an_unlisted_quarter(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    pdf = write_globalx_lookalike(tmp_path / "globalx.pdf").read_bytes()
+    pdf_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.path == PRODUCT_PATH:
+            return httpx.Response(200, text=PRODUCT_HTML)
+        pdf_calls.append(request.url.path)
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    collector = GlobalXQpdCollector(source=_source())
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    try:
+        with pytest.raises(CollectError, match="not published.*2025 Q2"):
+            collector.fetch_historical(
+                qpd_fund(TICKER), date(2025, 6, 30), client, RawStore(tmp_path / "raw")
+            )
+    finally:
+        client.close()
+    assert pdf_calls == []
+
+
+def test_fetch_historical_reads_the_product_page_once(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    pdf = write_globalx_lookalike(tmp_path / "globalx.pdf").read_bytes()
+    page_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal page_calls
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.url.path == PRODUCT_PATH:
+            page_calls += 1
+            return httpx.Response(200, text=PRODUCT_HTML)
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    collector = GlobalXQpdCollector(source=_source())
+    store = RawStore(tmp_path / "raw")
+    client = _client(httpx.MockTransport(handler), fake_clock)
+    fetched = 0
+    missing = 0
+    try:
+        for quarter in (date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30), date(2026, 1, 1)):
+            try:
+                fetched += len(collector.fetch_historical(qpd_fund(TICKER), quarter, client, store))
+            except CollectError:
+                missing += 1
+    finally:
+        client.close()
+    assert page_calls == 1
+    assert fetched == 2
+    assert missing == 2
+
+
+def test_fetch_historical_respects_the_terms_gate(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, text="User-agent: *\nAllow: /")
+
+    collector = GlobalXQpdCollector(
+        source=qpd_source("globalx_ca_qpd", decision=Decision.not_allowed)
+    )
+    client = _client(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(TermsNotAllowedError, match="skipped: terms"):
+            collector.fetch_historical(
+                qpd_fund(TICKER), date(2025, 9, 30), client, RawStore(tmp_path)
+            )
+    finally:
+        client.close()
+    assert calls == []
