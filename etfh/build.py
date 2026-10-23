@@ -78,7 +78,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import duckdb
 import polars as pl
@@ -891,14 +891,9 @@ def _fund_metrics_frame(
 
 def _default_metrics_validator() -> Callable[..., list[QaFinding]]:
     """The real metrics validator, imported only when a metrics parser matched."""
-    from etfh import validate as validate_module
+    from etfh.validate import validate_metrics
 
-    validator = getattr(validate_module, "validate_metrics", None)
-    if validator is None:
-        raise RuntimeError(
-            "etfh.validate.validate_metrics is not available; it is required to build fund metrics"
-        )
-    return cast(Callable[..., list[QaFinding]], validator)
+    return validate_metrics
 
 
 def _persisted_notes(notes: Iterable[str]) -> list[tuple[str, str]]:
