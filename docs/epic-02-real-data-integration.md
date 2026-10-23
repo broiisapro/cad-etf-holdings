@@ -38,6 +38,16 @@ and the dashboard must show the result, and `etfh qa` must pass on a live build.
   `match_value=*|<normalized name>`) with the reviewer and date to
   `config/security_overrides.csv`. Nothing is applied by the build itself, and
   `--dry-run` never writes.
+- **Approval and commit flow (D58).** The human approves against the live
+  build; `scripts/approve-names.sh` runs `etfh review approve` with the
+  reviewer's name and today's date and writes the result to
+  `.orchestration/approvals/security_overrides.csv`, outside git. An agent then
+  commits that file byte-for-byte to `config/security_overrides.csv` through a
+  normal PR that cites the approval file, the reviewer and the date. Agents
+  never approve matches or edit a row themselves; the committed CSV is the
+  approval artifact, and the build reads it like any other reviewed override.
+  The first approval (2026-10-22, reviewer Moksh Siruvani) added 357 global
+  exact-name overrides.
 - **Name overrides identify name-only rows.** A global name override applies
   only when the row has no identifier evidence at all — no valid ISIN/CUSIP, no
   exchange-qualified ticker, no Bloomberg composite code. Identifier-bearing
@@ -156,23 +166,33 @@ and maturities the fuzzy matcher does not approve, and international names that
 only a name-only issuer publishes). Those rows stay unmatched by design until a
 human reviews them.
 
+The tables above are a 2026-10-21 dry run against a temporary config copy. The
+357 exact-name overrides were approved on 2026-10-22 and are now committed;
+the next live build applies them for real.
+
+## Final numbers
+
+_Filled at Epic 2 close._ Regenerate this section from the live build with the
+committed overrides after the five-day scheduled-collection check (D50)
+completes: file counts per source, included/excluded files, holdings rows, FIGI
+ids (with `--openfigi`), unmatched rows and weight share per issuer, and the
+representative overlap pairs.
+
 ## Known limitations
 
 - **The 5-day clock is pending.** Epic 2 closes only after five calendar days of
   successful scheduled collection (D50); this document stays a draft until then.
 - **Fuzzy proposals are not approved.** The 19 names with several candidate ids
-  (share classes, ADRs, similar issuers) need a human decision; the demo
-  approves only `exact`.
+  (share classes, ADRs, similar issuers) need a human decision; the committed
+  overrides cover the `exact` class only.
 - **Quarterly disclosures are top holdings only.** Their unmatched shares stay
   higher than the daily issuers' even after review, and analytics flag them
   `partial`.
 - **BMO quarterly disclosures cannot be verified from this machine** (network),
   and the OpenFIGI client needs network on a cold cache (optional API key raises
   the rate limit).
-- **Reviewed overrides are per name, not per security id.** A reviewed name
-  approved today is evidence for every fund and every later build; there is no
-  expiry. Re-reviewing a name that maps to a different security requires editing
-  the reviewed CSV deliberately.
-- **No real overrides are committed.** The repository keeps only the code and
-  the empty reviewed-overrides header; a human approving the live proposals is
-  the next step.
+- **Only exact name overrides are committed.** The 357 reviewed names carry a
+  reviewer and date in `config/security_overrides.csv`. A reviewed name is
+  evidence for every fund and every later build; there is no expiry.
+  Re-reviewing a name that maps to a different security requires editing the
+  reviewed CSV deliberately.
