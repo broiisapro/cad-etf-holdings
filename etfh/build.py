@@ -48,27 +48,48 @@ Every table is sorted on a documented key before writing (D15):
   raw_file_sha256
 - ``holdings_changes``: fund_ticker, from_as_of, to_as_of, change_type,
   security_id
+- ``fund_metrics``: fund_ticker, as_of_date, file_version, source_id
+
+Fund metrics (D66, interfaces-06 §3) run beside the holdings path, never inside
+it. Every raw file is offered to every metrics parser that claims it, whatever
+source the file was collected for (``purpose_metrics`` reads files stored as
+``purpose_daily``). A file that no holdings parser claims but at least one
+metrics parser does is a metrics-only input: it gets no holdings version and no
+``no_parser`` error. The opposite also holds: a metrics failure never excludes a
+holdings file and a holdings failure never excludes metrics rows.
+
+Metrics versions use the same D20 rules, keyed on the *metrics* source recorded
+in the parsed rows and on each row's ``as_of_date`` — a NAV history file holds
+many dates and therefore many versions. ``known_at`` is the parsed file's stated
+publication date when it has one, else the fetch time. Findings about parsed
+rows go to ``qa_events`` under the metrics source id, so the QA report and as-of
+analytics can tell them apart from the holdings findings of the same raw file by
+joining the ``sources`` table. A file whose metrics parser raises, or whose rows
+name a source or fund missing from the config, is reported as an error against
+the raw file's own source and produces no metrics rows; there is no version to
+exclude because there is no trustworthy date.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import duckdb
 import polars as pl
 from polars.datatypes import DataType, DataTypeClass
 
 from etfh.asof import TORONTO
-from etfh.parse.registry import find_parser
+from etfh.parse.registry import find_metrics_parsers, find_parser
 from etfh.registry import Fund, Source, load_funds, load_sources
 from etfh.schema import (
     DDL_FILE_VERSIONS,
+    DDL_FUND_METRICS,
     DDL_HOLDINGS,
     DDL_HOLDINGS_CHANGES,
     DDL_QA_EVENTS,
@@ -76,7 +97,7 @@ from etfh.schema import (
 from etfh.secmaster.names import name_proposals, reference_names
 from etfh.secmaster.reports import fuzzy_proposals, unmatched_report
 from etfh.storage import RawStore
-from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
+from etfh.types import FileFormat, ParsedFile, Parser, RawFile, SourceKind
 from etfh.validate import ValidationConfig, is_excluded, validate_file
 
 if TYPE_CHECKING:
@@ -117,6 +138,21 @@ _DDLS = (
     DDL_HOLDINGS,
     DDL_QA_EVENTS,
     DDL_HOLDINGS_CHANGES,
+    DDL_FUND_METRICS,
+)
+
+#: Columns a metrics parser's frame must supply, in model order. The build
+#: overwrites ``raw_file_sha256`` with the hash of the file it actually parsed;
+#: a parser cannot claim another file's bytes.
+_METRICS_PARSED_COLUMNS: tuple[str, ...] = (
+    "fund_ticker",
+    "as_of_date",
+    "nav_per_unit",
+    "shares_outstanding",
+    "aum",
+    "currency",
+    "source_id",
+    "raw_file_sha256",
 )
 
 _SOURCES_SCHEMA: dict[str, DataTypeClass | DataType] = {
@@ -196,6 +232,19 @@ _HOLDINGS_CHANGES_SCHEMA: dict[str, DataTypeClass | DataType] = {
     "delta": pl.Float64,
 }
 
+_FUND_METRICS_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "known_at": pl.Datetime("us", "UTC"),
+    "file_version": pl.Int32,
+    "nav_per_unit": pl.Float64,
+    "shares_outstanding": pl.Float64,
+    "aum": pl.Float64,
+    "currency": pl.String,
+    "source_id": pl.String,
+    "raw_file_sha256": pl.String,
+}
+
 _HOLDINGS_SORT_KEY = (
     "fund_ticker",
     "as_of_date",
@@ -215,8 +264,8 @@ class BuildResult:
     """Summary of one rebuild.
 
     Counts are rows written to each table; ``n_file_versions`` counts every
-    stored version (included and excluded), while ``n_holdings`` covers the
-    included files only.
+    stored version (holdings and metrics, included and excluded), while
+    ``n_holdings`` and ``n_fund_metrics`` cover the included files only.
     """
 
     out_dir: Path
@@ -230,6 +279,7 @@ class BuildResult:
     n_unmatched: int
     n_name_proposals: int = 0
     n_figi: int = 0
+    n_fund_metrics: int = 0
 
 
 @dataclass
@@ -265,6 +315,33 @@ class _Version:
     finding: tuple[str, str] | None = None
 
 
+@dataclass
+class _MetricsRecord:
+    """One raw file's metrics for one (metrics source, fund, as-of date)."""
+
+    raw: RawFile = field(repr=False)
+    source_id: str
+    fund_ticker: str
+    as_of_date: date
+    known_at: datetime
+    path: str
+    frame: pl.DataFrame = field(repr=False)
+    excluded: bool
+
+
+@dataclass
+class _MetricsCache:
+    """Parsed metrics files and their findings, shared across duplicate fetches.
+
+    Files with the same SHA-256 are parsed and validated once per metrics
+    parser, so a raw file stored twice cannot produce duplicate findings.
+    """
+
+    parsed: dict[tuple[str, int], ParsedFile] = field(default_factory=dict)
+    parse_errors: dict[tuple[str, int], str] = field(default_factory=dict)
+    findings: dict[tuple[str, str], list[QaFinding]] = field(default_factory=dict)
+
+
 def build(
     raw_root: Path,
     out_dir: Path,
@@ -272,13 +349,16 @@ def build(
     config_dir: Path = Path("config"),
     security_master: SecurityMaster | None = None,
     validator: Callable[..., list[QaFinding]] | None = None,
+    metrics_validator: Callable[..., list[QaFinding]] | None = None,
     figi: FigiLookup | None = None,
 ) -> BuildResult:
     """Rebuild DuckDB, Parquet exports and reports from ``raw_root``.
 
-    ``security_master`` and ``validator`` are injection points: when omitted,
-    the real :class:`~etfh.secmaster.resolve.SecurityMaster` and
-    :func:`etfh.validate.validate_file` are imported lazily. Tests pass fakes
+    ``security_master``, ``validator`` and ``metrics_validator`` are injection
+    points: when omitted, the real
+    :class:`~etfh.secmaster.resolve.SecurityMaster`,
+    :func:`etfh.validate.validate_file` and
+    :func:`etfh.validate.validate_metrics` are imported lazily. Tests pass fakes
     that follow the same contracts. ``figi`` is the optional
     :class:`~etfh.secmaster.openfigi.FigiLookup` used when the build creates
     the security master itself (D47); an injected ``security_master`` wins.
@@ -293,16 +373,22 @@ def build(
     validation_config = ValidationConfig.load(config_dir / "validation.yaml")
     if validator is None:
         validator = validate_file
+    metrics_validator_fn = metrics_validator
 
     raws = RawStore(raw_root).iter_raw()
     parsed_cache: dict[str, ParsedFile] = {}
     parse_failures: dict[str, tuple[str, str]] = {}
     qa_rows: list[dict[str, Any]] = []
     records: dict[tuple[str, str, date, str], _Record] = {}
+    metrics_cache = _MetricsCache()
+    metrics_records: dict[tuple[str, str, date, str], _MetricsRecord] = {}
 
     for raw in raws:
         source = sources.get(raw.source_id)
         fund = funds_by_ticker.get(raw.fund_ticker)
+        metrics_parsers = (
+            find_metrics_parsers(raw, source) if source is not None and fund is not None else []
+        )
         candidate: _Candidate | None = None
         finding: tuple[str, str] | None = None
         as_of_date = _fallback_as_of(raw)
@@ -315,10 +401,11 @@ def build(
             if raw.sha256 not in parsed_cache and raw.sha256 not in parse_failures:
                 parser = find_parser(raw, source)
                 if parser is None:
-                    parse_failures[raw.sha256] = (
-                        "no_parser",
-                        f"no parser for .{raw.ext} files from source {source.id}",
-                    )
+                    if not metrics_parsers:
+                        parse_failures[raw.sha256] = (
+                            "no_parser",
+                            f"no parser for .{raw.ext} files from source {source.id}",
+                        )
                 else:
                     try:
                         parsed_cache[raw.sha256] = parser.parse(raw)
@@ -330,27 +417,59 @@ def build(
             if raw.sha256 in parse_failures:
                 finding = parse_failures[raw.sha256]
             else:
-                parsed = parsed_cache[raw.sha256]
-                as_of_date = parsed.as_of_date
-                if parsed.published_at is not None:
-                    known_at = parsed.published_at
-                candidate = _Candidate(parsed=parsed, source=source, fund=fund)
-        key = (raw.source_id, raw.fund_ticker, as_of_date, raw.sha256)
-        previous = records.get(key)
-        if previous is None:
-            records[key] = _Record(
-                raw=raw,
-                as_of_date=as_of_date,
-                known_at=known_at,
-                fetched_at=raw.fetched_at,
-                path=str(raw.path),
-                candidate=candidate,
-                finding=finding,
+                parsed = parsed_cache.get(raw.sha256)
+                if parsed is not None:
+                    as_of_date = parsed.as_of_date
+                    if parsed.published_at is not None:
+                        known_at = parsed.published_at
+                    candidate = _Candidate(parsed=parsed, source=source, fund=fund)
+        metrics_only = candidate is None and finding is None and bool(metrics_parsers)
+        if not metrics_only:
+            key = (raw.source_id, raw.fund_ticker, as_of_date, raw.sha256)
+            previous = records.get(key)
+            if previous is None:
+                records[key] = _Record(
+                    raw=raw,
+                    as_of_date=as_of_date,
+                    known_at=known_at,
+                    fetched_at=raw.fetched_at,
+                    path=str(raw.path),
+                    candidate=candidate,
+                    finding=finding,
+                )
+            else:
+                previous.known_at = min(previous.known_at, known_at)
+                previous.fetched_at = min(previous.fetched_at, raw.fetched_at)
+                previous.path = min(previous.path, str(raw.path))
+
+        if metrics_parsers:
+            if metrics_validator_fn is None:
+                metrics_validator_fn = _default_metrics_validator()
+            new_records, events = _collect_metrics(
+                raw,
+                metrics_parsers=metrics_parsers,
+                sources=sources,
+                funds_by_ticker=funds_by_ticker,
+                validator=metrics_validator_fn,
+                config=validation_config,
+                cache=metrics_cache,
             )
-        else:
-            previous.known_at = min(previous.known_at, known_at)
-            previous.fetched_at = min(previous.fetched_at, raw.fetched_at)
-            previous.path = min(previous.path, str(raw.path))
+            qa_rows.extend(events)
+            for metrics_record in new_records:
+                metrics_key = (
+                    metrics_record.source_id,
+                    metrics_record.fund_ticker,
+                    metrics_record.as_of_date,
+                    metrics_record.raw.sha256,
+                )
+                previous_metrics = metrics_records.get(metrics_key)
+                if previous_metrics is None:
+                    metrics_records[metrics_key] = metrics_record
+                else:
+                    previous_metrics.known_at = min(
+                        previous_metrics.known_at, metrics_record.known_at
+                    )
+                    previous_metrics.path = min(previous_metrics.path, metrics_record.path)
 
     if figi is not None:
         _prefetch_figi(security_master, records.values())
@@ -375,6 +494,19 @@ def build(
                     finding=record.finding,
                 )
             )
+
+    metrics_versions: list[tuple[_MetricsRecord, int]] = []
+    metrics_grouped: dict[tuple[str, str, date], list[_MetricsRecord]] = {}
+    for (source_id, fund_ticker, as_of_date, _sha), metrics_record in sorted(
+        metrics_records.items()
+    ):
+        metrics_grouped.setdefault((source_id, fund_ticker, as_of_date), []).append(metrics_record)
+    for metrics_group in metrics_grouped.values():
+        ordered_metrics = sorted(
+            metrics_group, key=lambda record: (record.known_at, record.raw.sha256)
+        )
+        for index, metrics_record in enumerate(ordered_metrics, start=1):
+            metrics_versions.append((metrics_record, index))
 
     file_version_rows: list[dict[str, Any]] = []
     holdings_frames: list[pl.DataFrame] = []
@@ -467,6 +599,29 @@ def build(
                 )
             )
 
+    fund_metrics_frames: list[pl.DataFrame] = []
+    for metrics_record, metrics_file_version in metrics_versions:
+        file_version_rows.append(
+            {
+                "source_id": metrics_record.source_id,
+                "fund_ticker": metrics_record.fund_ticker,
+                "as_of_date": metrics_record.as_of_date,
+                "file_version": metrics_file_version,
+                "known_at": metrics_record.known_at,
+                "raw_file_sha256": metrics_record.raw.sha256,
+                "path": metrics_record.path,
+                "status": "excluded" if metrics_record.excluded else "included",
+            }
+        )
+        if not metrics_record.excluded:
+            fund_metrics_frames.append(
+                _fund_metrics_frame(
+                    metrics_record.frame,
+                    known_at=metrics_record.known_at,
+                    file_version=metrics_file_version,
+                )
+            )
+
     file_versions = _sorted(
         pl.DataFrame(file_version_rows, schema=_FILE_VERSIONS_SCHEMA),
         ("source_id", "fund_ticker", "as_of_date", "file_version"),
@@ -476,6 +631,12 @@ def build(
         if holdings_frames
         else pl.DataFrame(schema=_HOLDINGS_SCHEMA),
         _HOLDINGS_SORT_KEY,
+    )
+    fund_metrics = _sorted(
+        pl.concat(fund_metrics_frames, how="vertical")
+        if fund_metrics_frames
+        else pl.DataFrame(schema=_FUND_METRICS_SCHEMA),
+        ("fund_ticker", "as_of_date", "file_version", "source_id"),
     )
     qa_events = _sorted(
         pl.DataFrame(qa_rows, schema=_QA_EVENTS_SCHEMA),
@@ -491,6 +652,7 @@ def build(
         "holdings": holdings,
         "qa_events": qa_events,
         "holdings_changes": holdings_changes,
+        "fund_metrics": fund_metrics,
     }
     db_path = _write_database(out_dir, frames)
     unmatched, n_name_proposals = _write_reports(out_dir, holdings)
@@ -506,6 +668,7 @@ def build(
         n_unmatched=unmatched.height,
         n_name_proposals=n_name_proposals,
         n_figi=n_figi,
+        n_fund_metrics=fund_metrics.height,
     )
 
 
@@ -547,17 +710,195 @@ def _qa_row(
     detail: str,
     *,
     excluded: bool,
+    source_id: str | None = None,
+    fund_ticker: str | None = None,
 ) -> dict[str, Any]:
+    """One ``qa_events`` row for ``raw``.
+
+    ``source_id`` and ``fund_ticker`` default to the raw file's own values;
+    metrics findings pass the metrics source and the fund the parser named, so
+    the report can tell a fund-metrics problem from the holdings file's own.
+    """
     return {
         "raw_file_sha256": raw.sha256,
-        "source_id": raw.source_id,
-        "fund_ticker": raw.fund_ticker,
+        "source_id": raw.source_id if source_id is None else source_id,
+        "fund_ticker": raw.fund_ticker if fund_ticker is None else fund_ticker,
         "as_of_date": as_of_date,
         "check": check,
         "severity": severity,
         "detail": detail,
         "excluded": excluded,
     }
+
+
+def _collect_metrics(
+    raw: RawFile,
+    *,
+    metrics_parsers: Sequence[Parser],
+    sources: Mapping[str, Source],
+    funds_by_ticker: Mapping[str, Fund],
+    validator: Callable[..., list[QaFinding]],
+    config: ValidationConfig,
+    cache: _MetricsCache,
+) -> tuple[list[_MetricsRecord], list[dict[str, Any]]]:
+    """Run every metrics parser that claims ``raw`` (interfaces-06 §3).
+
+    Returns the metrics records for this file plus the ``qa_events`` rows the
+    parsing and validation produced. A parser error, an unknown metrics source
+    or an unknown fund is an error event and produces no rows: there is no
+    trustworthy as-of date to attach a version to (see the module docstring).
+    """
+    records: list[_MetricsRecord] = []
+    events: list[dict[str, Any]] = []
+    for index, parser in enumerate(metrics_parsers):
+        cache_key = (raw.sha256, index)
+        if cache_key not in cache.parsed and cache_key not in cache.parse_errors:
+            try:
+                parsed_metrics = parser.parse(raw)
+                frame = _metrics_frame(parsed_metrics.frame, sha=raw.sha256)
+            except Exception as error:
+                cache.parse_errors[cache_key] = f"{type(error).__name__}: {error}"
+            else:
+                cache.parsed[cache_key] = ParsedFile(
+                    raw=parsed_metrics.raw,
+                    as_of_date=parsed_metrics.as_of_date,
+                    published_at=parsed_metrics.published_at,
+                    frame=frame,
+                    notes=list(parsed_metrics.notes),
+                )
+        if cache_key in cache.parse_errors:
+            events.append(
+                _qa_row(
+                    raw,
+                    _fallback_as_of(raw),
+                    "metrics_parse_error",
+                    "error",
+                    cache.parse_errors[cache_key],
+                    excluded=True,
+                )
+            )
+            continue
+        parsed = cache.parsed[cache_key]
+        for raw_source_id in sorted(parsed.frame["source_id"].unique().to_list()):
+            source_id = str(raw_source_id)
+            metrics_source = sources.get(source_id)
+            if metrics_source is None:
+                events.append(
+                    _qa_row(
+                        raw,
+                        parsed.as_of_date,
+                        "unknown_source",
+                        "error",
+                        f"metrics source {source_id!r} is not in sources.yaml",
+                        excluded=True,
+                        source_id=source_id,
+                    )
+                )
+                continue
+            subset = parsed.frame.filter(pl.col("source_id") == source_id)
+            findings = cache.findings.get((raw.sha256, source_id))
+            if findings is None:
+                findings = validator(
+                    ParsedFile(
+                        raw=parsed.raw,
+                        as_of_date=parsed.as_of_date,
+                        published_at=parsed.published_at,
+                        frame=subset,
+                        notes=list(parsed.notes),
+                    ),
+                    source=metrics_source,
+                    config=config,
+                )
+                cache.findings[(raw.sha256, source_id)] = findings
+                excluded_file = is_excluded(findings)
+                for finding in findings:
+                    events.append(
+                        _qa_row(
+                            raw,
+                            parsed.as_of_date,
+                            finding.check,
+                            finding.severity,
+                            finding.detail,
+                            excluded=excluded_file,
+                            source_id=source_id,
+                        )
+                    )
+            excluded = is_excluded(findings)
+            known_at = parsed.published_at if parsed.published_at is not None else raw.fetched_at
+            for keys, group in subset.group_by(["fund_ticker", "as_of_date"], maintain_order=True):
+                fund_ticker = str(keys[0])
+                as_of_date = keys[1]
+                if fund_ticker not in funds_by_ticker:
+                    events.append(
+                        _qa_row(
+                            raw,
+                            as_of_date,
+                            "unknown_fund",
+                            "error",
+                            f"fund {fund_ticker!r} is not in funds.csv",
+                            excluded=True,
+                            source_id=source_id,
+                            fund_ticker=fund_ticker,
+                        )
+                    )
+                    continue
+                records.append(
+                    _MetricsRecord(
+                        raw=raw,
+                        source_id=source_id,
+                        fund_ticker=fund_ticker,
+                        as_of_date=as_of_date,
+                        known_at=known_at,
+                        path=str(raw.path),
+                        frame=group,
+                        excluded=excluded,
+                    )
+                )
+    return records, events
+
+
+def _metrics_frame(frame: pl.DataFrame, *, sha: str) -> pl.DataFrame:
+    """Select and type the metric columns a parser must supply (interfaces-06 §2).
+
+    ``raw_file_sha256`` is always the hash of the bytes that were parsed, so a
+    parser cannot claim another file's provenance. A frame missing a column is a
+    parse error, not a silent gap.
+    """
+    missing = [name for name in _METRICS_PARSED_COLUMNS if name not in frame.columns]
+    if missing:
+        raise ValueError(f"metrics frame is missing column(s): {', '.join(missing)}")
+    return frame.select(
+        pl.col("fund_ticker").cast(pl.String),
+        pl.col("as_of_date").cast(pl.Date),
+        pl.col("nav_per_unit").cast(pl.Float64),
+        pl.col("shares_outstanding").cast(pl.Float64),
+        pl.col("aum").cast(pl.Float64),
+        pl.col("currency").cast(pl.String),
+        pl.col("source_id").cast(pl.String),
+        pl.lit(sha).alias("raw_file_sha256"),
+    )
+
+
+def _fund_metrics_frame(
+    frame: pl.DataFrame, *, known_at: datetime, file_version: int
+) -> pl.DataFrame:
+    added = frame.with_columns(
+        pl.lit(known_at).alias("known_at"),
+        pl.lit(file_version, dtype=pl.Int32).alias("file_version"),
+    )
+    return added.select(list(_FUND_METRICS_SCHEMA))
+
+
+def _default_metrics_validator() -> Callable[..., list[QaFinding]]:
+    """The real metrics validator, imported only when a metrics parser matched."""
+    from etfh import validate as validate_module
+
+    validator = getattr(validate_module, "validate_metrics", None)
+    if validator is None:
+        raise RuntimeError(
+            "etfh.validate.validate_metrics is not available; it is required to build fund metrics"
+        )
+    return cast(Callable[..., list[QaFinding]], validator)
 
 
 def _persisted_notes(notes: Iterable[str]) -> list[tuple[str, str]]:
