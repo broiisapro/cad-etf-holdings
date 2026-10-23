@@ -39,6 +39,7 @@ __all__ = [
     "QpdPdfError",
     "QpdPdfParser",
     "QpdRules",
+    "disclosure_as_of",
     "parse_qpd_date",
 ]
 
@@ -493,6 +494,20 @@ def _published_at(text: str, patterns: Sequence[str]) -> datetime | None:
     if stated is None:
         return None
     return datetime.combine(stated, time.min, tzinfo=_TORONTO).astimezone(UTC)
+
+
+def disclosure_as_of(raw: RawFile, rules: QpdRules | None = None) -> date | None:
+    """Return the portfolio date a stored disclosure states, without parsing rows.
+
+    The backfill uses this to recognise a quarter that is already in the raw
+    store when the file was fetched before it had an as-of hint. The issuer's
+    own rules choose where to look, so a date elsewhere on the page (a
+    publication or copyright date) is not mistaken for the portfolio date.
+    """
+    active = rules if rules is not None else QPD_RULES.get(raw.source_id, DEFAULT_RULES)
+    with pdfplumber.open(raw.path) as pdf:
+        texts = [page.extract_text(x_tolerance=active.x_tolerance) or "" for page in pdf.pages]
+    return _date_from_text("\n".join(texts), active.as_of_patterns)
 
 
 def _is_header(text: str, rules: QpdRules) -> bool:
