@@ -1,0 +1,10 @@
+# Secret-scanning configuration for gitleaks (CI job `secrets`; the pre-release
+# full-history scan follows the same rules).
+#
+# The default gitleaks rule set is enough for this repository: the committed
+# synthetic fixtures use fictional names, tickers and identifiers, and no rule
+# flags them. Do not add broad allowlists here. If a new fixture trips a rule,
+# allowlist the exact fake value, never a directory that could hold real issuer
+# files (raw/, build/) or secrets (.env).
+[extend]
+useDefault = true
