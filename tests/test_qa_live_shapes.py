@@ -130,6 +130,23 @@ def test_unmatched_shares_are_computed(clean_result: BuildResult) -> None:
     assert purpose["share"][0] == 1.0
 
 
+def test_parser_notes_are_persisted_as_info_events(clean_result: BuildResult) -> None:
+    con = _connect(clean_result.db_path)
+    try:
+        exchange_codes = con.execute(
+            "SELECT fund_ticker, detail FROM qa_events "
+            "WHERE \"check\" = 'exchange_codes' AND severity = 'info' "
+            "ORDER BY fund_ticker"
+        ).fetchall()
+        partial_details = con.execute(
+            "SELECT DISTINCT detail FROM qa_events WHERE \"check\" = 'partial_list'"
+        ).fetchall()
+    finally:
+        con.close()
+    assert exchange_codes == [("ESPX", "CN,LN,US")]
+    assert partial_details == [("true",)]
+
+
 def test_broken_copies_are_excluded_one_per_check(tmp_path: Path) -> None:
     items = clean_look_alikes(tmp_path)
     items.extend(
