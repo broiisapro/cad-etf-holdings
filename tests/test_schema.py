@@ -11,12 +11,15 @@ import pytest
 
 from etfh.schema import (
     DDL_FILE_VERSIONS,
+    DDL_FUND_METRICS,
     DDL_HOLDINGS,
     DDL_HOLDINGS_CHANGES,
     DDL_QA_EVENTS,
     FileVersion,
+    FundMetrics,
     Holdings,
     HoldingsChange,
+    ParsedFundMetrics,
     ParsedHoldings,
     QaEvent,
 )
@@ -168,6 +171,102 @@ class TestHoldings:
         assert Holdings.validate(frame).height == 1
 
 
+def _parsed_metrics_frame(**overrides: pl.Series | list[object]) -> pl.DataFrame:
+    data: dict[str, object] = {
+        "fund_ticker": ["SYNM"],
+        "as_of_date": pl.Series([date(2026, 10, 30)], dtype=pl.Date),
+        "nav_per_unit": pl.Series([25.5], dtype=pl.Float64),
+        "shares_outstanding": pl.Series([1_000_000.0], dtype=pl.Float64),
+        "aum": pl.Series([25_500_000.0], dtype=pl.Float64),
+        "currency": pl.Series(["CAD"], dtype=pl.String),
+        "source_id": ["syn_metrics"],
+        "raw_file_sha256": [SHA],
+    }
+    data.update(overrides)
+    return pl.DataFrame(data)
+
+
+def _metrics_frame(**overrides: pl.Series | list[object]) -> pl.DataFrame:
+    data: dict[str, object] = {
+        "fund_ticker": ["SYNM"],
+        "as_of_date": pl.Series([date(2026, 10, 30)], dtype=pl.Date),
+        "known_at": pl.Series(
+            [datetime(2026, 10, 30, 22, tzinfo=UTC)], dtype=pl.Datetime("us", "UTC")
+        ),
+        "file_version": pl.Series([1], dtype=pl.Int32),
+        "nav_per_unit": pl.Series([25.5], dtype=pl.Float64),
+        "shares_outstanding": pl.Series([1_000_000.0], dtype=pl.Float64),
+        "aum": pl.Series([25_500_000.0], dtype=pl.Float64),
+        "currency": pl.Series(["CAD"], dtype=pl.String),
+        "source_id": ["syn_metrics"],
+        "raw_file_sha256": [SHA],
+    }
+    data.update(overrides)
+    return pl.DataFrame(data).select(
+        "fund_ticker",
+        "as_of_date",
+        "known_at",
+        "file_version",
+        "nav_per_unit",
+        "shares_outstanding",
+        "aum",
+        "currency",
+        "source_id",
+        "raw_file_sha256",
+    )
+
+
+class TestFundMetrics:
+    def test_valid_frame_passes(self) -> None:
+        assert ParsedFundMetrics.validate(_parsed_metrics_frame()).height == 1
+        assert FundMetrics.validate(_metrics_frame()).height == 1
+
+    def test_all_metrics_nullable(self) -> None:
+        frame = _parsed_metrics_frame(
+            nav_per_unit=pl.Series([None], dtype=pl.Float64),
+            shares_outstanding=pl.Series([None], dtype=pl.Float64),
+            aum=pl.Series([None], dtype=pl.Float64),
+            currency=pl.Series([None], dtype=pl.String),
+        )
+        assert ParsedFundMetrics.validate(frame).height == 1
+
+    @pytest.mark.parametrize("bad_nav", [0.0, -0.01])
+    def test_nav_must_be_positive(self, bad_nav: float) -> None:
+        frame = _parsed_metrics_frame(nav_per_unit=pl.Series([bad_nav], dtype=pl.Float64))
+        with pytest.raises(pa.errors.SchemaError):
+            ParsedFundMetrics.validate(frame)
+
+    @pytest.mark.parametrize("column", ["shares_outstanding", "aum"])
+    def test_shares_and_aum_cannot_be_negative(self, column: str) -> None:
+        frame = _parsed_metrics_frame(**{column: pl.Series([-1.0], dtype=pl.Float64)})
+        with pytest.raises(pa.errors.SchemaError):
+            ParsedFundMetrics.validate(frame)
+
+    def test_zero_shares_and_zero_aum_are_allowed(self) -> None:
+        frame = _parsed_metrics_frame(
+            shares_outstanding=pl.Series([0.0], dtype=pl.Float64),
+            aum=pl.Series([0.0], dtype=pl.Float64),
+        )
+        assert ParsedFundMetrics.validate(frame).height == 1
+
+    def test_bad_sha256_fails(self) -> None:
+        frame = _parsed_metrics_frame(raw_file_sha256=["A" * 64])
+        with pytest.raises(pa.errors.SchemaError):
+            ParsedFundMetrics.validate(frame)
+
+    def test_file_version_below_one_fails(self) -> None:
+        frame = _metrics_frame(file_version=[0])
+        with pytest.raises(pa.errors.SchemaError):
+            FundMetrics.validate(frame)
+
+    def test_naive_known_at_fails(self) -> None:
+        frame = _metrics_frame().with_columns(
+            pl.Series("known_at", [datetime(2026, 10, 30, 22)], dtype=pl.Datetime("us"))  # noqa: DTZ001
+        )
+        with pytest.raises(pa.errors.SchemaError):
+            FundMetrics.validate(frame)
+
+
 class TestOtherModels:
     def test_file_version_status_restricted(self) -> None:
         frame = pl.DataFrame(
@@ -232,6 +331,7 @@ def _ddl_columns(ddl: str) -> list[str]:
     ("ddl", "model"),
     [
         (DDL_FILE_VERSIONS, FileVersion),
+        (DDL_FUND_METRICS, FundMetrics),
         (DDL_HOLDINGS, Holdings),
         (DDL_QA_EVENTS, QaEvent),
         (DDL_HOLDINGS_CHANGES, HoldingsChange),
@@ -243,7 +343,7 @@ def test_ddl_columns_match_models(ddl: str, model: type[pa.DataFrameModel]) -> N
 
 @pytest.mark.parametrize(
     "ddl",
-    [DDL_FILE_VERSIONS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES],
+    [DDL_FILE_VERSIONS, DDL_FUND_METRICS, DDL_HOLDINGS, DDL_QA_EVENTS, DDL_HOLDINGS_CHANGES],
 )
 def test_ddl_executes_in_duckdb(ddl: str) -> None:
     connection = duckdb.connect(":memory:")

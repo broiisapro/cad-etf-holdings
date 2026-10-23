@@ -4,6 +4,12 @@ The ``DataFrameModel`` classes define the frozen data contracts (D6). The DDL
 constants create the same tables in DuckDB so ``etfh build`` can write them;
 ``tests/test_schema.py`` asserts that the DDL columns match the models in name
 and order.
+
+Fund metrics (D66) are additive: ``ParsedFundMetrics`` and ``FundMetrics``
+follow the same pattern as the holdings models, the holdings models themselves
+are unchanged, and ``fund_metrics`` is a new table rather than extra holdings
+columns. One row is one fund's NAV per unit, shares outstanding and AUM on one
+as-of date, as one source published them in one stored file.
 """
 
 from __future__ import annotations
@@ -13,12 +19,15 @@ import polars as pl
 
 __all__ = [
     "DDL_FILE_VERSIONS",
+    "DDL_FUND_METRICS",
     "DDL_HOLDINGS",
     "DDL_HOLDINGS_CHANGES",
     "DDL_QA_EVENTS",
     "FileVersion",
+    "FundMetrics",
     "Holdings",
     "HoldingsChange",
+    "ParsedFundMetrics",
     "ParsedHoldings",
     "QaEvent",
 ]
@@ -122,6 +131,47 @@ class HoldingsChange(pa.DataFrameModel):
     delta: float | None = pa.Field(nullable=True)
 
 
+class ParsedFundMetrics(pa.DataFrameModel):
+    """Parser output: one row per fund and as-of date (D66, interfaces-06 §2).
+
+    A metrics file may carry a whole history (for example a NAV table), so one
+    file can produce many rows with different ``as_of_date`` values. Every
+    metric is nullable: issuers publish different subsets, and a missing figure
+    stays null rather than being filled from another date or defaulted to zero
+    (D67). Amounts are in currency units, never thousands or millions.
+    """
+
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date
+    nav_per_unit: float | None = pa.Field(nullable=True, gt=0.0)
+    shares_outstanding: float | None = pa.Field(nullable=True, ge=0.0)
+    aum: float | None = pa.Field(nullable=True, ge=0.0)
+    currency: str | None = pa.Field(nullable=True)
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
+
+
+class FundMetrics(pa.DataFrameModel):
+    """Normalized fund-metrics table: parsed rows plus the point-in-time keys.
+
+    ``known_at`` and ``file_version`` follow the same D20 rules as holdings,
+    keyed on the metrics source recorded in ``source_id`` (which is not
+    necessarily the source of the raw file: ``purpose_metrics`` rows come from
+    files collected as ``purpose_daily``).
+    """
+
+    fund_ticker: str = pa.Field(str_length={"min_value": 1})
+    as_of_date: pl.Date
+    known_at: pl.Datetime("us", _UTC)  # type: ignore[valid-type]
+    file_version: pl.Int32 = pa.Field(ge=1)
+    nav_per_unit: float | None = pa.Field(nullable=True, gt=0.0)
+    shares_outstanding: float | None = pa.Field(nullable=True, ge=0.0)
+    aum: float | None = pa.Field(nullable=True, ge=0.0)
+    currency: str | None = pa.Field(nullable=True)
+    source_id: str = pa.Field(str_length={"min_value": 1})
+    raw_file_sha256: str = pa.Field(str_matches=_HEX64_PATTERN)
+
+
 DDL_FILE_VERSIONS = """
 CREATE TABLE IF NOT EXISTS file_versions (
     source_id VARCHAR NOT NULL,
@@ -182,5 +232,20 @@ CREATE TABLE IF NOT EXISTS holdings_changes (
     weight_before DOUBLE,
     weight_after DOUBLE,
     delta DOUBLE
+);
+"""
+
+DDL_FUND_METRICS = """
+CREATE TABLE IF NOT EXISTS fund_metrics (
+    fund_ticker VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    known_at TIMESTAMPTZ NOT NULL,
+    file_version INTEGER NOT NULL,
+    nav_per_unit DOUBLE,
+    shares_outstanding DOUBLE,
+    aum DOUBLE,
+    currency VARCHAR,
+    source_id VARCHAR NOT NULL,
+    raw_file_sha256 VARCHAR NOT NULL
 );
 """

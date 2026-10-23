@@ -13,8 +13,33 @@ from typing import Any
 import pytest
 
 from etfh.collect.registry import CollectError, all_collectors, collector_for
-from etfh.parse.registry import all_parsers, find_parser
+from etfh.parse.registry import (
+    all_metrics_parsers,
+    all_parsers,
+    find_metrics_parsers,
+    find_parser,
+)
 from etfh.types import FileFormat, RawFile
+
+_METRICS_PARSER_BODY = """
+from etfh.types import FileFormat
+
+
+class FakeMetricsParser:
+    def __init__(self, tag, matches=True):
+        self.tag = tag
+        self.formats = frozenset({{FileFormat.csv, FileFormat.json}})
+        self.matches = matches
+
+    def can_parse(self, raw):
+        return self.matches
+
+    def parse(self, raw):
+        raise NotImplementedError
+
+
+METRICS_PARSERS = [FakeMetricsParser({tag!r}, {matches!r})]
+"""
 
 _PARSER_BODY = """
 from etfh.types import FileFormat
@@ -161,6 +186,77 @@ def test_non_list_parsers_attribute_raises(install_modules: Any) -> None:
     install_modules("etfh.parse", {"bad": "PARSERS = 'not a list'\n"})
     with pytest.raises(TypeError, match="PARSERS must be a list"):
         all_parsers()
+
+
+def _tags(parsers: list[Any]) -> list[str]:
+    return [parser.tag for parser in parsers if hasattr(parser, "tag")]
+
+
+def test_metrics_parsers_are_discovered_separately_from_holdings_parsers(
+    install_modules: Any,
+) -> None:
+    install_modules(
+        "etfh.parse",
+        {
+            "aa_metrics": _METRICS_PARSER_BODY.format(tag="metrics", matches=True),
+            "zz_holdings": _PARSER_BODY.format(tag="holdings", matches=True),
+        },
+    )
+    assert _tags(all_metrics_parsers()) == ["metrics"]
+    assert _tags(all_parsers()) == ["holdings"]
+
+
+def test_one_module_may_export_both_parser_lists(install_modules: Any) -> None:
+    body = _PARSER_BODY.format(tag="holdings", matches=True) + _METRICS_PARSER_BODY.format(
+        tag="metrics", matches=True
+    )
+    install_modules("etfh.parse", {"both": body})
+    assert _tags(all_parsers()) == ["holdings"]
+    assert _tags(all_metrics_parsers()) == ["metrics"]
+
+
+def test_find_metrics_parsers_returns_every_match_in_module_order(
+    install_modules: Any, source_factory: Any, tmp_path: Path
+) -> None:
+    install_modules(
+        "etfh.parse",
+        {
+            "zz_second": _METRICS_PARSER_BODY.format(tag="second", matches=True),
+            "aa_first": _METRICS_PARSER_BODY.format(tag="first", matches=True),
+            "mm_never": _METRICS_PARSER_BODY.format(tag="never", matches=False),
+        },
+    )
+    found = find_metrics_parsers(_raw(tmp_path), source_factory("syn_csv"))
+    assert _tags(found) == ["first", "second"]
+
+
+def test_find_metrics_parsers_ignores_the_file_source_and_extension(
+    install_modules: Any, source_factory: Any, tmp_path: Path
+) -> None:
+    """A ``purpose_metrics`` parser claims ``purpose_daily`` files (interfaces-06 §2)."""
+    install_modules(
+        "etfh.parse",
+        {"aa_metrics": _METRICS_PARSER_BODY.format(tag="metrics", matches=True)},
+    )
+    raw = _raw(tmp_path, ext="txt", source_id="purpose_daily")
+    found = find_metrics_parsers(raw, source_factory("purpose_daily"))
+    assert _tags(found) == ["metrics"]
+
+
+def test_find_metrics_parsers_returns_empty_when_nothing_matches(
+    install_modules: Any, source_factory: Any, tmp_path: Path
+) -> None:
+    install_modules(
+        "etfh.parse",
+        {"aa_metrics": _METRICS_PARSER_BODY.format(tag="metrics", matches=False)},
+    )
+    assert find_metrics_parsers(_raw(tmp_path), source_factory("syn_csv")) == []
+
+
+def test_non_list_metrics_parsers_attribute_raises(install_modules: Any) -> None:
+    install_modules("etfh.parse", {"bad": "METRICS_PARSERS = 3\n"})
+    with pytest.raises(TypeError, match="METRICS_PARSERS must be a list"):
+        all_metrics_parsers()
 
 
 def test_all_collectors_discovery_and_lookup(install_modules: Any, source_factory: Any) -> None:
