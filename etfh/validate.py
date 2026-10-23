@@ -76,6 +76,7 @@ class ValidationConfig(BaseModel):
     weight_sum_tolerance: dict[AssetClass, float]
     qpd_total_tolerance: float = Field(default=0.005, ge=0)
     future_as_of_days: int = Field(default=0, ge=0)
+    aum_tolerance: float = Field(default=0.02, ge=0)
 
     @model_validator(mode="after")
     def _require_all_asset_classes(self) -> Self:

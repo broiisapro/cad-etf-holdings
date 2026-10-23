@@ -12,6 +12,9 @@
 # `future_as_of_days` allows an as-of date this many days after the fetch date
 # in America/Toronto before `future_as_of` fails (0 means "not after the fetch
 # date").
+# `aum_tolerance` bounds the relative difference between a fund-metrics row's
+# AUM and NAV x shares outstanding before `aum_consistency` records a warning
+# (0.02 = 2%; the issuer's rounding of the three figures explains small gaps).
 weight_sum_tolerance:
   equity: 0.005
   fixed_income: 0.01
@@ -20,3 +23,4 @@ weight_sum_tolerance:
   other: 0.02
 qpd_total_tolerance: 0.005
 future_as_of_days: 0
+aum_tolerance: 0.02

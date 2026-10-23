@@ -173,6 +173,7 @@ class TestValidationConfig:
         }
         assert config.qpd_total_tolerance == 0.005
         assert config.future_as_of_days == 0
+        assert config.aum_tolerance == 0.02
 
     def test_missing_asset_class_rejected(self, tmp_path: Path) -> None:
         path = tmp_path / "validation.yaml"
@@ -223,6 +224,23 @@ class TestValidationConfig:
         path.write_text("- equity\n- fixed_income\n", encoding="utf-8")
         with pytest.raises(ValueError, match="expected a mapping"):
             ValidationConfig.load(path)
+
+    def test_aum_tolerance_defaults_and_rejects_negative(self, tmp_path: Path) -> None:
+        base = (
+            "weight_sum_tolerance:\n"
+            "  equity: 0.005\n"
+            "  fixed_income: 0.01\n"
+            "  balanced: 0.02\n"
+            "  commodity: 0.02\n"
+            "  other: 0.02\n"
+        )
+        default_path = tmp_path / "default.yaml"
+        default_path.write_text(base, encoding="utf-8")
+        assert ValidationConfig.load(default_path).aum_tolerance == 0.02
+        negative_path = tmp_path / "negative.yaml"
+        negative_path.write_text(base + "aum_tolerance: -0.01\n", encoding="utf-8")
+        with pytest.raises(ValidationError, match="aum_tolerance"):
+            ValidationConfig.load(negative_path)
 
 
 class TestIsExcluded:
