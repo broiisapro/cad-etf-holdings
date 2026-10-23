@@ -13,6 +13,7 @@ from __future__ import annotations
 import html as html_module
 import os
 import re
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -28,6 +29,7 @@ __all__ = [
     "PurposeQpdCollector",
     "evolve_disclosure_links",
     "evolve_disclosure_url",
+    "purpose_disclosure_entries",
     "purpose_disclosure_url",
 ]
 
@@ -103,6 +105,60 @@ def purpose_disclosure_url(payload: object) -> str | None:
                 if isinstance(url, str) and url:
                     return url
     return None
+
+
+def _iso_date(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+
+
+def _date_in_url(url: object) -> date | None:
+    if not isinstance(url, str):
+        return None
+    match = re.search(r"(20\d{2}-\d{2}-\d{2})", url)
+    return _iso_date(match.group(1)) if match else None
+
+
+def purpose_disclosure_entries(payload: object) -> list[tuple[date, str]]:
+    """Return every dated quarterly disclosure in a fund JSON payload.
+
+    Purpose keeps a fund's documents in a ``documents`` object whose groups can
+    be dicts (the current disclosure per document type) or lists (a history).
+    The walk accepts both shapes and dates an entry by its ``dt`` field, falling
+    back to the ISO date the issuer puts in the document URL.
+    """
+    entries: set[tuple[date, str]] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            document = node.get("quarterly_portfolio_disclosure")
+            if isinstance(document, dict):
+                url = document.get("url")
+                stated = _iso_date(document.get("dt")) or _date_in_url(url)
+                if isinstance(url, str) and url and stated is not None:
+                    entries.add((stated, url))
+            for key, value in node.items():
+                if key != "quarterly_portfolio_disclosure":
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return sorted(entries)
+
+
+def _entry_for_quarter(
+    entries: Sequence[tuple[date, str]], quarter_end: date, tolerance_days: int = 7
+) -> tuple[date, str] | None:
+    matches = [entry for entry in entries if abs((entry[0] - quarter_end).days) <= tolerance_days]
+    if not matches:
+        return None
+    return min(matches, key=lambda entry: (abs((entry[0] - quarter_end).days), entry[0], entry[1]))
 
 
 def _is_french(href: str, text: str) -> bool:
@@ -239,15 +295,7 @@ class PurposeQpdCollector:
     def api_url(self, slug: str) -> str:
         return _PURPOSE_API.format(slug=slug)
 
-    def fetch(
-        self,
-        fund: Fund,
-        day: date,
-        client: PoliteClient,
-        store: RawStore,
-    ) -> list[RawFile]:
-        source = self._resolve_source(fund)
-        require_collectable(source)
+    def _fund_payload(self, fund: Fund, client: PoliteClient, source: Source) -> object:
         slug = fund.params.get("purpose_slug", "").strip()
         if not slug:
             raise CollectError(self.source_id, fund, "fund has no purpose_slug parameter")
@@ -263,9 +311,39 @@ class PurposeQpdCollector:
         if response.status_code != 200:
             raise CollectError(self.source_id, fund, f"HTTP {response.status_code} for {api_url}")
         try:
-            payload = response.json()
+            return response.json()
         except ValueError as exc:
             raise CollectError(self.source_id, fund, f"invalid JSON from {api_url}") from exc
+
+    def _historical_payload(self, fund: Fund, client: PoliteClient, source: Source) -> object:
+        """Fetch a fund's document index once per fund during a backfill run."""
+        cache = getattr(self, "_historical_payloads", None)
+        if cache is None:
+            cache = {}
+            self._historical_payloads: dict[str, object | CollectError] = cache
+        cached = cache.get(fund.ticker)
+        if isinstance(cached, CollectError):
+            raise cached
+        if cached is not None:
+            return cached
+        try:
+            payload = self._fund_payload(fund, client, source)
+        except CollectError as exc:
+            cache[fund.ticker] = exc
+            raise
+        cache[fund.ticker] = payload
+        return payload
+
+    def fetch(
+        self,
+        fund: Fund,
+        day: date,
+        client: PoliteClient,
+        store: RawStore,
+    ) -> list[RawFile]:
+        source = self._resolve_source(fund)
+        require_collectable(source)
+        payload = self._fund_payload(fund, client, source)
         pdf_url = purpose_disclosure_url(payload)
         if pdf_url is None:
             raise CollectError(
@@ -278,6 +356,45 @@ class PurposeQpdCollector:
             store=store,
             source=source,
             url=pdf_url,
+        )
+        return [] if raw is None else [raw]
+
+    def fetch_historical(
+        self,
+        fund: Fund,
+        quarter_end: date,
+        client: PoliteClient,
+        store: RawStore,
+    ) -> list[RawFile]:
+        """Fetch the disclosure dated at ``quarter_end`` from the fund's JSON.
+
+        Purpose's fund JSON is the document index: each disclosure carries the
+        portfolio date (``dt``) and the URL on ``documents.purposeinvest.com``.
+        Only an entry the issuer publishes is downloaded; a quarter that is not
+        in the index is reported missing with the dates the index does carry.
+        """
+        source = self._resolve_source(fund)
+        require_collectable(source)
+        payload = self._historical_payload(fund, client, source)
+        entries = purpose_disclosure_entries(payload)
+        entry = _entry_for_quarter(entries, quarter_end)
+        if entry is None:
+            listed = ", ".join(stated.isoformat() for stated, _ in entries)
+            reason = (
+                "not published: the fund JSON lists no quarterly portfolio disclosure"
+                f" for {quarter_end.isoformat()} (documents dated: {listed or 'none'})"
+            )
+            raise CollectError(self.source_id, fund, reason)
+        _, url = entry
+        raw = _download_pdf(
+            source_id=self.source_id,
+            fund=fund,
+            client=client,
+            store=store,
+            source=source,
+            url=url,
+            as_of_hint=quarter_end,
+            conditional=False,
         )
         return [] if raw is None else [raw]
 
