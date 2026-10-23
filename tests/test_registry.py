@@ -11,6 +11,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from etfh.collect.registry import all_collectors, collector_for
 from etfh.http import PoliteClient
 from etfh.registry import (
     Fund,
@@ -37,6 +38,13 @@ ALLOWED_REAL_SOURCES = {
     "purpose_qpd",
     "evolve_qpd",
     "bmo_qpd",
+    "purpose_metrics",
+    "bmo_metrics",
+    "evolve_metrics",
+}
+UNSUPPORTED_REAL_SOURCES = {
+    "vanguard_ca_metrics",
+    "globalx_ca_metrics",
 }
 NOT_ALLOWED_REAL_SOURCES = {
     "ishares_ca_daily",
@@ -47,6 +55,13 @@ NOT_ALLOWED_REAL_SOURCES = {
     "harvest_qpd",
     "hamilton_qpd",
     "mackenzie_qpd",
+}
+METRICS_REAL_SOURCES = {
+    "purpose_metrics",
+    "bmo_metrics",
+    "evolve_metrics",
+    "vanguard_ca_metrics",
+    "globalx_ca_metrics",
 }
 COMMON_CONDITIONS = [
     "internal research use only",
@@ -253,32 +268,69 @@ class TestFundsForSource:
 class TestCommittedConfig:
     def test_sources_load_with_recorded_decisions(self) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
-        assert len(sources) == 21
+        assert len(sources) == 26
         real = {
             source_id: source
             for source_id, source in sources.items()
             if source.issuer != "synthetic"
         }
-        assert set(real) == ALLOWED_REAL_SOURCES | NOT_ALLOWED_REAL_SOURCES
+        assert set(real) == (
+            ALLOWED_REAL_SOURCES | UNSUPPORTED_REAL_SOURCES | NOT_ALLOWED_REAL_SOURCES
+        )
         for source_id, source in real.items():
             assert source.terms.reviewer == "Moksh Siruvani", source_id
-            assert source.terms.reviewed_on == date(2026, 10, 17), source_id
+            expected_reviewed_on = (
+                date(2026, 10, 23) if source_id in METRICS_REAL_SOURCES else date(2026, 10, 17)
+            )
+            assert source.terms.reviewed_on == expected_reviewed_on, source_id
             assert source.terms.url, source_id
-            if source_id in ALLOWED_REAL_SOURCES:
-                assert source.terms.decision is Decision.allowed_with_conditions, source_id
-                missing = [
-                    condition
-                    for condition in COMMON_CONDITIONS
-                    if condition not in source.terms.conditions
-                ]
-                assert missing == [], source_id
-                assert is_collectable(source), source_id
-            else:
+            if source_id in NOT_ALLOWED_REAL_SOURCES:
                 assert source.terms.decision is Decision.not_allowed, source_id
                 assert source.terms.conditions == [], source_id
                 assert not is_collectable(source), source_id
+                continue
+            assert source.terms.decision is Decision.allowed_with_conditions, source_id
+            missing = [
+                condition
+                for condition in COMMON_CONDITIONS
+                if condition not in source.terms.conditions
+            ]
+            assert missing == [], source_id
+            if source_id in UNSUPPORTED_REAL_SOURCES:
+                assert source.supported is False, source_id
+                assert not is_collectable(source), source_id
+            else:
+                assert is_collectable(source), source_id
         assert sources["vanguard_ca_daily"].supported is False
         assert sources["globalx_ca_daily"].supported is False
+
+    def test_every_metrics_source_has_the_fund_metrics_kind(self) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        for source_id in METRICS_REAL_SOURCES:
+            assert sources[source_id].kind is SourceKind.fund_metrics, source_id
+
+    def test_metrics_gate_refuses_a_not_allowed_copy(self) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        for source_id in METRICS_REAL_SOURCES:
+            source = sources[source_id]
+            blocked = source.model_copy(
+                update={
+                    "terms": source.terms.model_copy(
+                        update={
+                            "decision": Decision.not_allowed,
+                            "conditions": [],
+                        }
+                    )
+                }
+            )
+            with pytest.raises(TermsNotAllowedError):
+                require_collectable(blocked)
+
+    def test_purpose_metrics_has_no_collector_and_that_is_fine(self) -> None:
+        sources = load_sources(CONFIG_DIR / "sources.yaml")
+        assert collector_for(sources["purpose_metrics"]) is None
+        assert all(collector.source_id != "purpose_metrics" for collector in all_collectors())
+        assert is_collectable(sources["purpose_metrics"])
 
     def test_every_not_allowed_real_source_is_refused(self) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
@@ -390,6 +442,11 @@ def test_collector_refuses_source_without_allowed_terms(
         client.close()
     assert requests == [], "no request may reach the transport for a non-allowed source"
     assert str(excinfo.value).startswith("skipped: terms")
+
+
+def test_fund_metrics_kind_and_html_format_values() -> None:
+    assert SourceKind.fund_metrics.value == "fund_metrics"
+    assert FileFormat.html.value == "html"
 
 
 def test_fund_default_exchange() -> None:
