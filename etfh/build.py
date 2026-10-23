@@ -55,8 +55,12 @@ it. Every raw file is offered to every metrics parser that claims it, whatever
 source the file was collected for (``purpose_metrics`` reads files stored as
 ``purpose_daily``). A file that no holdings parser claims but at least one
 metrics parser does is a metrics-only input: it gets no holdings version and no
-``no_parser`` error. The opposite also holds: a metrics failure never excludes a
-holdings file and a holdings failure never excludes metrics rows.
+``no_parser`` error. A ``fund_metrics`` source never enters the holdings path at
+all, even when a broad PDF/CSV holdings parser would claim its files (a BMO
+factsheet is not a portfolio disclosure); without any metrics parser it keeps
+the ordinary excluded ``no_parser`` row. The opposite also holds: a metrics
+failure never excludes a holdings file and a holdings failure never excludes
+metrics rows.
 
 Metrics versions use the same D20 rules, keyed on the *metrics* source recorded
 in the parsed rows and on each row's ``as_of_date`` — a NAV history file holds
@@ -389,6 +393,7 @@ def build(
         metrics_parsers = (
             find_metrics_parsers(raw, source) if source is not None and fund is not None else []
         )
+        metrics_source = source is not None and source.kind is SourceKind.fund_metrics
         candidate: _Candidate | None = None
         finding: tuple[str, str] | None = None
         as_of_date = _fallback_as_of(raw)
@@ -397,6 +402,16 @@ def build(
             finding = ("unknown_source", f"source {raw.source_id!r} is not in sources.yaml")
         elif fund is None:
             finding = ("unknown_fund", f"fund {raw.fund_ticker!r} is not in funds.csv")
+        elif metrics_source:
+            # A metrics source only ever feeds the metrics path, even when a
+            # broad PDF/CSV holdings parser would claim its files (a factsheet
+            # is not a holdings file). Without any metrics parser the file is
+            # unusable, so it keeps the ordinary excluded no_parser row.
+            if not metrics_parsers:
+                finding = (
+                    "no_parser",
+                    f"no metrics parser for .{raw.ext} files from source {source.id}",
+                )
         else:
             if raw.sha256 not in parsed_cache and raw.sha256 not in parse_failures:
                 parser = find_parser(raw, source)
@@ -423,7 +438,9 @@ def build(
                     if parsed.published_at is not None:
                         known_at = parsed.published_at
                     candidate = _Candidate(parsed=parsed, source=source, fund=fund)
-        metrics_only = candidate is None and finding is None and bool(metrics_parsers)
+        metrics_only = (
+            candidate is None and finding is None and (metrics_source or bool(metrics_parsers))
+        )
         if not metrics_only:
             key = (raw.source_id, raw.fund_ticker, as_of_date, raw.sha256)
             previous = records.get(key)

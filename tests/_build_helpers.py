@@ -123,8 +123,8 @@ def make_metrics_config(tmp_path: Path) -> Path:
 
     The extra source keeps the committed config untouched (sources.yaml belongs
     to another workstream) while giving the metrics tests a source the parsers
-    can claim. Its kind is ``synthetic`` because the build decides what is
-    metrics-only from the parsers, not from the source kind.
+    can claim. Its kind is ``fund_metrics``, like the real metrics sources, so
+    the tests exercise the build's metrics-source routing.
     """
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -135,7 +135,7 @@ def make_metrics_config(tmp_path: Path) -> Path:
         {
             "id": METRICS_SOURCE_ID,
             "issuer": "synthetic",
-            "kind": "synthetic",
+            "kind": "fund_metrics",
             "format": "json",
             "url_patterns": ["synthetic://fixtures/<TICKER>-metrics.json"],
             "update_frequency": "daily",
