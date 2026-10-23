@@ -238,7 +238,7 @@ def test_find_metrics_parsers_ignores_the_file_source_and_extension(
         "etfh.parse",
         {"aa_metrics": _METRICS_PARSER_BODY.format(tag="metrics", matches=True)},
     )
-    raw = _raw(tmp_path, ext="json", source_id="purpose_daily")
+    raw = _raw(tmp_path, ext="txt", source_id="purpose_daily")
     found = find_metrics_parsers(raw, source_factory("purpose_daily"))
     assert _tags(found) == ["metrics"]
 
