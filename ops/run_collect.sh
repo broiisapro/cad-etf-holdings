@@ -1,15 +1,18 @@
 #!/bin/bash
 # Daily collection, build and QA pass for the cad-etf-holdings dataset.
 #
-# Invoked by ops/launchd/com.etfh.collect.plist (see ops/install_launchd.sh)
-# or by hand. Uses the repository this script lives in; no hard-coded paths.
+# Invoked by ops/collect_guard.sh (which launchd runs every 30 minutes and at
+# login, see ops/launchd/com.etfh.collect.plist and ops/install_launchd.sh) or
+# by hand. Uses the repository this script lives in; no hard-coded paths.
 #
-# Loads <repo>/.env when present so launchd (which starts with a minimal
+# Collects daily holdings files and daily fund metrics (NAV, shares
+# outstanding, AUM), then rebuilds the dataset and reports QA. Loads
+# <repo>/.env when present so launchd (which starts with a minimal
 # environment) sees ETFH_USER_AGENT and the optional OPENFIGI_API_KEY. Values
 # are never echoed. Adds the usual uv install locations to PATH and fails with
 # a clear message when uv is still missing, so a scheduled run cannot die with
 # a bare "command not found". The QA exit status is the script's exit status,
-# so the launchd job fails exactly when QA fails.
+# so the job fails exactly when QA fails.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,7 +48,11 @@ fi
 
 echo "etfh: collect start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 uv run etfh collect --date today --raw "$REPO/raw" || {
-    echo "etfh: warning: collect exited $?; continuing to the build" >&2
+    echo "etfh: warning: collect exited $?; continuing to the metrics collection" >&2
+}
+
+uv run etfh collect-aum --date today --raw "$REPO/raw" || {
+    echo "etfh: warning: collect-aum exited $?; continuing to the build" >&2
 }
 
 BUILD_ARGS=(--raw "$REPO/raw" --out "$REPO/build")
