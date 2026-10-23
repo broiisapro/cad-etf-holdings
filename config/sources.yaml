@@ -76,6 +76,31 @@ sources:
         - "polite rate limit and identifiable User-Agent"
         - 'grey-area terms ("only as needed to evaluate whether to invest"); human accepted; stop if BMO objects'
 
+  - id: bmo_metrics
+    issuer: bmo
+    kind: fund_metrics
+    format: pdf
+    url_patterns:
+      - "https://df.bmogam.com/assets/static/etf-profiles-pdfs/<Fund Name>_Factsheet_EN_<TICKER>.pdf"
+    update_frequency: monthly
+    supported: true
+    notes: >-
+      ETF factsheet: net assets and shares outstanding as of the stated
+      month-end date; NAV per unit is derived (net assets / shares). The
+      profile endpoint named in the issue serves a JavaScript shell with no
+      fund data (verified 2026-10-23), so it is not used. D65.
+    terms:
+      url: "https://bmogam.com/ca-en/legal/"
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-23
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - 'grey-area terms ("only as needed to evaluate whether to invest"); human accepted; stop if BMO objects'
+        - "daily fund metrics approved 2026-10-23 (D65)"
+
   - id: vanguard_ca_daily
     issuer: vanguard_ca
     kind: daily_holdings
@@ -110,6 +135,29 @@ sources:
         - "no redistribution of raw holdings"
         - "polite rate limit and identifiable User-Agent"
         - "personal, non-commercial research only"
+
+  - id: vanguard_ca_metrics
+    issuer: vanguard_ca
+    kind: fund_metrics
+    format: xlsx
+    url_patterns:
+      - "https://www.vanguard.ca/en/product/etf/<TICKER>"
+    update_frequency: daily
+    supported: false
+    notes: >-
+      no static, non-JavaScript fund-metrics source found (D65); the product
+      page is JavaScript-rendered and no direct NAV/AUM/units file is linked
+    terms:
+      url: "https://www.vanguard.ca/en/website-terms-of-use"
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-23
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "personal, non-commercial research only"
+        - "daily fund metrics approved 2026-10-23 (D65); no static source, so unsupported"
 
   - id: globalx_ca_daily
     issuer: globalx_ca
@@ -146,6 +194,30 @@ sources:
         - "polite rate limit and identifiable User-Agent"
         - "minimum interval 30 s (Crawl-delay); links read from product pages"
       min_interval_seconds: 30
+
+  - id: globalx_ca_metrics
+    issuer: globalx_ca
+    kind: fund_metrics
+    format: csv
+    url_patterns:
+      - "https://www.globalx.ca/product/<slug>"
+    update_frequency: daily
+    supported: false
+    notes: >-
+      no static, non-JavaScript fund-metrics source found (D65); the product
+      page is behind a Cloudflare challenge and no direct NAV/AUM/units file
+      is linked
+    terms:
+      url: "https://www.globalx.ca/terms-of-use"
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-23
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "daily fund metrics approved 2026-10-23 (D65); no static source, so unsupported"
+        - "minimum interval 30 s (Crawl-delay)"
 
   - id: purpose_daily
     issuer: purpose
@@ -185,6 +257,29 @@ sources:
         - "internal research use only"
         - "no redistribution of raw holdings"
         - "polite rate limit and identifiable User-Agent"
+
+  - id: purpose_metrics
+    issuer: purpose
+    kind: fund_metrics
+    format: json
+    url_patterns:
+      - "https://www.purposeinvest.com/api/funds/<slug>"
+    update_frequency: daily
+    supported: true
+    notes: >-
+      derived from the purpose_daily raw files (nav_table and details.aum);
+      no collector and no extra fetch. D65.
+    terms:
+      url: "https://www.purposeinvest.com/legal"
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-23
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "respect robots.txt: /documents/ and /download/ are disallowed on www"
+        - "derived from purpose_daily; no additional fetch (D65)"
 
   - id: evolve_daily
     issuer: evolve
@@ -226,6 +321,31 @@ sources:
         - "no redistribution of raw holdings"
         - "polite rate limit and identifiable User-Agent"
         - "minimum interval 10 s (Crawl-delay)"
+      min_interval_seconds: 10
+
+  - id: evolve_metrics
+    issuer: evolve
+    kind: fund_metrics
+    format: html
+    url_patterns:
+      - "https://evolveetfs.com/product/<TICKER>"
+    update_frequency: daily
+    supported: true
+    notes: >-
+      product page states NAV per unit and fund total net assets as of the NAV
+      date; units outstanding are not published, so shares are derived
+      (net assets / NAV) and the row says so. D65.
+    terms:
+      url: "https://evolveetfs.com/"
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-23
+      decision: allowed_with_conditions
+      conditions:
+        - "internal research use only"
+        - "no redistribution of raw holdings"
+        - "polite rate limit and identifiable User-Agent"
+        - "minimum interval 10 s (Crawl-delay)"
+        - "daily fund metrics approved 2026-10-23 (D65)"
       min_interval_seconds: 10
 
   - id: harvest_monthly
