@@ -15,12 +15,21 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # launchd starts jobs with a minimal PATH, so add the directories uv commonly
 # lives in (uv's installer, cargo, Homebrew on Apple Silicon and Intel).
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+# ETFH_UV_DIRS replaces that list; an empty value skips the search, which lets
+# a test run against a PATH it controls without probing the host.
+UV_DIRS="${ETFH_UV_DIRS-$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin}"
+if [ -n "$UV_DIRS" ]; then
+    export PATH="$UV_DIRS:${PATH}"
+fi
 
 cd "$REPO"
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "etfh: error: uv is not on PATH (looked in \$HOME/.local/bin, \$HOME/.cargo/bin, /opt/homebrew/bin, /usr/local/bin and the inherited PATH); install uv or add its directory to PATH" >&2
+    if [ -n "$UV_DIRS" ]; then
+        echo "etfh: error: uv is not on PATH (looked in $UV_DIRS and the inherited PATH); install uv or add its directory to PATH" >&2
+    else
+        echo "etfh: error: uv is not on PATH; install uv or add its directory to PATH" >&2
+    fi
     exit 2
 fi
 
