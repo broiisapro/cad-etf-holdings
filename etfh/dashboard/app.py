@@ -70,6 +70,27 @@ def breakdown_chart(data: pl.DataFrame, title: str) -> alt.Chart:
     return chart
 
 
+def flows_chart(flows: pl.DataFrame) -> alt.Chart:
+    """Bar chart of estimated daily flows; rows without an estimate are omitted."""
+    data = flows.filter(pl.col("flow_estimate").is_not_null())
+    chart: alt.Chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x=alt.X("as_of_date:T", title=None),
+            y=alt.Y("flow_estimate:Q", title="Estimated flow", axis=alt.Axis(format="~s")),
+            tooltip=[
+                alt.Tooltip("as_of_date:T", title="Date"),
+                alt.Tooltip("flow_estimate:Q", title="Estimated flow", format=",.0f"),
+                alt.Tooltip("prev_as_of_date:T", title="Previous date"),
+                alt.Tooltip("gap_days:Q", title="Business days since previous"),
+            ],
+        )
+        .properties(title="Estimated daily flows")
+    )
+    return chart
+
+
 def heatmap_chart(matrix: pl.DataFrame) -> alt.LayerChart:
     """Overlap heatmap for a symmetric fund-by-fund matrix."""
     funds = matrix["fund_a"].unique(maintain_order=True).to_list()
@@ -138,6 +159,83 @@ def render_quality(state: quality.FundQuality) -> None:
             )
     else:
         st.caption("No excluded files for this fund.")
+    render_metrics_qa(state.metrics)
+
+
+def render_metrics_qa(state: quality.MetricsQa) -> None:
+    """Fund-metrics findings the QA report records, for this fund and overall."""
+    if not (state.has_inputs or state.has_findings):
+        return
+    for finding in state.findings:
+        st.warning(
+            f"Fund metrics {finding.severity} {finding.check}: {finding.detail} "
+            f"({finding.source_id})"
+        )
+    if state.has_findings:
+        st.caption(f"Fund-metrics findings: {state.counts_label}.")
+    else:
+        st.caption("No fund-metrics findings.")
+
+
+def format_number(value: float | None, places: int) -> str:
+    """Format a metric figure with thousands separators, or ``-`` when missing."""
+    return "-" if value is None else f"{value:,.{places}f}"
+
+
+def format_amount(value: float | None, currency: str | None) -> str:
+    """Format an AUM figure with its currency when the source states one."""
+    if value is None:
+        return "-"
+    text = f"{value:,.0f}"
+    return f"{text} {currency}" if currency else text
+
+
+def flows_table(flows: pl.DataFrame) -> pl.DataFrame:
+    """The flow columns shown in the dashboard table, with display names."""
+    return flows.select(
+        pl.col("as_of_date").alias("As of"),
+        pl.col("prev_as_of_date").alias("Previous date"),
+        pl.col("shares_outstanding").alias("Shares outstanding"),
+        pl.col("nav_per_unit").alias("NAV per unit"),
+        pl.col("flow_estimate").alias("Estimated flow"),
+        pl.col("gap_days").alias("Business days gap"),
+    )
+
+
+def render_metrics(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> None:
+    """Latest fund metrics, how stale they are, and the D67 flow estimates."""
+    st.subheader("Fund metrics & flows")
+    view = quality.fund_metrics(con, fund, asof)
+    latest = view.latest
+    if latest is None:
+        st.caption(f"No fund metrics for {fund} yet.")
+        st.caption(
+            "`etfh collect-aum` records NAV per unit, shares outstanding and AUM "
+            "when the issuer publishes them."
+        )
+        return
+    columns = st.columns(3)
+    columns[0].metric("NAV per unit", format_number(latest.nav_per_unit, 4))
+    columns[1].metric("Shares outstanding", format_number(latest.shares_outstanding, 0))
+    columns[2].metric("AUM", format_amount(latest.aum, latest.currency))
+    st.caption(f"Latest figures as of {latest.as_of_date.isoformat()}; {view.staleness_label}.")
+    if view.is_stale:
+        st.warning(
+            f"Fund metrics are {view.staleness_days} days old: the figures and flow "
+            "estimates reflect the issuer's stated date, not the selected date."
+        )
+    if view.n_dates < 2:
+        st.caption(
+            "Flow estimates need at least two metrics dates with share counts; only one "
+            "date is known as of this date, so no flow is shown."
+        )
+    else:
+        st.dataframe(flows_table(view.flows), width="stretch", hide_index=True)
+        if view.can_estimate_flows:
+            st.altair_chart(flows_chart(view.flows), width="stretch")
+        else:
+            st.caption("No flow estimate yet: the known dates do not carry two share counts.")
+    st.caption(f"Method: {view.method}")
 
 
 def render_fund(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> None:
@@ -155,6 +253,7 @@ def render_fund(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> None:
     holdings = analytics.holdings_asof(con, fund, asof)
     st.subheader("Data quality")
     render_quality(quality.fund_quality(con, fund, asof, holdings=holdings))
+    render_metrics(con, fund, asof)
 
     if holdings.is_empty():
         st.caption("No holdings known as of this date.")

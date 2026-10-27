@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,12 +20,15 @@ from etfh.dashboard import quality
 from tests._dashboard_helpers import (
     APP_PATH,
     AS_OF,
+    METRICS_DB_AS_OF,
+    METRICS_DB_FUNDS,
     QUALITY_AS_OF,
     QUALITY_FUNDS,
     REPO_ROOT,
     build_synthetic_db,
     install_fake_analytics,
     make_empty_db,
+    make_metrics_db,
     make_quality_db,
     overlap_matrix,
 )
@@ -40,6 +44,11 @@ def synthetic_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="module")
 def quality_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return make_quality_db(tmp_path_factory.mktemp("quality") / "etfh.duckdb")
+
+
+@pytest.fixture(scope="module")
+def metrics_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return make_metrics_db(tmp_path_factory.mktemp("metrics") / "etfh.duckdb")
 
 
 def _run_app(monkeypatch, db_path: Path) -> AppTest:
@@ -74,8 +83,11 @@ def test_renders_with_fake_analytics(tmp_path, monkeypatch) -> None:
     assert metrics["Top 10 weight"] == "100.00%"
     assert metrics["HHI"] == "0.5200"
     assert metrics["Overlap"] == "50.00%"
-    assert len(app.get("vega_lite_chart")) == 3
-    assert len(list(app.dataframe)) == 3
+    assert metrics["NAV per unit"] == "25.5000"
+    assert metrics["Shares outstanding"] == "1,040,000"
+    assert metrics["AUM"] == "26,520,000 CAD"
+    assert len(app.get("vega_lite_chart")) == 4
+    assert len(list(app.dataframe)) == 4
 
 
 def test_partial_fund_labelled_top_holdings_only(tmp_path, monkeypatch) -> None:
@@ -109,7 +121,7 @@ def test_heatmap_apptest_with_three_funds(tmp_path, monkeypatch) -> None:
     assert not app.exception
     assert app.multiselect(key="heatmap_funds").value == ["SYNA", "SYNB", "SYNC"]
     charts = app.get("vega_lite_chart")
-    assert len(charts) == 3
+    assert len(charts) == 4
 
 
 def test_heatmap_chart_layers_three_funds() -> None:
@@ -150,6 +162,8 @@ ANALYTICS_FUNCTIONS = (
     "overlap",
     "overlap_matrix",
     "changes",
+    "metrics_asof",
+    "flows",
 )
 QA_FUNCTIONS = ("summarize", "unmatched_shares")
 
@@ -479,3 +493,145 @@ def test_real_build_overlap_note(monkeypatch, synthetic_db: Path) -> None:
     assert not app.exception
     warnings = [warning.value for warning in app.warning]
     assert any("Overlap is understated: SYNF has 100.00%" in warning for warning in warnings)
+
+
+@pytest.fixture
+def metrics_con(metrics_db: Path) -> Iterator[duckdb.DuckDBPyConnection]:
+    con = duckdb.connect(str(metrics_db), read_only=True)
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+def test_fund_metrics_view_reports_latest_and_flows(metrics_con) -> None:
+    view = quality.fund_metrics(metrics_con, "FLOW", METRICS_DB_AS_OF)
+    assert view.has_metrics is True
+    assert view.n_dates == 2
+    assert view.latest == quality.MetricsPoint(
+        as_of_date=METRICS_DB_AS_OF,
+        nav_per_unit=25.5,
+        shares_outstanding=1_050_000.0,
+        aum=26_775_000.0,
+        currency="CAD",
+    )
+    assert view.staleness_days == 0
+    assert view.staleness_label == "same day as the selected date"
+    assert view.is_stale is False
+    assert view.can_estimate_flows is True
+    assert view.method.startswith("Δshares × NAV")
+    estimates = view.estimate_rows["flow_estimate"].to_list()
+    assert estimates == [pytest.approx(1_275_000.0)]
+
+
+def test_fund_metrics_view_handles_a_fund_without_metrics(metrics_con) -> None:
+    view = quality.fund_metrics(metrics_con, "HOLD", METRICS_DB_AS_OF)
+    assert view.has_metrics is False
+    assert view.latest is None
+    assert view.staleness_days is None
+    assert view.can_estimate_flows is False
+    assert view.flows.is_empty()
+
+
+def test_fund_metrics_view_handles_a_database_without_metrics_table(tmp_path: Path) -> None:
+    path = make_empty_db(tmp_path / "empty.duckdb")
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        view = quality.fund_metrics(con, "FLOW", METRICS_DB_AS_OF)
+    finally:
+        con.close()
+    assert view.has_metrics is False
+
+
+def test_metrics_panel_shows_figures_flows_and_method(monkeypatch, metrics_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, metrics_db, asof=METRICS_DB_AS_OF)
+    app.selectbox(key="fund").select("FLOW").run()
+
+    assert not app.exception
+    metrics = _metric_values(app)
+    assert metrics["NAV per unit"] == "25.5000"
+    assert metrics["Shares outstanding"] == "1,050,000"
+    assert metrics["AUM"] == "26,775,000 CAD"
+    captions = [caption.value for caption in app.caption]
+    assert any(
+        "Latest figures as of 2026-10-22; same day as the selected date." in caption
+        for caption in captions
+    )
+    assert any("Method: Δshares × NAV" in caption for caption in captions)
+    flows = [frame.value for frame in app.dataframe if "Estimated flow" in frame.value.columns]
+    assert len(flows) == 1
+    estimates = flows[0]["Estimated flow"].to_list()
+    assert math.isnan(estimates[0])
+    assert estimates[1] == pytest.approx(1_275_000.0)
+    assert len(app.get("vega_lite_chart")) == 4
+
+
+def test_metrics_panel_explains_a_single_metrics_date(monkeypatch, metrics_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, metrics_db, asof=METRICS_DB_AS_OF)
+    app.selectbox(key="fund").select("ONE").run()
+
+    assert not app.exception
+    captions = [caption.value for caption in app.caption]
+    assert any(
+        "Latest figures as of 2026-09-01; 51 days before the selected date." in caption
+        for caption in captions
+    )
+    assert any("only one date is known as of this date" in caption for caption in captions)
+    warnings = [warning.value for warning in app.warning]
+    assert any("Fund metrics are 51 days old" in warning for warning in warnings)
+    assert not [frame for frame in app.dataframe if "Estimated flow" in frame.value.columns]
+
+
+def test_metrics_panel_explains_missing_metrics(monkeypatch, metrics_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, metrics_db, asof=METRICS_DB_AS_OF)
+    app.selectbox(key="fund").select("HOLD").run()
+
+    assert not app.exception
+    captions = [caption.value for caption in app.caption]
+    assert "No fund metrics for HOLD yet." in captions
+    assert not any("Method:" in caption for caption in captions)
+    assert not [frame for frame in app.dataframe if "Estimated flow" in frame.value.columns]
+
+
+def test_metrics_qa_panel_lists_a_funds_excluded_metrics_input(
+    monkeypatch, metrics_db: Path
+) -> None:
+    app = _run_quality_app(monkeypatch, metrics_db, asof=METRICS_DB_AS_OF)
+    app.selectbox(key="fund").select("BAD").run()
+
+    assert not app.exception
+    warnings = [warning.value for warning in app.warning]
+    assert any(
+        "Fund metrics error nav_positive: nav_per_unit=-1.0000 must be > 0 (bad_metrics)" in warning
+        for warning in warnings
+    )
+    captions = [caption.value for caption in app.caption]
+    assert any(
+        "Fund-metrics findings: 1 error(s), 1 warning(s), 0 info(s) "
+        "across all fund-metrics inputs." in caption
+        for caption in captions
+    )
+
+
+def test_metrics_qa_panel_reports_store_wide_counts_for_a_clean_fund(
+    monkeypatch, metrics_db: Path
+) -> None:
+    app = _run_quality_app(monkeypatch, metrics_db, asof=METRICS_DB_AS_OF)
+    app.selectbox(key="fund").select("FLOW").run()
+
+    assert not app.exception
+    warnings = [warning.value for warning in app.warning]
+    assert not any("Fund metrics error" in warning for warning in warnings)
+    captions = [caption.value for caption in app.caption]
+    assert any(
+        "Fund-metrics findings: 1 error(s), 1 warning(s), 0 info(s) "
+        "across all fund-metrics inputs." in caption
+        for caption in captions
+    )
+
+
+def test_metrics_panel_apptest_lists_every_metrics_fund(monkeypatch, metrics_db: Path) -> None:
+    app = _run_quality_app(monkeypatch, metrics_db, asof=METRICS_DB_AS_OF)
+
+    assert not app.exception
+    assert app.selectbox(key="fund").options == METRICS_DB_FUNDS
