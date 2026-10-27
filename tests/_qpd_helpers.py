@@ -411,6 +411,29 @@ def write_globalx_complete_lookalike(
     return path
 
 
+def write_globalx_over_one_lookalike(path: Path, *, as_of: str = "September 30, 2025") -> Path:
+    """Write a fictional Global X-style list whose printed weights exceed 100%.
+
+    Reproduces the CASH 2025 Q3 shape: the mix states 100.00% with a zero
+    balancing line, while one printed position carries a hundredfold typo, so
+    the list sums well above the stated total. The parser must keep every
+    printed weight as written and let validation report the file, never
+    rescale the table to fit.
+    """
+    return write_globalx_complete_lookalike(
+        path,
+        as_of=as_of,
+        other="0.00%",
+        holdings=(
+            ("National Trust Cash Account", "48.00%"),
+            ("Harbourside Bank Cash Account", "34.00%"),
+            ("Cash", "15.00%"),
+            ("Maplecrest Trust Cash Account", "13.00%"),
+            ("Cedarline Trust Cash Account", "2.00%"),
+        ),
+    )
+
+
 def write_globalx_direct_lookalike(path: Path) -> Path:
     """Write a fictional Global X direct-holding disclosure (top-25 layout)."""
     path.parent.mkdir(parents=True, exist_ok=True)

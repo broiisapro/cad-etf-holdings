@@ -20,6 +20,7 @@ from tests._qpd_helpers import (
     write_globalx_complete_lookalike,
     write_globalx_direct_lookalike,
     write_globalx_lookalike,
+    write_globalx_over_one_lookalike,
 )
 
 
@@ -119,6 +120,23 @@ def test_globalx_top25_selection_never_gets_the_balancing_line(tmp_path: Path) -
     assert "Other Assets less Liabilities" not in frame["security_name"].to_list()
     assert "partial_list=true" in parsed.notes
     assert not any(note.startswith("stated_total_fraction=") for note in parsed.notes)
+
+
+def test_globalx_printed_weights_are_never_rescaled(tmp_path: Path) -> None:
+    """The CASH 2025 Q3 shape: a printed typo is data, not something to repair."""
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_globalx_over_one_lookalike(tmp_path / "globalx_over_one.pdf"),
+            source_id="globalx_ca_qpd",
+            fund_ticker="GXC",
+            issuer="globalx_ca",
+        )
+    )
+    frame = parsed.frame
+    weights = dict(zip(frame["security_name"].to_list(), frame["weight"].to_list(), strict=True))
+    assert weights["Cash"] == pytest.approx(0.15)
+    assert float(frame["weight"].sum()) == pytest.approx(1.12)
+    assert _stated_total(parsed.notes) == pytest.approx(1.0)
 
 
 def test_globalx_can_parse_claims_only_disclosure_sources(tmp_path: Path) -> None:
