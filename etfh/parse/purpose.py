@@ -9,14 +9,21 @@ counts, so those columns stay null.
 
 The holdings list is a securities list: option lines ("... Call 94 11/06/26"),
 warrants, futures, forwards and swaps are classified as ``derivative``, FX
-forwards as ``fx``, and cash accounts as ``cash``. Several funds never reach
-100% because the source publishes the cash/other-asset share only in the
-``Level1``–``Level3`` exposure breakdowns, not as a holding row (some funds list
-a top-N subset). When the source itself reports a complete 100% exposure
-breakdown but its holdings list totals less, the file is marked
-``partial_list=true`` (D52) so validation does not force a sum the source never
-published. A shortfall without that evidence stays unmarked: a parsing gap must
-never hide behind the note.
+forwards as ``fx``, and cash accounts as ``cash``. Purpose never publishes its
+cash/other-asset line as a holding row, so the listed rows do not add up to the
+portfolio total the document itself reports (its ``Level1``–``Level3`` exposure
+breakdown). When the rows miss that total by more than the printed rounding the
+file is marked ``partial_list=true`` (D52) so validation does not force a sum the
+source never published. The rule is direction-blind: BNC's covered-call fund is
+2.0% short on days it holds cash and 0.5–0.6% over on days the long book is
+financed by an overdraft, and both are the same unpublished cash line rather
+than a parsing gap. A file whose own numbers do not add up and which publishes
+no breakdown stays unmarked: a parsing gap must never hide behind the note.
+
+A listed total above 100% is kept exactly as printed and is never rescaled: the
+weights are the issuer's, not ours. Such a file still fails validation's
+``weight_sum_over_one`` guard (D56), which is the correct signal that the
+source's own weights do not reconcile.
 
 Funds that publish a section list instead of ``Level4.holdings`` (for example a
 fund-of-funds "Holding Breakdown" under ``portfolio.holdings_data``) are read
@@ -209,8 +216,8 @@ def _has_full_exposure_breakdown(payload: dict[str, Any]) -> bool:
     Purpose publishes ``Level1``–``Level3`` breakdowns (by asset class, credit
     profile, geography, sector) whose values sum to ~100%. One such complete
     breakdown proves the source knows the whole portfolio while its holdings
-    list totals less: the missing share is cash/other assets it does not list
-    as a holding row.
+    rows do not add up to 100%: the missing share is the cash/other line it does
+    not list as a holding row.
     """
     portfolio = payload.get("portfolio")
     if not isinstance(portfolio, dict):
@@ -361,11 +368,12 @@ class PurposeParser:
             notes.append(f"unit_check={unit_check.detail()}")
         elif (
             unparsed_weights == 0
-            and unit_check.total < 100.0 - _COMPLETE_TOLERANCE
+            and abs(unit_check.total - 100.0) > _COMPLETE_TOLERANCE
             and _has_full_exposure_breakdown(payload)
         ):
-            # The source reports a complete 100% breakdown but lists only part
-            # of the portfolio as holdings (cash/other assets or a top-N list).
+            # The document states a complete portfolio but its listed rows do not
+            # add up to 100%, in either direction: the unpublished cash line is
+            # simply not a holding row. The rows keep their published weights.
             notes.append("partial_list=true")
         count = len(rows)
         frame = pl.DataFrame(
