@@ -22,6 +22,7 @@ OPTIONS = FIXTURE_DIR / "options.json"
 PARTIAL = FIXTURE_DIR / "partial.json"
 TOP_TEN = FIXTURE_DIR / "top_ten.json"
 COMMODITY = FIXTURE_DIR / "commodity.json"
+COVERED_CALL = FIXTURE_DIR / "covered_call.json"
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
@@ -249,6 +250,54 @@ def test_partial_list_flagged_when_holdings_omit_cash() -> None:
     assert not any(note.startswith("unit_check=") for note in parsed.notes)
     assert float(parsed.frame["weight"].sum()) == pytest.approx(0.9667, abs=1e-12)
     assert parsed.frame.height == 3
+
+
+def test_covered_call_total_above_one_is_partial_and_keeps_its_weights() -> None:
+    """A covered-call list can print a total just above 100% as published.
+
+    The document's own breakdown is complete (100%), while the listed rows add
+    up to 100.64%: ten equities (100.66%) plus nine written calls at 0.00% /
+    -0.01% and no cash row. That is the same unpublished cash line that makes a
+    cash-holding day fall short, so the file is partial (D52) — but the weights
+    stay exactly as published; the parser never renormalizes them.
+    """
+    parsed = PurposeParser().parse(_raw(COVERED_CALL, "PURF"))
+    assert parsed.as_of_date == date(2026, 10, 22)
+    assert "partial_list=true" in parsed.notes
+    assert "weight_decimals=2" in parsed.notes
+    assert not any(note.startswith("unit_check=") for note in parsed.notes)
+    frame = parsed.frame
+    ParsedHoldings.validate(frame)
+    assert frame.height == 19
+    assert float(frame["weight"].sum()) == pytest.approx(1.0064, abs=1e-12)
+    assert float(frame.filter(pl.col("asset_class") == "equity")["weight"].sum()) == pytest.approx(
+        1.0066, abs=1e-12
+    )
+    assert float(
+        frame.filter(pl.col("asset_class") == "derivative")["weight"].sum()
+    ) == pytest.approx(-0.0002, abs=1e-12)
+
+
+def test_total_above_one_without_breakdown_evidence_is_not_partial(tmp_path: Path) -> None:
+    payload = _payload(COVERED_CALL)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    portfolio.pop("Level1")
+    portfolio.pop("Level2")
+    path = _write(tmp_path, payload, "no_breakdown.json")
+    parsed = PurposeParser().parse(_raw(path, "PURF"))
+    assert not any(note.startswith("partial_list") for note in parsed.notes)
+    assert float(parsed.frame["weight"].sum()) == pytest.approx(1.0064, abs=1e-12)
+
+
+def test_file_that_reconciles_with_its_own_total_is_not_partial(tmp_path: Path) -> None:
+    payload = _payload(FIXTURE)
+    portfolio = payload["portfolio"]
+    assert isinstance(portfolio, dict)
+    # A breakdown that states 100% and rows that add up to it: no note.
+    path = _write(tmp_path, payload, "reconciled.json")
+    parsed = PurposeParser().parse(_raw(path))
+    assert "partial_list=true" not in parsed.notes
 
 
 def test_top_ten_list_is_partial_and_maps_fund_label() -> None:
