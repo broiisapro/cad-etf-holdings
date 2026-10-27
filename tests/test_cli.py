@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import duckdb
 import httpx
 import polars as pl
 import pytest
@@ -1360,8 +1361,6 @@ def test_flows_database_without_a_metrics_table_says_no_metrics_yet(
     """A build from before fund metrics existed still names the real state."""
     db = tmp_path / "old.duckdb"
     shutil.copy(fixture_build / "etfh.duckdb", db)
-    import duckdb
-
     con = duckdb.connect(str(db))
     try:
         con.execute("DROP TABLE fund_metrics")

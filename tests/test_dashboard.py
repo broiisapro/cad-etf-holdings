@@ -13,6 +13,7 @@ from pathlib import Path
 from types import ModuleType
 
 import duckdb
+import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -144,6 +145,25 @@ def test_breakdown_chart_sorts_by_weight() -> None:
 
     assert spec["encoding"]["y"]["sort"] == "-x"
     assert spec["encoding"]["x"]["type"] == "quantitative"
+
+
+def test_flows_chart_omits_rows_without_an_estimate() -> None:
+    with _app_module() as module:
+        flows = pl.DataFrame(
+            {
+                "as_of_date": [date(2026, 10, 30), date(2026, 11, 2)],
+                "flow_estimate": [None, 1_020_000.0],
+                "prev_as_of_date": [None, date(2026, 10, 30)],
+                "gap_days": [None, 1],
+            }
+        )
+        spec = module.flows_chart(flows).to_dict()
+
+    values = spec["datasets"][spec["data"]["name"]]
+    assert len(values) == 1
+    assert values[0]["flow_estimate"] == 1_020_000.0
+    assert values[0]["gap_days"] == 1
+    assert spec["encoding"]["y"]["axis"]["format"] == "~s"
 
 
 def test_db_path_default_and_env(monkeypatch) -> None:

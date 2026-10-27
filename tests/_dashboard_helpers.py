@@ -213,19 +213,34 @@ def metrics_asof(con: Any, fund: str, asof: date) -> pl.DataFrame:
     rows = METRICS_HISTORY.get(fund)
     if not rows:
         raise _REAL_FUND_NOT_FOUND(fund)
+    visible = [
+        row for row in rows if isinstance(row["as_of_date"], date) and row["as_of_date"] <= asof
+    ]
     return pl.DataFrame(
         {
-            "fund_ticker": [fund] * len(rows),
-            "as_of_date": [row["as_of_date"] for row in rows],
-            "known_at": [datetime(2026, 11, 2, 22, tzinfo=UTC)] * len(rows),
-            "file_version": [1] * len(rows),
-            "nav_per_unit": [row["nav_per_unit"] for row in rows],
-            "shares_outstanding": [row["shares_outstanding"] for row in rows],
-            "aum": [row["aum"] for row in rows],
-            "currency": [row["currency"] for row in rows],
-            "source_id": ["syn_metrics"] * len(rows),
-            "raw_file_sha256": ["a" * 64] * len(rows),
-        }
+            "fund_ticker": [fund] * len(visible),
+            "as_of_date": [row["as_of_date"] for row in visible],
+            "known_at": [datetime(2026, 11, 2, 22, tzinfo=UTC)] * len(visible),
+            "file_version": [1] * len(visible),
+            "nav_per_unit": [row["nav_per_unit"] for row in visible],
+            "shares_outstanding": [row["shares_outstanding"] for row in visible],
+            "aum": [row["aum"] for row in visible],
+            "currency": [row["currency"] for row in visible],
+            "source_id": ["syn_metrics"] * len(visible),
+            "raw_file_sha256": ["a" * 64] * len(visible),
+        },
+        schema={
+            "fund_ticker": pl.String,
+            "as_of_date": pl.Date,
+            "known_at": pl.Datetime(time_zone="UTC"),
+            "file_version": pl.Int32,
+            "nav_per_unit": pl.Float64,
+            "shares_outstanding": pl.Float64,
+            "aum": pl.Float64,
+            "currency": pl.String,
+            "source_id": pl.String,
+            "raw_file_sha256": pl.String,
+        },
     )
 
 
@@ -248,10 +263,10 @@ def flows(
     ]
     rows: list[dict[str, object]] = []
     for row in history:
-        as_of = row["as_of_date"]
-        if not isinstance(as_of, date) or not start <= as_of <= end:
+        date_value = row["as_of_date"]
+        if not isinstance(date_value, date) or not start <= date_value <= end:
             continue
-        previous = [point for point in share_dates if point[0] < as_of]
+        previous = [point for point in share_dates if point[0] < date_value]
         previous_date, previous_shares = previous[-1] if previous else (None, None)
         shares = row["shares_outstanding"]
         nav = row["nav_per_unit"]
@@ -260,13 +275,15 @@ def flows(
             estimate = (float(shares) - float(previous_shares)) * float(nav)
         rows.append(
             {
-                "as_of_date": as_of,
+                "as_of_date": date_value,
                 "shares_outstanding": shares,
                 "nav_per_unit": nav,
                 "prev_as_of_date": previous_date,
                 "prev_shares": previous_shares,
                 "gap_days": (
-                    None if previous_date is None else _business_days_between(previous_date, as_of)
+                    None
+                    if previous_date is None
+                    else _business_days_between(previous_date, date_value)
                 ),
                 "flow_estimate": estimate,
                 "method": _REAL_FLOW_METHOD,
