@@ -15,7 +15,7 @@ from etfh.collect.bmo_metrics import COLLECTORS, BmoMetricsCollector, factsheet_
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.parse.bmo_metrics import BmoMetricsParser
-from etfh.registry import Fund, Source, TermsNotAllowedError, load_sources
+from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
 from etfh.storage import RawStore
 from etfh.types import Decision
 from tests._metrics_helpers import bmo_factsheet_pdf
@@ -229,3 +229,28 @@ def test_live_bmo_factsheet_fetch_and_parse(tmp_path: Path) -> None:
     parsed = BmoMetricsParser().parse(raws[0])
     assert parsed.as_of_date == raws[0].as_of_hint
     assert parsed.frame["shares_outstanding"][0] > 0
+
+
+@pytest.mark.network
+def test_every_committed_bmo_fund_has_a_published_factsheet() -> None:
+    """The stems in ``funds.csv`` are the ones BMO publishes, not our display names."""
+    if not os.environ.get("ETFH_USER_AGENT"):
+        pytest.skip("ETFH_USER_AGENT is not set")
+    funds = [
+        fund
+        for fund in load_funds(CONFIG_DIR / "funds.csv", load_sources(CONFIG_DIR / "sources.yaml"))
+        if "bmo_metrics" in fund.source_ids
+    ]
+    source = _source()
+    missing: list[str] = []
+    with PoliteClient() as client:
+        for fund in funds:
+            url = factsheet_url(fund)
+            try:
+                response = client.get(url, source=source)
+            except httpx.HTTPError as exc:  # pragma: no cover - live network only
+                missing.append(f"{fund.ticker}: {exc}")
+                continue
+            if response.status_code != 200 or not response.content.startswith(b"%PDF"):
+                missing.append(f"{fund.ticker}: HTTP {response.status_code} at {url}")
+    assert missing == []
