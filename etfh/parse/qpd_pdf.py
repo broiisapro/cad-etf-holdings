@@ -14,22 +14,30 @@ to camelot 2.x (``stream`` then ``lattice``), as required by D17.
 Issuer-specific quirks live in :class:`QpdRules` instances registered in
 :data:`QPD_RULES` by source id, so a new issuer format does not require a new
 parser class.
+
+The parser only claims PDFs from sources registered as quarterly disclosures
+(plus the synthetic PDF source, which mirrors one). Any other PDF — a BMO
+metrics factsheet, an unrelated document in the raw store — is left to the
+parser that owns it instead of being read as a holdings table.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pdfplumber
 import polars as pl
 
-from etfh.types import FileFormat, ParsedFile, RawFile
+from etfh.registry import Source, load_sources
+from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
 from etfh.units import WeightUnit, check_unit, normalize_weights
 
 __all__ = [
@@ -39,6 +47,8 @@ __all__ = [
     "QpdPdfError",
     "QpdPdfParser",
     "QpdRules",
+    "configured_sources",
+    "disclosure_source_ids",
     "disclosure_as_of",
     "parse_qpd_date",
 ]
@@ -1031,6 +1041,45 @@ def _camelot_rows(path: Any) -> tuple[list[_Row], bool]:
     return [], False
 
 
+_SOURCES_CACHE: dict[str, tuple[tuple[int, int], dict[str, Source]]] = {}
+
+
+def configured_sources() -> dict[str, Source]:
+    """Sources from ``ETFH_CONFIG_DIR`` (default ``config``), keyed by id.
+
+    The cache is keyed on the file's modification stamp so a rewritten config
+    is picked up; a missing file means no source can be claimed. Parsing
+    errors propagate, because an invalid registry must fail loudly (D25).
+    """
+    path = Path(os.environ.get("ETFH_CONFIG_DIR", "config")) / "sources.yaml"
+    key = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    cached = _SOURCES_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    sources = load_sources(path)
+    _SOURCES_CACHE[key] = (stamp, sources)
+    return sources
+
+
+def disclosure_source_ids() -> frozenset[str]:
+    """Ids of the configured sources this parser may claim.
+
+    Quarterly disclosures, plus the synthetic PDF source that mirrors one so
+    the committed synthetic store exercises the same code path.
+    """
+    return frozenset(
+        source.id
+        for source in configured_sources().values()
+        if source.kind is SourceKind.quarterly_disclosure
+        or (source.kind is SourceKind.synthetic and source.format is FileFormat.pdf)
+    )
+
+
 class QpdPdfParser:
     """Parser for quarterly portfolio disclosure PDFs."""
 
@@ -1045,9 +1094,17 @@ class QpdPdfParser:
         self._source_ids = source_ids
 
     def can_parse(self, raw: RawFile) -> bool:
+        """Claim a PDF only when its source publishes quarterly disclosures.
+
+        ``source_ids`` is an explicit whitelist for direct use and tests; the
+        registered source kind decides otherwise. A fund-metrics factsheet or
+        any other PDF in the raw store is never read as a holdings table.
+        """
         if raw.ext.lower() != FileFormat.pdf.value:
             return False
-        return self._source_ids is None or raw.source_id in self._source_ids
+        if self._source_ids is not None:
+            return raw.source_id in self._source_ids
+        return raw.source_id in disclosure_source_ids()
 
     def rules_for(self, raw: RawFile) -> QpdRules:
         if self._rules is not None:

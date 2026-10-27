@@ -10,8 +10,16 @@ import pytest
 
 from etfh.parse import qpd_pdf
 from etfh.parse.qpd_pdf import QpdPdfError, QpdPdfParser, parse_qpd_date
+from etfh.parse.registry import find_parser
 from etfh.schema import ParsedHoldings
-from tests._qpd_helpers import raw_file_for_pdf, write_qpd_pdf, write_raw_text_pdf
+from etfh.types import FileFormat, SourceKind
+from tests._qpd_helpers import (
+    qpd_source,
+    raw_file_for_pdf,
+    write_backfill_config,
+    write_qpd_pdf,
+    write_raw_text_pdf,
+)
 
 SYNF_PDF = Path("tests/fixtures/raw_synthetic/synthetic/SYNF/2026-09-30/20261028T220000Z.pdf")
 
@@ -297,6 +305,36 @@ def test_source_scoped_parser() -> None:
     assert scoped.can_parse(raw)
     other = raw_file_for_pdf(Path("anything.pdf"), source_id="bmo_qpd")
     assert not scoped.can_parse(other)
+
+
+def test_can_parse_does_not_claim_a_metrics_pdf(tmp_path: Path) -> None:
+    """A fund-metrics factsheet is not a holdings table (wave-06 review #2)."""
+    raw = raw_file_for_pdf(tmp_path / "factsheet.pdf", source_id="bmo_metrics", issuer="bmo")
+    assert QpdPdfParser().can_parse(raw) is False
+    metrics = qpd_source("bmo_metrics", issuer="bmo").model_copy(
+        update={"kind": SourceKind.fund_metrics, "format": FileFormat.pdf}
+    )
+    assert find_parser(raw, metrics) is None
+
+
+def test_find_parser_claims_a_disclosure_pdf(tmp_path: Path) -> None:
+    raw = raw_file_for_pdf(
+        tmp_path / "disclosure.pdf", source_id="globalx_ca_qpd", issuer="globalx_ca"
+    )
+    parser = find_parser(raw, qpd_source("globalx_ca_qpd", issuer="globalx_ca"))
+    assert isinstance(parser, QpdPdfParser)
+
+
+def test_can_parse_follows_the_configured_source_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write_backfill_config(
+        tmp_path / "config", source_id="local_qpd", issuer="local", tickers=["LCAL"]
+    )
+    monkeypatch.setenv("ETFH_CONFIG_DIR", str(config))
+    parser = QpdPdfParser()
+    assert parser.can_parse(raw_file_for_pdf(tmp_path / "x.pdf", source_id="local_qpd"))
+    assert not parser.can_parse(raw_file_for_pdf(tmp_path / "x.pdf", source_id="globalx_ca_qpd"))
 
 
 def test_parse_qpd_date_variants() -> None:
