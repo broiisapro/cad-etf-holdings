@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import duckdb
 import httpx
 import polars as pl
 import pytest
@@ -1303,6 +1304,84 @@ def test_flows_unknown_fund_exits_two(fixture_build: Path, monkeypatch: pytest.M
     )
     assert result.exit_code == 2
     assert "unknown fund 'NOPE'" in result.output
+
+
+def test_flows_fund_with_holdings_but_no_metrics_reports_that(fixture_build: Path) -> None:
+    """A known fund without metrics is not an unknown fund (wave-06 review #5)."""
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "SYNA",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no fund metrics for SYNA yet" in result.output
+    assert "unknown fund" not in result.output
+    assert (
+        "method: Δshares × NAV (estimate; ignores distributions and in-kind effects)"
+        in result.output
+    )
+
+
+def test_flows_fund_without_metrics_keeps_json_valid(fixture_build: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "SYNA",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(fixture_build / "etfh.duckdb"),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["fund"] == "SYNA"
+    assert payload["rows"] == []
+    assert payload["message"] == "no fund metrics for SYNA yet"
+    assert payload["method"].startswith("Δshares × NAV")
+
+
+def test_flows_database_without_a_metrics_table_says_no_metrics_yet(
+    fixture_build: Path, tmp_path: Path
+) -> None:
+    """A build from before fund metrics existed still names the real state."""
+    db = tmp_path / "old.duckdb"
+    shutil.copy(fixture_build / "etfh.duckdb", db)
+    con = duckdb.connect(str(db))
+    try:
+        con.execute("DROP TABLE fund_metrics")
+    finally:
+        con.close()
+    result = runner.invoke(
+        app,
+        [
+            "flows",
+            "--fund",
+            "SYNA",
+            "--from",
+            "2026-10-20",
+            "--to",
+            "2026-10-22",
+            "--db",
+            str(db),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no fund metrics for SYNA yet" in result.output
 
 
 def test_flows_with_no_rows_still_prints_the_method(

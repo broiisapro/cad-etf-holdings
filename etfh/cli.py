@@ -19,7 +19,9 @@ Commands:
   weight share exceeds ``X``, and ``--asof`` measures those shares on the
   versions known by ``D`` (wave-05 review #3).
 - ``flows --fund F --from D1 --to D2 --db PATH [--asof D] [--json]`` prints
-  estimated creation/redemption flows (D67) and always the method line.
+  estimated creation/redemption flows (D67) and always the method line. A fund
+  that has holdings but no metrics yet is reported as such (exit 0), never as
+  an unknown fund; unknown funds still exit 2.
 - ``backfill-qpd --issuer ISSUER --quarters N --raw DIR [--config DIR]``
   fetches historical quarterly disclosures and reports every fund-quarter as
   fetched, present or missing.
@@ -55,7 +57,7 @@ import polars as pl
 import typer
 
 from etfh import qa as qa_module
-from etfh.analytics import FundNotFoundError, OverlapResult
+from etfh.analytics import FundNotFoundError, OverlapResult, funds_available
 from etfh.analytics import changes as compute_changes
 from etfh.analytics import flows as compute_flows
 from etfh.analytics import overlap as compute_overlap
@@ -395,17 +397,33 @@ def flows(
 
     flow = (shares_t - shares_prev) x NAV_t for the same fund and as-of date;
     ``shares_prev`` is the previous as-of date that has a share count, never a
-    forward-filled value (D67). Every output carries the method label.
+    forward-filled value (D67). Every output carries the method label. A known
+    fund with no metrics rows reports ``no fund metrics for <fund> yet`` and
+    exits 0; an unknown fund exits 2.
     """
     start = _parse_date(from_date, "--from")
     end = _parse_date(to_date, "--to")
     asof_date = _parse_date(asof, "--asof") if asof is not None else end
     connection = _connect(db)
     try:
-        frame = compute_flows(connection, fund, start, end, asof=asof_date)
-    except FundNotFoundError as error:
-        typer.echo(f"error: unknown fund {error.fund!r} in {db}", err=True)
-        raise typer.Exit(code=2) from None
+        try:
+            frame = compute_flows(connection, fund, start, end, asof=asof_date)
+        except FundNotFoundError:
+            # ``flows`` needs metrics rows; a fund that only has holdings is
+            # known to the dataset and simply has no metrics yet (wave-06
+            # review #5). Unknown funds still exit 2.
+            if not _has_holdings(connection, fund):
+                typer.echo(f"error: unknown fund {fund!r} in {db}", err=True)
+                raise typer.Exit(code=2) from None
+            _report_no_metrics(fund, start, end, asof_date, json_output)
+            return
+        except duckdb.CatalogException as error:
+            # A database built before fund metrics existed has no table at
+            # all; the same "no metrics yet" message is the honest answer.
+            if "fund_metrics" not in str(error) or not _has_holdings(connection, fund):
+                raise
+            _report_no_metrics(fund, start, end, asof_date, json_output)
+            return
     finally:
         connection.close()
     method = _flow_method(frame)
@@ -827,6 +845,42 @@ def _qa_source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, 
             "quarterly" if quarterly else "daily",
         )
     return metadata
+
+
+def _has_holdings(con: duckdb.DuckDBPyConnection, fund: str) -> bool:
+    """True when the built database carries holdings rows for ``fund``.
+
+    A fund with holdings but no fund metrics is a known fund whose metrics have
+    not been collected yet; only a fund absent from the holdings table is
+    unknown. A database without a holdings table answers False.
+    """
+    try:
+        return fund in funds_available(con)
+    except duckdb.Error:
+        return False
+
+
+def _report_no_metrics(fund: str, start: date, end: date, asof: date, json_output: bool) -> None:
+    """Explain that a known fund has no metrics yet, keeping JSON valid."""
+    if json_output:
+        typer.echo(_no_metrics_json(fund, start, end, asof))
+        return
+    typer.echo(f"no fund metrics for {fund} yet")
+    typer.echo(f"method: {_FLOW_METHOD}")
+
+
+def _no_metrics_json(fund: str, start: date, end: date, asof: date) -> str:
+    """Empty flow payload for a fund without metrics, in the ``--json`` shape."""
+    payload = {
+        "fund": fund,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "asof": asof.isoformat(),
+        "method": _FLOW_METHOD,
+        "rows": [],
+        "message": f"no fund metrics for {fund} yet",
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def _flow_method(frame: pl.DataFrame) -> str:

@@ -7,7 +7,10 @@ and :mod:`etfh.analytics`:
   :func:`etfh.analytics.concentration`;
 - the unmatched non-cash weight share from :func:`etfh.qa.unmatched_shares`,
   selected as of the panel's date (the same definition ``etfh qa`` reports);
-- the excluded files for a fund from :func:`etfh.qa.summarize`.
+- the excluded files for a fund from :func:`etfh.qa.summarize`;
+- the fund-metrics figures from :func:`etfh.analytics.metrics_asof`, the flow
+  estimates from :func:`etfh.analytics.flows`, and the fund-metrics findings
+  reported by :func:`etfh.qa.summarize` (D66, D67).
 
 The only other read is the build's additive ``sources`` metadata table (D53),
 through DuckDB's relation API rather than SQL, because no public accessor for
@@ -17,22 +20,50 @@ the source kind exists yet. It is display metadata, never an analytic.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import TypedDict, cast
 
 import duckdb
 import polars as pl
+from polars.datatypes import DataType, DataTypeClass
 
 from etfh import analytics, qa
 
 UNMATCHED_NOTE_THRESHOLD = 0.20
 """Overlap understates when a fund's unmatched weight share exceeds this value."""
 
+STALE_METRICS_DAYS = 30
+"""Fund metrics older than this many days are called out in the panel."""
+
 SOURCE_KIND_LABELS: dict[str, str] = {
     "daily_holdings": "Daily holdings",
     "quarterly_disclosure": "Quarterly disclosure",
     "synthetic": "Synthetic",
+}
+
+_METRICS_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "fund_ticker": pl.String,
+    "as_of_date": pl.Date,
+    "known_at": pl.Datetime(time_zone="UTC"),
+    "file_version": pl.Int32,
+    "nav_per_unit": pl.Float64,
+    "shares_outstanding": pl.Float64,
+    "aum": pl.Float64,
+    "currency": pl.String,
+    "source_id": pl.String,
+    "raw_file_sha256": pl.String,
+}
+
+_FLOW_SCHEMA: dict[str, DataTypeClass | DataType] = {
+    "as_of_date": pl.Date,
+    "shares_outstanding": pl.Float64,
+    "nav_per_unit": pl.Float64,
+    "prev_as_of_date": pl.Date,
+    "prev_shares": pl.Float64,
+    "gap_days": pl.Int32,
+    "flow_estimate": pl.Float64,
+    "method": pl.String,
 }
 
 
@@ -66,6 +97,62 @@ class ExcludedFile:
 
 
 @dataclass(frozen=True, slots=True)
+class MetricsPoint:
+    """The figures of the latest fund-metrics date, as the source published them."""
+
+    as_of_date: date
+    nav_per_unit: float | None
+    shares_outstanding: float | None
+    aum: float | None
+    currency: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricsFinding:
+    """One ``etfh.qa`` finding attached to a fund-metrics input."""
+
+    source_id: str
+    check: str
+    severity: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class MetricsQa:
+    """Fund-metrics health from :func:`etfh.qa.summarize`.
+
+    ``findings`` covers the fund's own excluded or inconsistent metrics inputs.
+    ``errors``/``warnings``/``infos`` are the store-wide metrics counts the QA
+    report prints, because the summary aggregates findings on included metrics
+    inputs instead of exposing them per fund.
+    """
+
+    findings: tuple[MetricsFinding, ...] = ()
+    errors: int = 0
+    warnings: int = 0
+    infos: int = 0
+    inputs: int = 0
+
+    @property
+    def has_inputs(self) -> bool:
+        """True when the build stored at least one fund-metrics input."""
+        return self.inputs > 0
+
+    @property
+    def has_findings(self) -> bool:
+        """True when the QA summary has any fund-metrics finding, anywhere."""
+        return bool(self.findings) or bool(self.errors or self.warnings or self.infos)
+
+    @property
+    def counts_label(self) -> str:
+        """The QA report's finding counts, for the panel caption."""
+        return (
+            f"{self.errors} error(s), {self.warnings} warning(s), "
+            f"{self.infos} info(s) across all fund-metrics inputs"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FundQuality:
     """Data-quality state of one fund as of one dashboard date."""
 
@@ -80,6 +167,7 @@ class FundQuality:
     unmatched_weight: float | None
     total_weight: float | None
     excluded_files: tuple[ExcludedFile, ...] = ()
+    metrics: MetricsQa = field(default_factory=MetricsQa)
 
     @property
     def source_label(self) -> str:
@@ -100,6 +188,88 @@ class FundQuality:
     def understates_overlap(self) -> bool:
         """True when unmatched weight is high enough to distort overlap views."""
         return self.unmatched_share is not None and self.unmatched_share > UNMATCHED_NOTE_THRESHOLD
+
+
+@dataclass(frozen=True, slots=True)
+class FundMetrics:
+    """One fund's metrics history and flow estimates as known on ``asof``.
+
+    ``history`` is :func:`etfh.analytics.metrics_asof` (one row per as-of date),
+    ``flows`` is :func:`etfh.analytics.flows` over that history, and ``method``
+    is the D67 label every flow carries.
+    """
+
+    fund: str
+    asof: date
+    history: pl.DataFrame
+    flows: pl.DataFrame
+    method: str
+
+    @property
+    def has_metrics(self) -> bool:
+        """True when any metrics date is known by ``asof``."""
+        return not self.history.is_empty()
+
+    @property
+    def n_dates(self) -> int:
+        """Number of metrics dates known by ``asof``."""
+        return self.history.height
+
+    @property
+    def latest(self) -> MetricsPoint | None:
+        """The newest metrics point, or ``None`` when the fund has none yet."""
+        if self.history.is_empty():
+            return None
+        row = self.history.row(self.history.height - 1, named=True)
+        return MetricsPoint(
+            as_of_date=cast(date, row["as_of_date"]),
+            nav_per_unit=_float_or_none(row["nav_per_unit"]),
+            shares_outstanding=_float_or_none(row["shares_outstanding"]),
+            aum=_float_or_none(row["aum"]),
+            currency=None if row["currency"] is None else str(row["currency"]),
+        )
+
+    @property
+    def staleness_days(self) -> int | None:
+        """Calendar days between the latest metrics date and the selected date."""
+        latest = self.latest
+        if latest is None:
+            return None
+        return max(0, (self.asof - latest.as_of_date).days)
+
+    @property
+    def is_stale(self) -> bool:
+        """True when the latest metrics date is older than :data:`STALE_METRICS_DAYS`."""
+        days = self.staleness_days
+        return days is not None and days >= STALE_METRICS_DAYS
+
+    @property
+    def staleness_label(self) -> str:
+        """Human sentence describing how old the latest metrics date is."""
+        days = self.staleness_days
+        if days is None:
+            return "no metrics as of this date"
+        if days == 0:
+            return "same day as the selected date"
+        if days == 1:
+            return "1 day before the selected date"
+        return f"{days} days before the selected date"
+
+    @property
+    def estimate_rows(self) -> pl.DataFrame:
+        """Flow rows that actually carry an estimate."""
+        if self.flows.is_empty():
+            return self.flows
+        return self.flows.filter(pl.col("flow_estimate").is_not_null())
+
+    @property
+    def can_estimate_flows(self) -> bool:
+        """True when at least two share counts make one flow estimable."""
+        return not self.estimate_rows.is_empty()
+
+
+def _float_or_none(value: object) -> float | None:
+    return None if value is None else float(cast(float, value))
 
 
 def source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str | None, str | None]]:
@@ -140,9 +310,8 @@ def _share_frame(con: duckdb.DuckDBPyConnection, asof: date) -> pl.DataFrame:
         )
 
 
-def _excluded_by_fund(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[ExcludedFile, ...]]:
+def _excluded_by_fund(summary: qa.QaSummary) -> dict[str, tuple[ExcludedFile, ...]]:
     """Excluded files grouped by fund, from the QA summary."""
-    summary = qa.summarize(con)
     grouped: dict[str, list[ExcludedFile]] = {}
     for entry in summary.excluded_files:
         checks = tuple(
@@ -162,6 +331,47 @@ def _excluded_by_fund(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[Exclude
             sorted(files, key=lambda item: (item.as_of_date or date.min, item.source_id))
         )
     return result
+
+
+def _metrics_qa(summary: qa.QaSummary, fund: str) -> MetricsQa:
+    """Metrics findings for ``fund`` plus the store-wide finding counts.
+
+    ``qa.summarize`` exposes findings for excluded and inconsistent metrics
+    inputs per fund; findings on included inputs survive only as counts, so the
+    panel shows both the fund's own problem files and the report's totals.
+    """
+    entries: tuple[qa.MetricsFile | qa.InconsistentMetricsFile, ...] = (
+        *summary.metrics.excluded_files,
+        *summary.metrics.inconsistent_files,
+    )
+    findings = {
+        MetricsFinding(
+            source_id=entry.source_id,
+            check=check,
+            severity=severity,
+            detail=detail,
+        )
+        for entry in entries
+        if fund in entry.fund_tickers
+        for check, severity, detail in entry.findings
+    }
+    return MetricsQa(
+        findings=tuple(
+            sorted(
+                findings,
+                key=lambda item: (
+                    item.source_id,
+                    item.check,
+                    item.severity,
+                    item.detail,
+                ),
+            )
+        ),
+        errors=summary.metrics.errors,
+        warnings=summary.metrics.warnings,
+        infos=summary.metrics.infos,
+        inputs=summary.metrics.files_included + summary.metrics.files_excluded,
+    )
 
 
 def _selected_source_id(holdings: pl.DataFrame) -> str | None:
@@ -201,6 +411,7 @@ def _quality(
     shares: pl.DataFrame,
     metadata: dict[str, tuple[str | None, str | None]],
     excluded: dict[str, tuple[ExcludedFile, ...]],
+    metrics: MetricsQa,
     holdings: pl.DataFrame | None = None,
 ) -> FundQuality:
     concentration = analytics.concentration(con, fund, asof)
@@ -220,6 +431,7 @@ def _quality(
         unmatched_weight=(float(share_row["unmatched_weight"]) if share_row is not None else None),
         total_weight=float(share_row["total_weight"]) if share_row is not None else None,
         excluded_files=excluded.get(fund, ()),
+        metrics=metrics,
     )
 
 
@@ -236,13 +448,15 @@ def fund_quality(
     saving one query; it must be the as-of-selected frame
     (:func:`etfh.analytics.holdings_asof`).
     """
+    summary = qa.summarize(con)
     return _quality(
         con,
         fund,
         asof,
         shares=_share_frame(con, asof),
         metadata=source_metadata(con),
-        excluded=_excluded_by_fund(con),
+        excluded=_excluded_by_fund(summary),
+        metrics=_metrics_qa(summary, fund),
         holdings=holdings,
     )
 
@@ -255,7 +469,8 @@ def fund_qualities(
     """Quality for several funds, reading the shared QA tables once."""
     shares = _share_frame(con, asof)
     metadata = source_metadata(con)
-    excluded = _excluded_by_fund(con)
+    summary = qa.summarize(con)
+    excluded = _excluded_by_fund(summary)
     return {
         fund: _quality(
             con,
@@ -264,9 +479,56 @@ def fund_qualities(
             shares=shares,
             metadata=metadata,
             excluded=excluded,
+            metrics=_metrics_qa(summary, fund),
         )
         for fund in funds
     }
+
+
+def fund_metrics(
+    con: duckdb.DuckDBPyConnection,
+    fund: str,
+    asof: date,
+) -> FundMetrics:
+    """Latest metrics, metrics history and flow estimates for ``fund``.
+
+    Metrics are additive (D66): a fund with holdings but no metrics rows gets
+    an empty history instead of raising, so the dashboard can say "no metrics
+    yet" rather than treating the fund as unknown.
+    """
+    history = _metrics_history(con, fund, asof)
+    return FundMetrics(
+        fund=fund,
+        asof=asof,
+        history=history,
+        flows=_flow_history(con, fund, history, asof),
+        method=analytics.FLOW_METHOD,
+    )
+
+
+def _metrics_history(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> pl.DataFrame:
+    """``analytics.metrics_asof``, or an empty metrics frame when there are none."""
+    try:
+        return analytics.metrics_asof(con, fund, asof)
+    except (analytics.FundNotFoundError, duckdb.Error):
+        return pl.DataFrame(schema=_METRICS_SCHEMA)
+
+
+def _flow_history(
+    con: duckdb.DuckDBPyConnection,
+    fund: str,
+    history: pl.DataFrame,
+    asof: date,
+) -> pl.DataFrame:
+    """``analytics.flows`` over the known metrics dates, empty below two dates."""
+    if history.height < 2:
+        return pl.DataFrame(schema=_FLOW_SCHEMA)
+    start = cast(date, history["as_of_date"].min())
+    end = cast(date, history["as_of_date"].max())
+    try:
+        return analytics.flows(con, fund, start, end, asof=asof)
+    except (analytics.FundNotFoundError, duckdb.Error):
+        return pl.DataFrame(schema=_FLOW_SCHEMA)
 
 
 def understated_note(qualities: Sequence[FundQuality]) -> str | None:
