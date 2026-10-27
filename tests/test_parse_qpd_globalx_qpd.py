@@ -17,6 +17,7 @@ from etfh.storage import RawStore
 from tests._qpd_helpers import (
     qpd_fund,
     raw_file_for_pdf,
+    write_globalx_complete_lookalike,
     write_globalx_direct_lookalike,
     write_globalx_lookalike,
 )
@@ -45,11 +46,11 @@ def test_globalx_lookalike_uses_top_holdings_section(tmp_path: Path) -> None:
     frame = parsed.frame
     assert parsed.as_of_date == date(2026, 3, 31)
     assert parsed.published_at is None
-    assert frame.height == 3
     assert frame["security_name"].to_list() == [
         "Fair Value of Index Swaps",
         "Cash held for Collateral",
         "Cash - Other",
+        "Other Assets less Liabilities",
     ]
     assert "Northgate Bank" not in frame["security_name"].to_list()
     classes = dict(
@@ -57,6 +58,8 @@ def test_globalx_lookalike_uses_top_holdings_section(tmp_path: Path) -> None:
     )
     assert classes["Fair Value of Index Swaps"] == "derivative"
     assert classes["Cash held for Collateral"] == "cash"
+    assert classes["Other Assets less Liabilities"] == "other"
+    assert float(frame["weight"][-1]) == pytest.approx(0.0005)
     stated = _stated_total(parsed.notes)
     assert stated == pytest.approx(1.0)
     assert abs(float(frame["weight"].sum()) - stated) <= 0.005
@@ -78,6 +81,59 @@ def test_globalx_direct_top25_omits_unstated_total(tmp_path: Path) -> None:
     assert "U.S. Equities" not in frame["security_name"].to_list()
     assert "partial_list=true" in parsed.notes
     assert not any(note.startswith("stated_total_fraction=") for note in parsed.notes)
+
+
+def test_globalx_complete_list_carries_the_balancing_line(tmp_path: Path) -> None:
+    """An older "Top Holdings" list ties to the stated total through the mix line."""
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_globalx_complete_lookalike(tmp_path / "globalx_older.pdf"),
+            source_id="globalx_ca_qpd",
+            fund_ticker="GXO",
+            issuer="globalx_ca",
+        )
+    )
+    ParsedHoldings.validate(parsed.frame)
+    frame = parsed.frame
+    assert parsed.as_of_date == date(2025, 9, 30)
+    assert frame["security_name"].to_list()[-1] == "Other Assets less Liabilities"
+    assert frame["asset_class"].to_list()[-1] == "other"
+    assert float(frame["weight"][-1]) == pytest.approx(-0.0094)
+    stated = _stated_total(parsed.notes)
+    assert stated == pytest.approx(1.0)
+    assert float(frame["weight"].sum()) == pytest.approx(stated)
+
+
+def test_globalx_top25_selection_never_gets_the_balancing_line(tmp_path: Path) -> None:
+    parsed = QpdPdfParser().parse(
+        raw_file_for_pdf(
+            write_globalx_complete_lookalike(
+                tmp_path / "globalx_top25.pdf", heading="Top 25 Holdings"
+            ),
+            source_id="globalx_ca_qpd",
+            fund_ticker="GXS",
+            issuer="globalx_ca",
+        )
+    )
+    frame = parsed.frame
+    assert "Other Assets less Liabilities" not in frame["security_name"].to_list()
+    assert "partial_list=true" in parsed.notes
+    assert not any(note.startswith("stated_total_fraction=") for note in parsed.notes)
+
+
+def test_globalx_can_parse_claims_only_disclosure_sources(tmp_path: Path) -> None:
+    parser = QpdPdfParser()
+    assert parser.can_parse(
+        raw_file_for_pdf(tmp_path / "x.pdf", source_id="globalx_ca_qpd", issuer="globalx_ca")
+    )
+    assert parser.can_parse(raw_file_for_pdf(tmp_path / "x.pdf", source_id="syn_pdf"))
+    assert not parser.can_parse(
+        raw_file_for_pdf(tmp_path / "x.pdf", source_id="bmo_metrics", issuer="bmo")
+    )
+    assert not parser.can_parse(
+        raw_file_for_pdf(tmp_path / "x.pdf", source_id="bmo_daily", issuer="bmo")
+    )
+    assert not parser.can_parse(raw_file_for_pdf(tmp_path / "x.pdf", source_id="mystery_pdf"))
 
 
 @pytest.mark.network

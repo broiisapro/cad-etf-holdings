@@ -19,6 +19,15 @@ The parser only claims PDFs from sources registered as quarterly disclosures
 (plus the synthetic PDF source, which mirrors one). Any other PDF — a BMO
 metrics factsheet, an unrelated document in the raw store — is left to the
 parser that owns it instead of being read as a holdings table.
+
+One layout detail is worth stating up front. Some issuers (Global X) list the
+fund's complete portfolio under "Top Holdings" rather than a top-N selection.
+That list holds gross assets, while the document's asset mix prints a separate
+balancing line ("Other Assets less Liabilities") before the stated 100.00%
+total. Such a list sums to 100% plus that line, so the rule carries the
+printed balancing line into the frame as an ``other`` row: the file then ties
+exactly to the total the document states. A numbered "top N holdings" table is
+a selection and never gets the line.
 """
 
 from __future__ import annotations
@@ -178,6 +187,12 @@ class QpdRules:
     name_cleanup_patterns: tuple[str, ...] = ()
     partial_section_pattern: str = ""
     stated_total_applies_to_partial: bool = True
+    # Named groups ``name`` and ``value`` for a balancing portfolio line the
+    # issuer prints outside the holdings table ("Other Assets less
+    # Liabilities  -0.94%"). It is carried into the frame as an ``other`` row
+    # when the holdings section is a complete list, so the file ties to the
+    # document's stated total; a "top N" section never gets it.
+    balance_line_patterns: tuple[str, ...] = ()
     table_settings: dict[str, Any] | None = None
 
 
@@ -238,6 +253,13 @@ GLOBALX_RULES = replace(
     total_patterns=(
         r"\$\s*[\d,]+\s+([<>]?\s*-?\d[\d\s.,]*\s*%)",
         *DEFAULT_RULES.total_patterns,
+    ),
+    # A complete "Top Holdings" list holds gross assets and stops short of the
+    # balancing line the asset mix prints above it, so the two only agree once
+    # that line is carried too (older and current quarters alike).
+    balance_line_patterns=(
+        r"^(?P<name>other\s+assets?\s+less\s+liabilities)\b[^\n]*?"
+        r"(?P<value>\(?\s*-?\d[\d,.]*\s*%\)?)\s*$",
     ),
 )
 
@@ -485,6 +507,34 @@ def _stated_total(text: str, rules: QpdRules) -> float | None:
         values = [value for value in matches if value is not None]
         if values:
             return values[-1]
+    return None
+
+
+def _balance_row(text: str, rules: QpdRules) -> _Row | None:
+    """The balancing asset line the issuer prints outside the holdings table.
+
+    Global X prints "Other Assets less Liabilities" in the asset mix, just
+    above the stated 100.00% total, and then lists the whole portfolio under an
+    unnumbered "Top Holdings" heading. The list holds gross assets, so it sums
+    to 100% plus that line; carrying the line as an ``other`` row is what makes
+    the parsed total equal the document's stated total. The last printed line
+    wins, matching the total at the foot of the mix table. The value is always
+    the line's own percent, never an amount read from another column.
+    """
+    for pattern in rules.balance_line_patterns:
+        matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
+        if not matches:
+            continue
+        match = matches[-1]
+        value = _number_value(match.group("value"))
+        if value is None:
+            continue
+        return _Row(
+            name=_clean(match.group("name")),
+            weight=value,
+            sector="Unknown",
+            decimals=_decimal_places(match.group("value")),
+        )
     return None
 
 
@@ -1127,6 +1177,12 @@ class QpdPdfParser:
         omit_stated_total = partial and not rules.stated_total_applies_to_partial
         if stated_total is None and not omit_stated_total:
             raise QpdPdfError(f"{raw.path}: no stated total found")
+        if rules.balance_line_patterns and not partial:
+            balance = _balance_row(text, rules)
+            if balance is not None and not any(
+                _clean(row.name).casefold() == balance.name.casefold() for row in rows
+            ):
+                rows = [*rows, balance]
 
         names: list[str] = []
         raw_weights: list[float] = []

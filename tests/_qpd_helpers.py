@@ -334,6 +334,83 @@ def write_globalx_lookalike(path: Path, *, as_of: str = "March 31, 2026") -> Pat
     return path
 
 
+_GLOBALX_COMPLETE_HOLDINGS = (
+    ("Cedarline Pipelines Ltd.", "45.00%"),
+    ("Northgate Bank", "30.00%"),
+    ("Cash and Cash Equivalents", "15.00%"),
+    ("Juniper Health Corp.", "10.94%"),
+)
+
+
+def write_globalx_complete_lookalike(
+    path: Path,
+    *,
+    as_of: str = "September 30, 2025",
+    heading: str = "Top Holdings",
+    other: str = "-0.94%",
+    holdings: Sequence[tuple[str, str]] = _GLOBALX_COMPLETE_HOLDINGS,
+) -> Path:
+    """Write a fictional Global X-style complete-portfolio disclosure.
+
+    Mirrors the older 2025 layout: an asset mix with a balancing "Other Assets
+    less Liabilities" line above the stated 100.00% total, then an unnumbered
+    "Top Holdings" section that lists every position. The holdings sum to
+    100% minus ``other``, so only the balancing line ties them to the stated
+    total. ``heading`` can be an numbered "Top 25 Holdings" to model a
+    selection, which must not get the line.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    pdf.setTitle("Summary of Investment Portfolio")
+    pdf.setAuthor("etfh test fixtures")
+
+    def amount_row(
+        y: float, name: str, dollars: str | None, percent: str | None, bold: bool = False
+    ) -> None:
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", 9)
+        if name:
+            pdf.drawString(_LEFT, y, name)
+        if dollars is not None:
+            pdf.drawRightString(440, y, dollars)
+        if percent is not None:
+            pdf.drawRightString(_RIGHT, y, percent)
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(_LEFT, _TOP, "Global X Fictional Balanced Income ETF (GXO:TSX)")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(_LEFT, _TOP - 18, "Summary of Investment Portfolio")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(_LEFT, _TOP - 32, f"As at {as_of}")
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 62, "Asset Mix")
+    pdf.drawString(_LEFT, _TOP - 76, "% of ETF's")
+    pdf.drawRightString(440, _TOP - 76, "Net Asset Value")
+    pdf.drawRightString(_RIGHT, _TOP - 76, "Net Asset Value")
+    amount_row(_TOP - 92, "Canadian Equities", "$ 12,345,678", "42.35%")
+    amount_row(_TOP - 106, "U.S. Equities", "11,234,567", "38.55%")
+    amount_row(_TOP - 120, "Cash and Cash Equivalents", "3,492,551", "19.04%")
+    amount_row(_TOP - 134, "Other Assets less Liabilities", "(273,986)", other)
+    amount_row(_TOP - 148, "", "$ 29,148,812", "100.00%", bold=True)
+
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(_LEFT, _TOP - 178, heading)
+    pdf.drawString(_LEFT, _TOP - 192, "% of ETF's")
+    pdf.drawRightString(_RIGHT, _TOP - 192, "Net Asset Value")
+    for index, (name, weight) in enumerate(holdings, start=1):
+        amount_row(_TOP - 192 - index * 14, name, None, weight)
+
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(
+        _LEFT,
+        _TOP - 192 - (len(holdings) + 1) * 14,
+        "The summary of investment portfolio may change due to the ongoing portfolio "
+        "transactions of the ETF.",
+    )
+    pdf.save()
+    return path
+
+
 def write_globalx_direct_lookalike(path: Path) -> Path:
     """Write a fictional Global X direct-holding disclosure (top-25 layout)."""
     path.parent.mkdir(parents=True, exist_ok=True)
