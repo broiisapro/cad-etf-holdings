@@ -11,11 +11,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-from etfh.collect.bmo_metrics import COLLECTORS, BmoMetricsCollector, factsheet_url
+from etfh.collect.bmo_metrics import COLLECTORS, BmoMetricsCollector, factsheet_stem, factsheet_url
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.parse.bmo_metrics import BmoMetricsParser
-from etfh.registry import Fund, Source, TermsNotAllowedError, load_sources
+from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
 from etfh.storage import RawStore
 from etfh.types import Decision
 from tests._metrics_helpers import bmo_factsheet_pdf
@@ -87,6 +87,45 @@ def test_factsheet_url_encodes_name_and_ticker() -> None:
     )
 
 
+def test_factsheet_stem_falls_back_to_the_display_name() -> None:
+    fund = _fund(name="BMO S&P 500 Lookalike Index ETF")
+    assert factsheet_stem(fund) == "BMO S&P 500 Lookalike Index ETF"
+    assert factsheet_url(fund).endswith(
+        "BMO%20S%26P%20500%20Lookalike%20Index%20ETF_Factsheet_EN_BMLK.pdf"
+    )
+
+
+def test_factsheet_stem_prefers_the_published_name() -> None:
+    # BMO still serves ZQQ's factsheet under the pre-rename "NASDAQ" spelling,
+    # so the fund records the stem BMO publishes instead of its display name.
+    fund = _fund(
+        name="BMO Nasq 100 Lookalike Index ETF",
+        ticker="BMLQ",
+        params={"bmo_factsheet": "BMO NASQ 100 Lookalike Index ETF"},
+    )
+    assert factsheet_stem(fund) == "BMO NASQ 100 Lookalike Index ETF"
+    assert factsheet_url(fund).endswith(
+        "BMO%20NASQ%20100%20Lookalike%20Index%20ETF_Factsheet_EN_BMLQ.pdf"
+    )
+    assert "Nasq%20100" not in factsheet_url(fund)
+
+
+def test_fetch_requests_the_published_stem(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf_bytes = bmo_factsheet_pdf(tmp_path).read_bytes()
+    store = RawStore(tmp_path / "raw")
+    requests: list[httpx.Request] = []
+    fund = _fund(
+        name="BMO Nasq 100 Lookalike Index ETF",
+        ticker="BMLQ",
+        params={"bmo_factsheet": "BMO NASQ 100 Lookalike Index ETF"},
+    )
+    with _client(_handler(pdf_bytes, requests=requests), fake_clock) as client:
+        _collector(_source()).fetch(fund, date(2026, 10, 23), client, store)
+    assert str(requests[0].url).endswith(
+        "/BMO%20NASQ%20100%20Lookalike%20Index%20ETF_Factsheet_EN_BMLQ.pdf"
+    )
+
+
 def test_fetch_stores_pdf_and_dates_it(tmp_path: Path, fake_clock: FakeClock) -> None:
     pdf_bytes = bmo_factsheet_pdf(tmp_path).read_bytes()
     store = RawStore(tmp_path / "raw")
@@ -128,7 +167,7 @@ def test_missing_factsheet_is_a_collect_error(tmp_path: Path, fake_clock: FakeCl
 
     with (
         _client(handler, fake_clock) as client,
-        pytest.raises(CollectError, match="no factsheet"),
+        pytest.raises(CollectError, match="bmo_factsheet"),
     ):
         _collector(_source()).fetch(_fund(), date(2026, 10, 23), client, RawStore(tmp_path))
 
@@ -190,3 +229,28 @@ def test_live_bmo_factsheet_fetch_and_parse(tmp_path: Path) -> None:
     parsed = BmoMetricsParser().parse(raws[0])
     assert parsed.as_of_date == raws[0].as_of_hint
     assert parsed.frame["shares_outstanding"][0] > 0
+
+
+@pytest.mark.network
+def test_every_committed_bmo_fund_has_a_published_factsheet() -> None:
+    """The stems in ``funds.csv`` are the ones BMO publishes, not our display names."""
+    if not os.environ.get("ETFH_USER_AGENT"):
+        pytest.skip("ETFH_USER_AGENT is not set")
+    funds = [
+        fund
+        for fund in load_funds(CONFIG_DIR / "funds.csv", load_sources(CONFIG_DIR / "sources.yaml"))
+        if "bmo_metrics" in fund.source_ids
+    ]
+    source = _source()
+    missing: list[str] = []
+    with PoliteClient() as client:
+        for fund in funds:
+            url = factsheet_url(fund)
+            try:
+                response = client.get(url, source=source)
+            except httpx.HTTPError as exc:  # pragma: no cover - live network only
+                missing.append(f"{fund.ticker}: {exc}")
+                continue
+            if response.status_code != 200 or not response.content.startswith(b"%PDF"):
+                missing.append(f"{fund.ticker}: HTTP {response.status_code} at {url}")
+    assert missing == []

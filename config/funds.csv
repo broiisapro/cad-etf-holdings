@@ -10,7 +10,7 @@ ZSP,bmo,BMO S&P 500 Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
 ZCN,bmo,BMO S&P/TSX Capped Composite Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
 ZEA,bmo,BMO MSCI EAFE Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
 ZEM,bmo,BMO MSCI Emerging Markets Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
-ZQQ,bmo,BMO Nasdaq 100 Equity Hedged to CAD Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
+ZQQ,bmo,BMO Nasdaq 100 Equity Hedged to CAD Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,bmo_factsheet=BMO NASDAQ 100 Equity Hedged to CAD Index ETF
 ZLB,bmo,BMO Low Volatility Canadian Equity ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
 ZEB,bmo,BMO Equal Weight Banks Index ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,
 ZDV,bmo,BMO Canadian Dividend ETF,equity,bmo_daily;bmo_qpd;bmo_metrics,XTSE,

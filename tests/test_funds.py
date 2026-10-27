@@ -143,6 +143,17 @@ def test_purpose_rows_carry_a_slug() -> None:
         assert slug.startswith("purpose-"), fund.ticker
 
 
+def test_bmo_funds_record_the_published_factsheet_stem_only_when_it_differs() -> None:
+    _, funds = _load()
+    bmo = [fund for fund in funds if fund.issuer == "bmo"]
+    published = {
+        fund.ticker: fund.params["bmo_factsheet"] for fund in bmo if "bmo_factsheet" in fund.params
+    }
+    # ZQQ's factsheet asset still carries the name it had before the fund was
+    # renamed ("NASDAQ" in capitals), so its display name does not build the URL.
+    assert published == {"ZQQ": "BMO NASDAQ 100 Equity Hedged to CAD Index ETF"}
+
+
 def test_asset_class_coverage() -> None:
     _, funds = _load()
     classes = {fund.asset_class for fund in _real(funds)}
