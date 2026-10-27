@@ -356,7 +356,7 @@ def write_globalx_complete_lookalike(
     less Liabilities" line above the stated 100.00% total, then an unnumbered
     "Top Holdings" section that lists every position. The holdings sum to
     100% minus ``other``, so only the balancing line ties them to the stated
-    total. ``heading`` can be an numbered "Top 25 Holdings" to model a
+    total. ``heading`` can be a numbered "Top 25 Holdings" to model a
     selection, which must not get the line.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -389,7 +389,7 @@ def write_globalx_complete_lookalike(
     pdf.drawRightString(_RIGHT, _TOP - 76, "Net Asset Value")
     amount_row(_TOP - 92, "Canadian Equities", "$ 12,345,678", "42.35%")
     amount_row(_TOP - 106, "U.S. Equities", "11,234,567", "38.55%")
-    amount_row(_TOP - 120, "Cash and Cash Equivalents", "3,492,551", "19.04%")
+    amount_row(_TOP - 120, "Cash and Cash Equivalents", "5,842,553", "20.04%")
     amount_row(_TOP - 134, "Other Assets less Liabilities", "(273,986)", other)
     amount_row(_TOP - 148, "", "$ 29,148,812", "100.00%", bold=True)
 
