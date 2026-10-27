@@ -8,20 +8,34 @@ currency units, never millions (D66). The factsheet does not print a NAV per
 unit; when both net assets and shares outstanding are present the parser
 derives it as ``aum / shares`` and records ``nav_derived=aum/shares`` in its
 notes. A missing figure stays null, never zero (D67).
+
+BMO refreshes a factsheet monthly and some funds lag far behind that cadence, so
+every parsed row carries ``stale_days=<n>``: whole days between the factsheet's
+stated date and the date it was fetched in America/Toronto. A negative value
+means the document states a date after the fetch (already a validation error
+under ``future_as_of``). The note records how old the figure is; it never
+changes a value.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pdfplumber
 import polars as pl
 
 from etfh.types import FileFormat, ParsedFile, RawFile
 
-__all__ = ["METRICS_PARSERS", "BmoMetricsParser", "date_from_text", "metrics_from_text"]
+__all__ = [
+    "METRICS_PARSERS",
+    "BmoMetricsParser",
+    "date_from_text",
+    "metrics_from_text",
+    "stale_days",
+]
 
 _COLUMNS = [
     "fund_ticker",
@@ -53,6 +67,17 @@ _NET_ASSETS = re.compile(r"Net Assets \(MM\)\s*\$?\s*([\d,]+(?:\.\d+)?)")
 _SHARES = re.compile(r"Shares Outstanding\s*([\d,]+)")
 _CURRENCY = re.compile(r"Base Currency\s+([A-Z]{3})")
 _SOURCE_ID = "bmo_metrics"
+_TORONTO = ZoneInfo("America/Toronto")
+
+
+def stale_days(as_of_date: date, fetched_at: datetime) -> int:
+    """Whole days between ``as_of_date`` and the fetch date in America/Toronto.
+
+    The fetch timestamp is stored in UTC; the comparison uses the calendar date
+    the collector ran on locally, so a fetch after midnight UTC is not counted a
+    day late (D30 uses the same timezone for as-of cutoffs).
+    """
+    return (fetched_at.astimezone(_TORONTO).date() - as_of_date).days
 
 
 def _number(text: str) -> float | None:
@@ -130,6 +155,7 @@ class BmoMetricsParser:
         notes = [
             "aum_units=millions->currency_units",
             "shares_source=factsheet",
+            f"stale_days={stale_days(as_of, raw.fetched_at)}",
         ]
         if nav is not None:
             notes.append("nav_derived=aum/shares")

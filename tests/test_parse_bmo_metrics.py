@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 
-from etfh.parse.bmo_metrics import METRICS_PARSERS, BmoMetricsParser
+from etfh.parse.bmo_metrics import METRICS_PARSERS, BmoMetricsParser, stale_days
 from etfh.parse.registry import find_metrics_parsers
 from etfh.schema import ParsedFundMetrics
 from etfh.types import RawFile
@@ -15,8 +15,19 @@ from tests._metrics_helpers import bmo_factsheet_pdf
 from tests._parse_helpers import make_raw
 
 
-def _raw(path: Path, *, ticker: str = "BMLK") -> RawFile:
-    return make_raw(path, source_id="bmo_metrics", fund_ticker=ticker, as_of_hint=date(2026, 9, 30))
+def _raw(
+    path: Path,
+    *,
+    ticker: str = "BMLK",
+    fetched_at: datetime = datetime(2026, 10, 29, 22, 0, tzinfo=UTC),
+) -> RawFile:
+    return make_raw(
+        path,
+        source_id="bmo_metrics",
+        fund_ticker=ticker,
+        as_of_hint=date(2026, 9, 30),
+        fetched_at=fetched_at,
+    )
 
 
 def test_parses_factsheet_into_currency_units(tmp_path: Path) -> None:
@@ -35,6 +46,27 @@ def test_parses_factsheet_into_currency_units(tmp_path: Path) -> None:
     assert row["raw_file_sha256"] == parsed.raw.sha256
     assert "aum_units=millions->currency_units" in parsed.notes
     assert "nav_derived=aum/shares" in parsed.notes
+    assert "stale_days=29" in parsed.notes
+
+
+def test_stale_days_counts_from_the_statement_date(tmp_path: Path) -> None:
+    path = bmo_factsheet_pdf(tmp_path)
+    fetched = datetime(2026, 10, 27, 13, 47, tzinfo=UTC)
+    parsed = BmoMetricsParser().parse(_raw(path, fetched_at=fetched))
+    assert "stale_days=27" in parsed.notes
+
+
+def test_stale_days_uses_the_toronto_calendar_date(tmp_path: Path) -> None:
+    path = bmo_factsheet_pdf(tmp_path)
+    # 02:00 UTC on Oct 1 is still Sep 30 in Toronto, so the fetch is same-day.
+    fetched = datetime(2026, 10, 1, 2, 0, tzinfo=UTC)
+    parsed = BmoMetricsParser().parse(_raw(path, fetched_at=fetched))
+    assert "stale_days=0" in parsed.notes
+
+
+def test_stale_days_helper_is_signed() -> None:
+    assert stale_days(date(2026, 9, 30), datetime(2026, 11, 2, 12, 0, tzinfo=UTC)) == 33
+    assert stale_days(date(2026, 9, 30), datetime(2026, 9, 29, 12, 0, tzinfo=UTC)) == -1
 
 
 def test_currency_falls_back_to_cad(tmp_path: Path) -> None:
