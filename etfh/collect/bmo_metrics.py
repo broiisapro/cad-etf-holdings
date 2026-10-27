@@ -1,7 +1,15 @@
 """Collector for BMO ETF factsheet PDFs (fund metrics).
 
-The factsheet URL is stable and built from the fund name and ticker:
+The factsheet lives at a stable path whose middle segment is the name BMO
+itself publishes in the file name:
 ``https://df.bmogam.com/assets/static/etf-profiles-pdfs/<Fund Name>_Factsheet_EN_<TICKER>.pdf``.
+That name is normally the fund's display name, but not always: ZQQ's asset path
+still says ``BMO NASDAQ 100 Equity Hedged to CAD Index ETF`` after the fund was
+renamed to "Nasdaq", so the display name 404s. A fund may therefore record the
+published stem in ``Fund.params["bmo_factsheet"]`` (``config/funds.csv``); the
+value is what BMO's own file path carries, verified against the asset itself,
+never a guessed spelling.
+
 The profile endpoint named in the issue serves a JavaScript shell without fund
 values (verified 2026-10-23), so the static factsheet is used instead. The page
 is fetched conditionally; an unchanged factsheet produces a 304 and no new raw
@@ -26,16 +34,24 @@ from etfh.registry import Fund, Source, load_sources
 from etfh.storage import RawStore
 from etfh.types import RawFile
 
-__all__ = ["COLLECTORS", "BmoMetricsCollector", "factsheet_url"]
+__all__ = ["COLLECTORS", "BmoMetricsCollector", "factsheet_stem", "factsheet_url"]
 
 _SOURCE_ID = "bmo_metrics"
 _BASE = "https://df.bmogam.com/assets/static/etf-profiles-pdfs/"
+#: ``Fund.params`` key holding the fund name BMO uses in its factsheet file
+#: path when it differs from the fund's display name.
+_STEM_PARAM = "bmo_factsheet"
 _CONFIG_PATH = Path("config/sources.yaml")
 
 
+def factsheet_stem(fund: Fund) -> str:
+    """The fund name BMO publishes in the factsheet file path for ``fund``."""
+    return fund.params.get(_STEM_PARAM) or fund.name
+
+
 def factsheet_url(fund: Fund) -> str:
-    """The static factsheet URL for ``fund`` with its name and ticker encoded."""
-    name = quote(fund.name, safe="")
+    """The static factsheet URL for ``fund`` with BMO's published stem encoded."""
+    name = quote(factsheet_stem(fund), safe="")
     ticker = quote(fund.ticker.upper(), safe="")
     return f"{_BASE}{name}_Factsheet_EN_{ticker}.pdf"
 
@@ -67,7 +83,8 @@ class BmoMetricsCollector:
             raise CollectError(
                 self.source_id,
                 fund,
-                f"no factsheet at {url}; check the fund name in funds.csv",
+                f"no factsheet at {url}; set {_STEM_PARAM} in funds.csv to the "
+                "name BMO publishes in the factsheet file path",
             )
         if response.status_code != 200:
             raise CollectError(

@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from etfh.collect.bmo_metrics import COLLECTORS, BmoMetricsCollector, factsheet_url
+from etfh.collect.bmo_metrics import COLLECTORS, BmoMetricsCollector, factsheet_stem, factsheet_url
 from etfh.collect.registry import CollectError, collector_for
 from etfh.http import PoliteClient
 from etfh.parse.bmo_metrics import BmoMetricsParser
@@ -87,6 +87,45 @@ def test_factsheet_url_encodes_name_and_ticker() -> None:
     )
 
 
+def test_factsheet_stem_falls_back_to_the_display_name() -> None:
+    fund = _fund(name="BMO S&P 500 Lookalike Index ETF")
+    assert factsheet_stem(fund) == "BMO S&P 500 Lookalike Index ETF"
+    assert factsheet_url(fund).endswith(
+        "BMO%20S%26P%20500%20Lookalike%20Index%20ETF_Factsheet_EN_BMLK.pdf"
+    )
+
+
+def test_factsheet_stem_prefers_the_published_name() -> None:
+    # BMO still serves ZQQ's factsheet under the pre-rename "NASDAQ" spelling,
+    # so the fund records the stem BMO publishes instead of its display name.
+    fund = _fund(
+        name="BMO Nasq 100 Lookalike Index ETF",
+        ticker="BMLQ",
+        params={"bmo_factsheet": "BMO NASQ 100 Lookalike Index ETF"},
+    )
+    assert factsheet_stem(fund) == "BMO NASQ 100 Lookalike Index ETF"
+    assert factsheet_url(fund).endswith(
+        "BMO%20NASQ%20100%20Lookalike%20Index%20ETF_Factsheet_EN_BMLQ.pdf"
+    )
+    assert "Nasq%20100" not in factsheet_url(fund)
+
+
+def test_fetch_requests_the_published_stem(tmp_path: Path, fake_clock: FakeClock) -> None:
+    pdf_bytes = bmo_factsheet_pdf(tmp_path).read_bytes()
+    store = RawStore(tmp_path / "raw")
+    requests: list[httpx.Request] = []
+    fund = _fund(
+        name="BMO Nasq 100 Lookalike Index ETF",
+        ticker="BMLQ",
+        params={"bmo_factsheet": "BMO NASQ 100 Lookalike Index ETF"},
+    )
+    with _client(_handler(pdf_bytes, requests=requests), fake_clock) as client:
+        _collector(_source()).fetch(fund, date(2026, 10, 23), client, store)
+    assert str(requests[0].url).endswith(
+        "/BMO%20NASQ%20100%20Lookalike%20Index%20ETF_Factsheet_EN_BMLQ.pdf"
+    )
+
+
 def test_fetch_stores_pdf_and_dates_it(tmp_path: Path, fake_clock: FakeClock) -> None:
     pdf_bytes = bmo_factsheet_pdf(tmp_path).read_bytes()
     store = RawStore(tmp_path / "raw")
@@ -128,7 +167,7 @@ def test_missing_factsheet_is_a_collect_error(tmp_path: Path, fake_clock: FakeCl
 
     with (
         _client(handler, fake_clock) as client,
-        pytest.raises(CollectError, match="no factsheet"),
+        pytest.raises(CollectError, match="bmo_factsheet"),
     ):
         _collector(_source()).fetch(_fund(), date(2026, 10, 23), client, RawStore(tmp_path))
 
