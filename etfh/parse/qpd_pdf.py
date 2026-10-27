@@ -14,22 +14,39 @@ to camelot 2.x (``stream`` then ``lattice``), as required by D17.
 Issuer-specific quirks live in :class:`QpdRules` instances registered in
 :data:`QPD_RULES` by source id, so a new issuer format does not require a new
 parser class.
+
+The parser only claims PDFs from sources registered as quarterly disclosures
+(plus the synthetic PDF source, which mirrors one). Any other PDF — a BMO
+metrics factsheet, an unrelated document in the raw store — is left to the
+parser that owns it instead of being read as a holdings table.
+
+One layout detail is worth stating up front. Some issuers (Global X) list the
+fund's complete portfolio under "Top Holdings" rather than a top-N selection.
+That list holds gross assets, while the document's asset mix prints a separate
+balancing line ("Other Assets less Liabilities") before the stated 100.00%
+total. Such a list sums to 100% plus that line, so the rule carries the
+printed balancing line into the frame as an ``other`` row: the file then ties
+exactly to the total the document states. A numbered "top N holdings" table is
+a selection and never gets the line.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pdfplumber
 import polars as pl
 
-from etfh.types import FileFormat, ParsedFile, RawFile
+from etfh.registry import Source, load_sources
+from etfh.types import FileFormat, ParsedFile, RawFile, SourceKind
 from etfh.units import WeightUnit, check_unit, normalize_weights
 
 __all__ = [
@@ -39,6 +56,8 @@ __all__ = [
     "QpdPdfError",
     "QpdPdfParser",
     "QpdRules",
+    "configured_sources",
+    "disclosure_source_ids",
     "disclosure_as_of",
     "parse_qpd_date",
 ]
@@ -168,6 +187,12 @@ class QpdRules:
     name_cleanup_patterns: tuple[str, ...] = ()
     partial_section_pattern: str = ""
     stated_total_applies_to_partial: bool = True
+    # Named groups ``name`` and ``value`` for a balancing portfolio line the
+    # issuer prints outside the holdings table ("Other Assets less
+    # Liabilities  -0.94%"). It is carried into the frame as an ``other`` row
+    # when the holdings section is a complete list, so the file ties to the
+    # document's stated total; a "top N" section never gets it.
+    balance_line_patterns: tuple[str, ...] = ()
     table_settings: dict[str, Any] | None = None
 
 
@@ -228,6 +253,13 @@ GLOBALX_RULES = replace(
     total_patterns=(
         r"\$\s*[\d,]+\s+([<>]?\s*-?\d[\d\s.,]*\s*%)",
         *DEFAULT_RULES.total_patterns,
+    ),
+    # A complete "Top Holdings" list holds gross assets and stops short of the
+    # balancing line the asset mix prints above it, so the two only agree once
+    # that line is carried too (older and current quarters alike).
+    balance_line_patterns=(
+        r"^(?P<name>other\s+assets?\s+less\s+liabilities)\b[^\n]*?"
+        r"(?P<value>\(?\s*-?\d[\d,.]*\s*%\)?)\s*$",
     ),
 )
 
@@ -475,6 +507,34 @@ def _stated_total(text: str, rules: QpdRules) -> float | None:
         values = [value for value in matches if value is not None]
         if values:
             return values[-1]
+    return None
+
+
+def _balance_row(text: str, rules: QpdRules) -> _Row | None:
+    """The balancing asset line the issuer prints outside the holdings table.
+
+    Global X prints "Other Assets less Liabilities" in the asset mix, just
+    above the stated 100.00% total, and then lists the whole portfolio under an
+    unnumbered "Top Holdings" heading. The list holds gross assets, so it sums
+    to 100% plus that line; carrying the line as an ``other`` row is what makes
+    the parsed total equal the document's stated total. The last printed line
+    wins, matching the total at the foot of the mix table. The value is always
+    the line's own percent, never an amount read from another column.
+    """
+    for pattern in rules.balance_line_patterns:
+        matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
+        if not matches:
+            continue
+        match = matches[-1]
+        value = _number_value(match.group("value"))
+        if value is None:
+            continue
+        return _Row(
+            name=_clean(match.group("name")),
+            weight=value,
+            sector="Unknown",
+            decimals=_decimal_places(match.group("value")),
+        )
     return None
 
 
@@ -1031,6 +1091,45 @@ def _camelot_rows(path: Any) -> tuple[list[_Row], bool]:
     return [], False
 
 
+_SOURCES_CACHE: dict[str, tuple[tuple[int, int], dict[str, Source]]] = {}
+
+
+def configured_sources() -> dict[str, Source]:
+    """Sources from ``ETFH_CONFIG_DIR`` (default ``config``), keyed by id.
+
+    The cache is keyed on the file's modification stamp so a rewritten config
+    is picked up; a missing file means no source can be claimed. Parsing
+    errors propagate, because an invalid registry must fail loudly (D25).
+    """
+    path = Path(os.environ.get("ETFH_CONFIG_DIR", "config")) / "sources.yaml"
+    key = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    cached = _SOURCES_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    sources = load_sources(path)
+    _SOURCES_CACHE[key] = (stamp, sources)
+    return sources
+
+
+def disclosure_source_ids() -> frozenset[str]:
+    """Ids of the configured sources this parser may claim.
+
+    Quarterly disclosures, plus the synthetic PDF source that mirrors one so
+    the committed synthetic store exercises the same code path.
+    """
+    return frozenset(
+        source.id
+        for source in configured_sources().values()
+        if source.kind is SourceKind.quarterly_disclosure
+        or (source.kind is SourceKind.synthetic and source.format is FileFormat.pdf)
+    )
+
+
 class QpdPdfParser:
     """Parser for quarterly portfolio disclosure PDFs."""
 
@@ -1045,9 +1144,17 @@ class QpdPdfParser:
         self._source_ids = source_ids
 
     def can_parse(self, raw: RawFile) -> bool:
+        """Claim a PDF only when its source publishes quarterly disclosures.
+
+        ``source_ids`` is an explicit whitelist for direct use and tests; the
+        registered source kind decides otherwise. A fund-metrics factsheet or
+        any other PDF in the raw store is never read as a holdings table.
+        """
         if raw.ext.lower() != FileFormat.pdf.value:
             return False
-        return self._source_ids is None or raw.source_id in self._source_ids
+        if self._source_ids is not None:
+            return raw.source_id in self._source_ids
+        return raw.source_id in disclosure_source_ids()
 
     def rules_for(self, raw: RawFile) -> QpdRules:
         if self._rules is not None:
@@ -1070,6 +1177,12 @@ class QpdPdfParser:
         omit_stated_total = partial and not rules.stated_total_applies_to_partial
         if stated_total is None and not omit_stated_total:
             raise QpdPdfError(f"{raw.path}: no stated total found")
+        if rules.balance_line_patterns and not partial:
+            balance = _balance_row(text, rules)
+            if balance is not None and not any(
+                _clean(row.name).casefold() == balance.name.casefold() for row in rows
+            ):
+                rows = [*rows, balance]
 
         names: list[str] = []
         raw_weights: list[float] = []
