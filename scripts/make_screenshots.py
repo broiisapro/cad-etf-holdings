@@ -4,8 +4,8 @@
 The images must be reproducible and must never contain real issuer data, so the
 script starts the dashboard in demo mode (``ETFH_DEMO=1``), ignores any
 ``ETFH_DB`` in the environment, pins the as-of date to the committed synthetic
-expectation in ``tests/fixtures/expected_overlap.json`` and captures three
-1400x900 PNGs into ``docs/img/``.
+expectation in ``tests/fixtures/expected_overlap.json`` and captures four
+1400x900 PNGs into ``docs/img/``: the Fund, This week, Overlap and Heatmap tabs.
 
 Playwright is a development-only tool, not a project dependency::
 
@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 try:
@@ -124,6 +124,19 @@ def calendar_label(day: date) -> str:
     return f"{day:%A, %B} {day.day}, {day.year}"
 
 
+def week_ending(day: date) -> date:
+    """The most recent Friday on or before ``day`` (``etfh.digest.default_week_end``)."""
+    return day - timedelta(days=(day.weekday() - 4) % 7)
+
+
+def display_path(path: Path) -> str:
+    """``path`` relative to the repository when possible (``--out`` may be elsewhere)."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def hide_streamlit_chrome(page: Page) -> None:
     """Hide the deploy toolbar and header so the image shows the app only."""
     page.add_style_tag(
@@ -154,7 +167,7 @@ def capture(page: Page, path: Path) -> None:
         raise RuntimeError(f"{path.name} is {width}x{height}, expected 1400x900")
     if size > MAX_BYTES:
         raise RuntimeError(f"{path.name} is {size} bytes, larger than {MAX_BYTES} bytes")
-    print(f"wrote {path.relative_to(REPO_ROOT)} ({width}x{height}, {size} bytes)")
+    print(f"wrote {display_path(path)} ({width}x{height}, {size} bytes)")
 
 
 def png_size(path: Path) -> tuple[int, int]:
@@ -168,7 +181,7 @@ def png_size(path: Path) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Start the demo, capture the three README images and stop the server."""
+    """Start the demo, capture the four README images and stop the server."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="image directory")
     parser.add_argument("--timeout", type=float, default=120.0, help="server startup timeout")
@@ -196,6 +209,16 @@ def main(argv: list[str] | None = None) -> int:
             page.locator('[data-testid="stDataFrame"]').first.wait_for(timeout=60_000)
             page.wait_for_timeout(500)
             capture(page, out_dir / "fund.png")
+
+            page.get_by_role("tab", name="This week").click()
+            week_label = f"Week ending {week_ending(as_of).isoformat()}"
+            page.get_by_text(week_label).wait_for(timeout=120_000)
+            page.get_by_text("Security changes").wait_for(timeout=60_000)
+            page.locator(
+                '[data-testid="stTabPanel"]:visible [data-testid="stDataFrame"]'
+            ).first.wait_for(timeout=60_000)
+            page.wait_for_timeout(500)
+            capture(page, out_dir / "week.png")
 
             page.get_by_role("tab", name="Overlap").click()
             page.get_by_text("Common holdings").wait_for(timeout=60_000)
