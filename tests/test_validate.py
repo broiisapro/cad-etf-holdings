@@ -15,9 +15,12 @@ from etfh.registry import Source, load_funds, load_sources
 from etfh.types import AssetClass, ParsedFile, RawFile
 from etfh.units import WeightUnit, check_unit
 from etfh.validate import (
+    BALANCING_LINE_NAMES,
+    PARTIAL_WEIGHT_LIMIT,
     TOLERANCE_CAP,
     QaFinding,
     ValidationConfig,
+    is_balancing_line,
     is_excluded,
     tolerance_for,
     validate_file,
@@ -426,12 +429,12 @@ class TestRoundingTolerance:
         assert "weight_sum" not in _checks(findings)
         assert is_excluded(findings)
 
-    def test_a_partial_daily_file_over_one_is_still_an_error(
+    def test_a_partial_daily_file_above_the_partial_limit_is_an_error(
         self, source_factory: Callable[..., Source]
     ) -> None:
         findings = validate_file(
             _parsed(
-                _weighted_frame(_weights_summing_to(1.03, 100)),
+                _weighted_frame(_weights_summing_to(1.12, 100)),
                 notes=[
                     "declared_unit=percent",
                     "weight_decimals=2",
@@ -446,6 +449,8 @@ class TestRoundingTolerance:
         assert any(
             finding.check == "weight_sum" and finding.severity == "warning" for finding in findings
         )
+        over_one = [f for f in findings if f.check == "weight_sum_over_one"]
+        assert "above the 1.1 limit" in over_one[0].detail
 
 
 def _validate_raw(raw: RawFile) -> list[QaFinding]:
@@ -778,6 +783,115 @@ class TestPartialList:
             config=_CONFIG,
         )
         assert findings == []
+
+
+class TestPartialWeightExemption:
+    """D80a: an evidenced partial daily file may sum up to 1.10."""
+
+    def _findings(
+        self, total: float, notes: list[str], source_factory: Callable[..., Source]
+    ) -> list[QaFinding]:
+        return validate_file(
+            _parsed(_weighted_frame(_weights_summing_to(total, 19)), notes=notes),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+
+    def test_sum_10064_with_the_note_is_included_and_records_the_exemption(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        findings = self._findings(
+            1.0064,
+            ["declared_unit=percent", "weight_decimals=2", "partial_list=true"],
+            source_factory,
+        )
+        assert not is_excluded(findings)
+        assert "weight_sum_over_one" not in _error_checks(findings)
+        exemptions = [f for f in findings if f.check == "partial_weight_exemption"]
+        assert len(exemptions) == 1
+        assert exemptions[0].severity == "info"
+        assert "sum=1.0064" in exemptions[0].detail
+        assert "exempt from weight_sum_over_one (D80a)" in exemptions[0].detail
+        assert any(f.check == "weight_sum" and f.severity == "warning" for f in findings)
+
+    def test_the_same_file_without_the_note_is_excluded(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        findings = self._findings(
+            1.0064,
+            ["declared_unit=percent", "weight_decimals=2"],
+            source_factory,
+        )
+        assert _error_checks(findings) == {"weight_sum", "weight_sum_over_one"}
+        assert is_excluded(findings)
+        assert "partial_weight_exemption" not in _checks(findings)
+
+    def test_the_note_with_sum_112_is_still_excluded(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        findings = self._findings(
+            1.12,
+            ["declared_unit=percent", "weight_decimals=2", "partial_list=true"],
+            source_factory,
+        )
+        assert "weight_sum_over_one" in _error_checks(findings)
+        assert "partial_weight_exemption" not in _checks(findings)
+        assert is_excluded(findings)
+
+    def test_quarterly_files_are_not_exempt(self, source_factory: Callable[..., Source]) -> None:
+        findings = validate_file(
+            _parsed(
+                _weighted_frame(_weights_summing_to(1.0064, 19)),
+                notes=["declared_unit=percent", "partial_list=true"],
+            ),
+            source=_SOURCES["syn_pdf"],
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        assert "weight_sum_over_one" in _error_checks(findings)
+        assert "partial_weight_exemption" not in _checks(findings)
+
+    def test_the_limit_constant_is_one_point_one(self) -> None:
+        assert PARTIAL_WEIGHT_LIMIT == 1.10
+
+
+class TestBalancingLines:
+    """D80c: balancing lines are non-securities, matched leniently."""
+
+    def test_examples_match_case_and_whitespace_insensitively(self) -> None:
+        for name in (
+            "Other Assets less Liabilities",
+            "  NET   other assets ",
+            "other net assets (liabilities)",
+        ):
+            assert is_balancing_line(name), name
+        assert not is_balancing_line("Other Assets Fund")
+        assert not is_balancing_line(None)
+        assert "other assets less liabilities" in BALANCING_LINE_NAMES
+
+    def test_negative_balancing_line_does_not_warn(
+        self, source_factory: Callable[..., Source]
+    ) -> None:
+        rows = [
+            _row(weight=0.99, isin=None),
+            _row(
+                security_name="  OTHER   assets less Liabilities ",
+                asset_class="other",
+                isin=None,
+                security_ticker=None,
+                exchange=None,
+                weight=-0.01,
+            ),
+        ]
+        frame = _with_security_id(_frame(rows), ["ISIN:CA600000AA15", None])
+        findings = validate_file(
+            _parsed(frame),
+            source=source_factory(),
+            fund_asset_class=AssetClass.equity,
+            config=_CONFIG,
+        )
+        assert "negative_weight" not in _checks(findings)
 
 
 class TestNegativeWeight:
