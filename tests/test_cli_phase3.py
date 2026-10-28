@@ -19,6 +19,7 @@ from typing import Any
 
 import polars as pl
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from etfh.cli import app
@@ -454,9 +455,11 @@ class _OfflinePrices:
 
 
 def test_event_study_help_lists_the_figi_cache_option() -> None:
-    result = _run("event-study", "--help")
-    assert result.exit_code == 0, result.output
-    assert "--figi-cache" in result.output
+    """The option is registered on the command (help text wraps in CI panels)."""
+    command = get_command(app).commands["event-study"]
+    options = {option for param in command.params for option in param.opts}
+    assert "--figi-cache" in options
+    assert "--source" in options
 
 
 def test_event_study_reports_synthetic_resolutions_by_ticker(tmp_path: Path) -> None:
