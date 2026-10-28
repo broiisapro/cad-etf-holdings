@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 import pytest
 
-from etfh.eventstudy import SKIP_REASONS, run_event_study
+from etfh.eventstudy import SKIP_REASONS, EventStudyResult, run_event_study
 
 PRICE_SCHEMA: dict[str, Any] = {
     "symbol": pl.String,
@@ -438,3 +438,105 @@ def test_used_and_skipped_events_add_up_to_the_input() -> None:
         "duplicate": 1,
     }
     assert sum(result.summary["skipped"].values()) + result.summary["n_used"] == 7
+
+
+# --------------------------------------------------------------------------- #
+# Statistics
+# --------------------------------------------------------------------------- #
+
+
+def _varied_result(seed: int = 7, bootstrap: int = 500) -> EventStudyResult:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    known = days[index]
+    shocks = [0.03, -0.01, 0.015, 0.0, 0.005]
+    series = {"SPY": (days, benchmark_closes)}
+    mapping = {}
+    rows = []
+    for offset, shock in enumerate(shocks):
+        ticker = f"S{offset}"
+        security_id = f"ISIN:VAR{offset}"
+        mapping[security_id] = ticker
+        series[ticker] = (
+            days,
+            _symbol_path(days, benchmark_returns, shocks={index: shock}),
+        )
+        rows.append(_event("FNDA", security_id, known))
+    return run_event_study(
+        _events(*rows),
+        FakePrices(_prices(series)),
+        symbol_for=_mapper(mapping),
+        bootstrap=bootstrap,
+        seed=seed,
+    )
+
+
+def test_bootstrap_interval_is_deterministic_for_a_seed() -> None:
+    first = _varied_result(seed=7)
+    second = _varied_result(seed=7)
+    other = _varied_result(seed=11)
+    for label in first.summary["windows"]:
+        left = first.summary["windows"][label]
+        right = second.summary["windows"][label]
+        assert (left["ci_low"], left["ci_high"]) == (right["ci_low"], right["ci_high"])
+    assert (
+        first.summary["windows"]["[0,1]"]["ci_low"],
+        first.summary["windows"]["[0,1]"]["ci_high"],
+    ) != (
+        other.summary["windows"]["[0,1]"]["ci_low"],
+        other.summary["windows"]["[0,1]"]["ci_high"],
+    )
+
+
+def test_bootstrap_interval_brackets_the_cross_sectional_mean() -> None:
+    result = _varied_result()
+    for label, stats in result.summary["windows"].items():
+        assert stats["n"] == 5, label
+        assert stats["ci_low"] <= stats["mean_car"] <= stats["ci_high"], label
+        assert stats["ci_low"] < stats["ci_high"], label
+
+
+def test_t_statistic_uses_the_cross_sectional_standard_error() -> None:
+    result = _varied_result()
+    values = [0.03, -0.01, 0.015, 0.0, 0.005]
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    expected = mean / math.sqrt(variance / len(values))
+    stats = result.summary["windows"]["[0,1]"]
+    assert stats["mean_car"] == pytest.approx(mean, abs=1e-12)
+    assert stats["t_stat"] == pytest.approx(expected, abs=1e-6)
+
+
+def test_car_by_day_is_cumulative_and_public_safe() -> None:
+    result = _varied_result()
+    frame = result.car_by_day
+    assert frame.columns == ["relative_day", "mean_ar", "mean_car", "n"]
+    assert frame["relative_day"].to_list() == list(range(-5, 6))
+    running = 0.0
+    for row in frame.iter_rows(named=True):
+        running += row["mean_ar"]
+        assert row["mean_car"] == pytest.approx(running, abs=1e-12)
+
+
+def test_only_sub_windows_inside_the_requested_window_are_reported() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "AAA": (days, _symbol_path(days, benchmark_returns, shocks={index: 0.02})),
+        }
+    )
+    result = run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", days[index])),
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+        window=(0, 3),
+    )
+    assert list(result.summary["windows"]) == ["[0,1]"]
+    row = result.per_event.row(0, named=True)
+    assert row["car_0_1"] == pytest.approx(0.02, abs=1e-12)
+    assert row["car_m1_1"] is None
+    assert row["car_0_5"] is None
