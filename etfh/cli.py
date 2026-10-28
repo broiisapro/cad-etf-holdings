@@ -44,6 +44,9 @@ Commands:
 - ``weekly --db PATH --out DIR [--week-end D] [--weeks N]
   [--public/--internal] [--demo]`` writes the static weekly digest site
   (FR-3.1): one document per week end, validated, then rendered to ``DIR``.
+  Without ``--week-end`` the newest week end follows the database: the most
+  recent Friday on or before the newest daily portfolio date (D91), so the PRD
+  acceptance command works without the caller knowing the store's dates.
   ``--demo`` builds the committed synthetic store in a temporary directory and
   ignores ``--db`` (D62).
 - ``prices fetch --symbols A,B --from D --to D --raw DIR`` fetches daily
@@ -586,6 +589,21 @@ def export(
 _DEMO_SOURCE = "synthetic"
 _PRICE_SOURCE_ID = "tiingo_prices"
 
+#: Newest as-of date of a *daily* portfolio in the built store (D91).
+#:
+#: Quarterly top-holdings disclosures are skipped — including the synthetic
+#: quarterly PDF — because the weekly digest never compares a partial list
+#: (interfaces wave 08 §3). ``coalesce`` keeps a holdings row whose source the
+#: ``sources`` table does not know (never true for a store this build wrote)
+#: from being dropped by SQL's three-valued logic.
+_NEWEST_DAILY_PORTFOLIO_SQL = """
+SELECT max(h.as_of_date)
+FROM holdings h
+LEFT JOIN sources s ON s.source_id = h.source_id
+WHERE coalesce(s.kind, '') <> 'quarterly_disclosure'
+  AND NOT (coalesce(s.kind, '') = 'synthetic' AND coalesce(s.format, '') = 'pdf')
+"""
+
 
 @app.command()
 def weekly(
@@ -597,7 +615,10 @@ def weekly(
         str | None,
         typer.Option(
             "--week-end",
-            help="last day of the newest week (YYYY-MM-DD); default: the most recent Friday",
+            help=(
+                "last day of the newest week (YYYY-MM-DD); default: the most recent "
+                "Friday on or before the newest daily portfolio date in the database"
+            ),
         ),
     ] = None,
     weeks: Annotated[
@@ -623,6 +644,14 @@ def weekly(
     (interfaces wave 08 §4). A week whose funds have no comparable portfolio is
     reported and left out of the site; when no requested week has any holding the
     command exits 1.
+
+    Without ``--week-end`` the newest week end is the most recent Friday on or
+    before the newest *daily* portfolio ``as_of_date`` stored in the database
+    (D91), never the clock, so the command works on a live store and on the
+    committed synthetic fixtures alike; the chosen dates are printed. Quarterly
+    top-holdings dates are ignored because the digest only compares daily
+    portfolios. An empty database has no date to follow and takes the existing
+    no-holdings failure path.
 
     ``--demo`` builds the committed synthetic store into a temporary directory
     (D62), ignores ``--db``, marks every document ``"demo": true`` and takes the
@@ -662,7 +691,17 @@ def weekly(
                 raise typer.Exit(code=1)
             newest = latest
         else:
-            newest = default_week_end(datetime.now(tz=_TORONTO).date())
+            portfolio_date = _newest_daily_portfolio_date(connection)
+            if portfolio_date is None:
+                # An empty database has no date to follow: keep the existing
+                # empty-week path so the failure message stays the same.
+                newest = default_week_end(datetime.now(tz=_TORONTO).date())
+            else:
+                newest = default_week_end(portfolio_date)
+                typer.echo(
+                    f"newest portfolio date {portfolio_date.isoformat()} "
+                    f"→ week ending {newest.isoformat()}"
+                )
         week_ends = [newest - timedelta(days=7 * index) for index in range(weeks)]
         documents = []
         for end in week_ends:
@@ -1164,6 +1203,25 @@ def _synthetic_latest_asof(con: duckdb.DuckDBPyConnection) -> date | None:
     """
     try:
         row = con.execute("SELECT max(as_of_date) FROM holdings").fetchone()
+    except duckdb.Error:
+        return None
+    if row is None or row[0] is None:
+        return None
+    latest: date = row[0]
+    return latest
+
+
+def _newest_daily_portfolio_date(con: duckdb.DuckDBPyConnection) -> date | None:
+    """The newest daily portfolio ``as_of_date`` in the database, or None (D91).
+
+    ``weekly`` without ``--week-end`` anchors its week on this date so the PRD
+    acceptance command works without the caller knowing the store's dates.
+    Quarterly top-holdings disclosures do not count: the digest compares daily
+    portfolios only (interfaces wave 08 §3). An empty (or table-less) database
+    has no such date.
+    """
+    try:
+        row = con.execute(_NEWEST_DAILY_PORTFOLIO_SQL).fetchone()
     except duckdb.Error:
         return None
     if row is None or row[0] is None:
