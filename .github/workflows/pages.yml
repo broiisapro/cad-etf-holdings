@@ -1,0 +1,74 @@
+name: Pages
+
+# Weekly digest for GitHub Pages. Ships disabled (D76): nothing runs until the
+# repository variable ETFH_PAGES is "true". By default the published site is
+# built from the committed synthetic store (D62). Setting ETFH_PAGES_REAL to
+# "true" switches the build to the private raw store, which needs the data
+# repository deploy key and the human's go-ahead (D79).
+on:
+  schedule:
+    # Saturdays at 13:23 UTC, after the week's disclosures have settled.
+    - cron: "23 13 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: vars.ETFH_PAGES == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --frozen
+      # Real-data mode publishes aggregates only (D79) and reads the raw store
+      # from the private data repository (D77), so it is a second switch.
+      - name: Check out the data repository
+        if: vars.ETFH_PAGES_REAL == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.ETFH_DATA_REPO || 'broiisapro/cad-etf-holdings-data' }}
+          path: data
+          ssh-key: ${{ secrets.ETFH_DATA_DEPLOY_KEY }}
+      - name: Build the digest
+        env:
+          ETFH_PAGES_REAL: ${{ vars.ETFH_PAGES_REAL }}
+        run: |
+          if [ "${ETFH_PAGES_REAL:-}" = "true" ]; then
+            ops/build_digest.sh real data site
+          else
+            ops/build_digest.sh demo - site
+          fi
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+          # .nojekyll starts with a dot; the action drops hidden files by default.
+          include-hidden-files: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
