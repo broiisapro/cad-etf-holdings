@@ -1,0 +1,85 @@
+{
+  "demo": false,
+  "funds": [
+    {
+      "changes": [],
+      "counts": {
+        "adds": 3,
+        "drops": 1,
+        "weight_changes": 9
+      },
+      "flow_days": 4,
+      "flow_estimate_sum": 2500000.0,
+      "flow_method": "\u0394shares \u00d7 NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "riverline",
+      "name": "Riverline Canadian Equity Fund",
+      "portfolio_date_end": "2026-10-23",
+      "portfolio_date_start": "2026-10-16",
+      "securities_disclosed": false,
+      "status": "ok",
+      "ticker": "RLEQ",
+      "top10_weight_end": 0.395,
+      "top10_weight_start": 0.38,
+      "turnover": 0.0207
+    },
+    {
+      "changes": [
+        {
+          "change_type": "add",
+          "delta": 0.007,
+          "security_id": "TKR:XTSE:GG",
+          "security_name": "Granite Grid Ltd.",
+          "weight_after": 0.007,
+          "weight_before": 0.0
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.003,
+          "security_id": "TKR:XTSE:AA",
+          "security_name": "Arctic Aluminum Corp.",
+          "weight_after": 0.012,
+          "weight_before": 0.009
+        }
+      ],
+      "counts": {
+        "adds": 1,
+        "drops": 0,
+        "weight_changes": 5
+      },
+      "flow_days": 3,
+      "flow_estimate_sum": -120000.0,
+      "flow_method": "\u0394shares \u00d7 NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Aurora Equity Fund",
+      "portfolio_date_end": "2026-10-23",
+      "portfolio_date_start": "2026-10-16",
+      "securities_disclosed": true,
+      "status": "ok",
+      "ticker": "SYNA",
+      "top10_weight_end": 0.41,
+      "top10_weight_start": 0.4,
+      "turnover": 0.0142
+    }
+  ],
+  "known_by": "2026-10-24T04:00:00+00:00",
+  "overlap_shifts": [
+    {
+      "delta": 0.0142,
+      "fund_a": "SYNA",
+      "fund_b": "RLEQ",
+      "overlap_end": 0.2044,
+      "overlap_start": 0.1902
+    }
+  ],
+  "public": true,
+  "quality": {
+    "files_excluded": 1,
+    "files_included": 12,
+    "funds_without_data": [
+      "SYNC"
+    ]
+  },
+  "schema_version": 1,
+  "week_end": "2026-10-23",
+  "week_start": "2026-10-16"
+}

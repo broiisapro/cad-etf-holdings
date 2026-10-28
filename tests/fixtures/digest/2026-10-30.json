@@ -1,0 +1,181 @@
+{
+  "demo": true,
+  "funds": [
+    {
+      "changes": [
+        {
+          "change_type": "add",
+          "delta": 0.012,
+          "security_id": "TKR:XTSE:AA",
+          "security_name": "Arctic Aluminum Corp.",
+          "weight_after": 0.012,
+          "weight_before": 0.0
+        },
+        {
+          "change_type": "drop",
+          "delta": -0.009,
+          "security_id": "TKR:XTSE:CC",
+          "security_name": "Cascade Copper Ltd.",
+          "weight_after": 0.0,
+          "weight_before": 0.009
+        },
+        {
+          "change_type": "add",
+          "delta": 0.008,
+          "security_id": "TKR:XTSE:BB",
+          "security_name": "Boreal Biotech Inc.",
+          "weight_after": 0.008,
+          "weight_before": 0.0
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0035,
+          "security_id": "TKR:XTSE:DD",
+          "security_name": "Dunes Drilling Ltd.",
+          "weight_after": 0.0175,
+          "weight_before": 0.021
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.003,
+          "security_id": "TKR:XTSE:EE",
+          "security_name": "Ember Energy Corp.",
+          "weight_after": 0.018,
+          "weight_before": 0.015
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.002,
+          "security_id": "TKR:XTSE:FF",
+          "security_name": "Fjord Financial Group",
+          "weight_after": 0.028,
+          "weight_before": 0.03
+        }
+      ],
+      "counts": {
+        "adds": 2,
+        "drops": 1,
+        "weight_changes": 14
+      },
+      "flow_days": 3,
+      "flow_estimate_sum": 1250000.0,
+      "flow_method": "\u0394shares \u00d7 NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Aurora Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": "2026-10-23",
+      "securities_disclosed": true,
+      "status": "ok",
+      "ticker": "SYNA",
+      "top10_weight_end": 0.43,
+      "top10_weight_start": 0.41,
+      "turnover": 0.0312
+    },
+    {
+      "changes": [],
+      "counts": {
+        "adds": 0,
+        "drops": 0,
+        "weight_changes": 0
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "\u0394shares \u00d7 NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Borealis Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": "2026-10-26",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNB",
+      "top10_weight_end": 0.52,
+      "top10_weight_start": null,
+      "turnover": 0.0
+    },
+    {
+      "changes": [],
+      "counts": {
+        "adds": 0,
+        "drops": 0,
+        "weight_changes": 0
+      },
+      "flow_days": 1,
+      "flow_estimate_sum": 0.0,
+      "flow_method": "\u0394shares \u00d7 NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Cascade Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": null,
+      "securities_disclosed": true,
+      "status": "no_change_data",
+      "ticker": "SYNC",
+      "top10_weight_end": 0.61,
+      "top10_weight_start": null,
+      "turnover": null
+    },
+    {
+      "changes": [
+        {
+          "change_type": "drop",
+          "delta": -0.011,
+          "security_id": "TKR:XTSE:HH",
+          "security_name": "Harbour Holdings Ltd.",
+          "weight_after": 0.0,
+          "weight_before": 0.011
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0065,
+          "security_id": "TKR:XTSE:KK",
+          "security_name": "Kettle Ridge Mining Corp.",
+          "weight_after": 0.0155,
+          "weight_before": 0.022
+        }
+      ],
+      "counts": {
+        "adds": 0,
+        "drops": 1,
+        "weight_changes": 2
+      },
+      "flow_days": 2,
+      "flow_estimate_sum": -340000.0,
+      "flow_method": "\u0394shares \u00d7 NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Ember Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": "2026-10-24",
+      "securities_disclosed": true,
+      "status": "ok",
+      "ticker": "SYNE",
+      "top10_weight_end": 0.455,
+      "top10_weight_start": 0.47,
+      "turnover": 0.0125
+    }
+  ],
+  "known_by": "2026-10-31T04:00:00+00:00",
+  "overlap_shifts": [
+    {
+      "delta": 0.0127,
+      "fund_a": "SYNA",
+      "fund_b": "SYNB",
+      "overlap_end": 0.2611,
+      "overlap_start": 0.2484
+    },
+    {
+      "delta": 0.0116,
+      "fund_a": "SYNA",
+      "fund_b": "SYNE",
+      "overlap_end": 0.5125,
+      "overlap_start": 0.5009
+    }
+  ],
+  "public": true,
+  "quality": {
+    "files_excluded": 0,
+    "files_included": 9,
+    "funds_without_data": []
+  },
+  "schema_version": 1,
+  "week_end": "2026-10-30",
+  "week_start": "2026-10-23"
+}

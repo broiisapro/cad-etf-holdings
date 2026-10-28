@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cad-etf-holdings — weekly changes</title>
+<meta name="description" content="Weekly changes in Canadian ETF holdings. Latest week: 2026-10-23 to 2026-10-30.">
+<meta name="color-scheme" content="light dark">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --text: #16191c;
+  --muted: #535a61;
+  --rule: #d9dde1;
+  --accent: #0a5c86;
+  --zebra: #f3f4f5;
+  --demo-bg: #e4eff7;
+  --demo-text: #0a3c58;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121517;
+    --surface: #191d21;
+    --text: #e9ecef;
+    --muted: #a7afb7;
+    --rule: #2e353b;
+    --accent: #8dc8ee;
+    --zebra: #1e2328;
+    --demo-bg: #10293a;
+    --demo-text: #c6e3f7;
+  }
+}
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html {
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+a {
+  color: var(--accent);
+  text-underline-offset: 0.15em;
+}
+a:hover {
+  text-decoration: none;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  z-index: 2;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  color: var(--text);
+}
+.skip-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+}
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1.5rem;
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.wordmark a {
+  color: inherit;
+  text-decoration: none;
+}
+nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.95rem;
+}
+nav a[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3.5rem;
+}
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+h1 {
+  margin: 0.5rem 0;
+  font-size: clamp(1.55rem, 3.4vw, 2.05rem);
+}
+h2 {
+  margin: 2.5rem 0 0.5rem;
+  font-size: 1.2rem;
+}
+p {
+  margin: 0.4rem 0 1rem;
+}
+.lede,
+.week-meta,
+.note,
+caption {
+  color: var(--muted);
+}
+.lede {
+  max-width: 52rem;
+  margin-bottom: 0.35rem;
+}
+.week-meta {
+  margin: 0 0 0.75rem;
+  font-size: 0.925rem;
+}
+.note {
+  max-width: 62rem;
+  font-size: 0.875rem;
+}
+.banner {
+  display: inline-block;
+  margin: 0.75rem 0 0;
+  padding: 0.3rem 0.6rem;
+  border-radius: 3px;
+  background: var(--demo-bg);
+  color: var(--demo-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.table-wrap {
+  overflow-x: auto;
+  margin: 0.75rem 0 1.25rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.925rem;
+}
+caption {
+  padding: 0.65rem 0.75rem 0.5rem;
+  text-align: left;
+  font-size: 0.875rem;
+}
+th,
+td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  text-align: left;
+}
+thead th {
+  border-bottom: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+tbody tr:last-child > * {
+  border-bottom: 0;
+}
+tbody tr:nth-child(even) {
+  background: var(--zebra);
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+th.num {
+  text-align: right;
+}
+.id,
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+.tag {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.fund-block {
+  margin: 1.25rem 0 1.75rem;
+}
+.fund-block h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+.fund-block h3 .ticker {
+  margin-right: 0.4rem;
+}
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin: 2rem 0 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.95rem;
+}
+.pager a {
+  text-decoration: none;
+}
+.pager a:hover {
+  text-decoration: underline;
+}
+.site-footer {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.25rem 1.25rem 2.5rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.site-footer p {
+  margin: 0 0 0.25rem;
+}
+@media (max-width: 30rem) {
+  .site-header,
+  main,
+  .site-footer {
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+  }
+  body {
+    font-size: 15px;
+  }
+  table {
+    font-size: 0.875rem;
+  }
+  th,
+  td {
+    padding: 0.4rem 0.5rem;
+  }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+<p class="wordmark"><a href="index.html">cad-etf-holdings — weekly changes</a></p>
+<nav aria-label="Site">
+<ul>
+<li><a href="index.html" aria-current="page">This week</a></li>
+<li><a href="archive.html">Archive</a></li>
+<li><a href="feed.xml">Feed</a></li>
+</ul>
+</nav>
+</header>
+<main id="main" tabindex="-1">
+<p class="banner">Demo data — synthetic funds only</p>
+<h1>Week ending 2026-10-30</h1>
+<p class="lede">What moved in tracked Canadian ETF portfolios, from the holdings files each issuer published. Only funds whose terms allow naming individual securities list them here.</p>
+<p class="week-meta">Week 2026-10-23 to 2026-10-30 · known by <time datetime="2026-10-31T04:00:00+00:00">2026-10-31 04:00 UTC</time></p>
+<p class="note">Latest week · <a href="archive.html">All weeks</a> · <a href="feed.xml">Atom feed</a></p>
+<section id="funds" aria-labelledby="funds-heading">
+<h2 id="funds-heading">Funds</h2>
+<div class="table-wrap" role="region" aria-labelledby="funds-heading" tabindex="0">
+<table id="changes">
+<caption>Portfolio changes by fund, week ending 2026-10-30</caption>
+<thead>
+<tr><th scope="col">Ticker</th><th scope="col">Fund</th><th scope="col">Status</th><th scope="col" class="num">Adds</th><th scope="col" class="num">Drops</th><th scope="col" class="num">Weight changes</th><th scope="col" class="num">Turnover</th><th scope="col" class="num">Top-10 weight (end)</th><th scope="col" class="num">Est. flow (CAD)</th></tr>
+</thead>
+<tbody>
+<tr><th scope="row">SYNA</th><td>Synthetic Aurora Equity Fund</td><td>OK</td><td class="num">2</td><td class="num">1</td><td class="num">14</td><td class="num">3.12%</td><td class="num">43.00%</td><td class="num">+1,250,000</td></tr>
+<tr><th scope="row">SYNB</th><td>Synthetic Borealis Equity Fund</td><td>New in window</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0.00%</td><td class="num">52.00%</td><td class="num">—</td></tr>
+<tr><th scope="row">SYNC</th><td>Synthetic Cascade Equity Fund</td><td>No change data</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">—</td><td class="num">61.00%</td><td class="num">0</td></tr>
+<tr><th scope="row">SYNE</th><td>Synthetic Ember Equity Fund</td><td>OK</td><td class="num">0</td><td class="num">1</td><td class="num">2</td><td class="num">1.25%</td><td class="num">45.50%</td><td class="num">-340,000</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">Turnover is half the sum of absolute weight changes over the week. The estimated flow is Δshares × NAV summed over the days with share counts, in CAD; it ignores distributions and in-kind activity, and a dash means no estimate was possible. “New in window” funds have no portfolio at the start of the week; “no change data” funds have a single snapshot.</p>
+</section>
+<section id="security-changes" aria-labelledby="security-changes-heading">
+<h2 id="security-changes-heading">Security changes</h2>
+<p class="note">Security-level lines appear only for funds whose sources allow it (D79). Identifiers are the dataset's own security ids.</p>
+<div class="fund-block">
+<h3><span class="ticker">SYNA</span>Synthetic Aurora Equity Fund</h3>
+<div class="table-wrap" role="region" aria-label="Security changes for SYNA" tabindex="0">
+<table>
+<caption>Security changes for SYNA — Synthetic Aurora Equity Fund</caption>
+<thead>
+<tr><th scope="col">Change</th><th scope="col">Security</th><th scope="col">Identifier</th><th scope="col" class="num">Weight before</th><th scope="col" class="num">Weight after</th><th scope="col" class="num">Change</th></tr>
+</thead>
+<tbody>
+<tr><th scope="row">Add</th><td>Arctic Aluminum Corp.</td><td class="id">TKR:XTSE:AA</td><td class="num">0.00%</td><td class="num">1.20%</td><td class="num">+1.20%</td></tr>
+<tr><th scope="row">Drop</th><td>Cascade Copper Ltd.</td><td class="id">TKR:XTSE:CC</td><td class="num">0.90%</td><td class="num">0.00%</td><td class="num">-0.90%</td></tr>
+<tr><th scope="row">Add</th><td>Boreal Biotech Inc.</td><td class="id">TKR:XTSE:BB</td><td class="num">0.00%</td><td class="num">0.80%</td><td class="num">+0.80%</td></tr>
+<tr><th scope="row">Weight change</th><td>Dunes Drilling Ltd.</td><td class="id">TKR:XTSE:DD</td><td class="num">2.10%</td><td class="num">1.75%</td><td class="num">-0.35%</td></tr>
+<tr><th scope="row">Weight change</th><td>Ember Energy Corp.</td><td class="id">TKR:XTSE:EE</td><td class="num">1.50%</td><td class="num">1.80%</td><td class="num">+0.30%</td></tr>
+<tr><th scope="row">Weight change</th><td>Fjord Financial Group</td><td class="id">TKR:XTSE:FF</td><td class="num">3.00%</td><td class="num">2.80%</td><td class="num">-0.20%</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="fund-block">
+<h3><span class="ticker">SYNE</span>Synthetic Ember Equity Fund</h3>
+<div class="table-wrap" role="region" aria-label="Security changes for SYNE" tabindex="0">
+<table>
+<caption>Security changes for SYNE — Synthetic Ember Equity Fund</caption>
+<thead>
+<tr><th scope="col">Change</th><th scope="col">Security</th><th scope="col">Identifier</th><th scope="col" class="num">Weight before</th><th scope="col" class="num">Weight after</th><th scope="col" class="num">Change</th></tr>
+</thead>
+<tbody>
+<tr><th scope="row">Drop</th><td>Harbour Holdings Ltd.</td><td class="id">TKR:XTSE:HH</td><td class="num">1.10%</td><td class="num">0.00%</td><td class="num">-1.10%</td></tr>
+<tr><th scope="row">Weight change</th><td>Kettle Ridge Mining Corp.</td><td class="id">TKR:XTSE:KK</td><td class="num">2.20%</td><td class="num">1.55%</td><td class="num">-0.65%</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+<section id="overlap" aria-labelledby="overlap-heading">
+<h2 id="overlap-heading">Overlap shifts</h2>
+<div class="table-wrap" role="region" aria-labelledby="overlap-heading" tabindex="0">
+<table id="overlap-shifts">
+<caption>Fund pairs whose overlap moved beyond the reporting threshold</caption>
+<thead>
+<tr><th scope="col">Fund A</th><th scope="col">Fund B</th><th scope="col" class="num">Overlap start</th><th scope="col" class="num">Overlap end</th><th scope="col" class="num">Change</th></tr>
+</thead>
+<tbody>
+<tr><td>SYNA</td><td>SYNB</td><td class="num">24.84%</td><td class="num">26.11%</td><td class="num">+1.27%</td></tr>
+<tr><td>SYNA</td><td>SYNE</td><td class="num">50.09%</td><td class="num">51.25%</td><td class="num">+1.16%</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">Overlap is the share of weight two funds hold in the same securities; only pairs that moved by at least the reporting threshold are listed.</p>
+</section>
+<section id="quality" aria-labelledby="quality-heading">
+<h2 id="quality-heading">Data quality</h2>
+<p>9 files included, 0 excluded; every tracked fund had data this week. <a href="data/2026-10-30.json">Week data (JSON)</a>.</p>
+</section>
+<nav class="pager" aria-label="Weekly pages"><a rel="prev" href="weeks/2026-10-23.html">&larr; Older: week ending 2026-10-23</a></nav>
+</main>
+<footer class="site-footer">
+<p>Derived data · exploratory · not investment advice.</p>
+<p>Compiled from issuer-published holdings files at their recorded cutoffs; figures can change when an issuer republishes a file.</p>
+</footer>
+</body>
+</html>
