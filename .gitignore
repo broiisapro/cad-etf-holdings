@@ -8,6 +8,8 @@ raw/
 build*/
 *.duckdb
 *.parquet
+# Local static site output at the repository root (the default --out of the weekly digest)
+/site/
 # Local caches and tooling
 .cache/
 .venv/
