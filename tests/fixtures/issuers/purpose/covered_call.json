@@ -1,0 +1,53 @@
+{
+  "code": "PURF",
+  "name": "Purpose Lookalike Covered Call Fund",
+  "urlName": "purpose-lookalike-covered-call-fund",
+  "fundCode": "PURF",
+  "assetClass": [
+    {
+      "fields": {
+        "slug": "equity",
+        "className": "Equity",
+        "displayName": "Equity"
+      }
+    }
+  ],
+  "portfolio": {
+    "dt": "2026-10-22",
+    "exposure": {},
+    "Level1": {
+      "asset_class": {
+        "Equities": 76.34,
+        "Covered Call": 23.66
+      }
+    },
+    "Level2": {
+      "sector": {
+        "Financials": 100
+      }
+    },
+    "Level4": {
+      "holdings": [
+        {"name": "Northvale Banking Corp.", "weight": "12.42%"},
+        {"name": "Cedar Hollow Financial Group", "weight": "12.14%"},
+        {"name": "Maple Ridge Insurance Ltd.", "weight": "11.44%"},
+        {"name": "Sterling Creek Trust", "weight": "11.25%"},
+        {"name": "Westgate Capital Corp.", "weight": "11.22%"},
+        {"name": "Harbour Lane Bancorp", "weight": "10.71%"},
+        {"name": "Alder Point Assurance", "weight": "8.30%"},
+        {"name": "Kingsway Credit Union", "weight": "7.92%"},
+        {"name": "Granite Bay Holdings", "weight": "7.64%"},
+        {"name": "Larchmont Savings Group", "weight": "7.62%"},
+        {"name": "Northvale Banking Corp. Call 220 10/23/26", "weight": "0.00%"},
+        {"name": "Cedar Hollow Financial Group Call 295 10/23/26", "weight": "0.00%"},
+        {"name": "Maple Ridge Insurance Ltd. Call 97 10/23/26", "weight": "0.00%"},
+        {"name": "Sterling Creek Trust Call 255 10/23/26", "weight": "0.00%"},
+        {"name": "Westgate Capital Corp. Call 116 10/23/26", "weight": "0.00%"},
+        {"name": "Harbour Lane Bancorp Call 166 10/23/26", "weight": "0.00%"},
+        {"name": "Alder Point Assurance Call 138 10/23/26", "weight": "0.00%"},
+        {"name": "Kingsway Credit Union Call 64 10/23/26", "weight": "-0.01%"},
+        {"name": "Granite Bay Holdings Call 176 10/23/26", "weight": "-0.01%"}
+      ]
+    }
+  }
+}
