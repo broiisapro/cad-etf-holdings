@@ -130,9 +130,13 @@ def test_json_asof_carries_the_date_and_point_in_time_numbers(
 
 
 def test_unknown_format_is_a_usage_error(synthetic_build: BuildResult) -> None:
-    result, output = _run(synthetic_build, "--format", "xml")
-    assert result.exit_code == 2, output  # type: ignore[attr-defined]
-    assert "--format must be one of text, markdown, json" in output
+    result = runner.invoke(
+        app,
+        ["qa", "--db", str(synthetic_build.db_path), "--format", "xml"],
+        env={"COLUMNS": "200"},
+    )
+    assert result.exit_code == 2, result.output
+    assert "--format must be one of text, markdown, json" in result.output
 
 
 def _threshold_database(tmp_path: Path) -> Path:
