@@ -13,11 +13,11 @@ and history dataset.
   portfolio disclosures backwards for the last N calendar quarters, store what
   the issuer still publishes, and report every requested quarter as fetched,
   already present, or missing with a reason (D68).
-
-FR-2.3 — moving the schedule to GitHub Actions — is deliberately **not** part of
-this epic. D69 splits Epic 4 by time: wave 06 delivers FR-2.1 and FR-2.2 while
-Epic 2 waits for its collection days; FR-2.3 waits for the public ship, and the
-`epic-04-complete` tag follows only after it.
+- **FR-2.3 — scheduled collection on GitHub Actions.** Move the daily pass off
+  the laptop into a workflow that stores raw files in a private data repository
+  and publishes only derived aggregates (D69, D76, D77). Wave 06 delivered
+  FR-2.1/FR-2.2; wave 08 delivered the FR-2.3 code with every switch off, so
+  the `epic-04-complete` tag follows the first green scheduled run.
 
 ## How it works
 
@@ -125,6 +125,59 @@ pattern verified on the current quarter). The command prints one line per
 fund × quarter (`fetched|present|missing`) and exits 0 even when quarters are
 missing.
 
+### Scheduled collection (FR-2.3, D69/D76/D77)
+
+`.github/workflows/collect.yml` is the production schedule from the public ship
+on; it ships **disabled** so nothing collects until a repository variable turns
+it on.
+
+- **Trigger.** Weekdays at 23:17 UTC (19:17 EDT / 18:17 EST, after the Toronto
+  evening publication), plus `workflow_dispatch` with an optional `date` input
+  (empty means today in America/Toronto). Concurrency group `collect` with
+  `cancel-in-progress: false`, a 45-minute timeout and read-only `contents`
+  permission.
+- **Switch.** The whole job is skipped unless
+  `vars.ETFH_ACTIONS_COLLECT == 'true'`. Before any checkout or fetch a
+  configuration step fails with a names-only `::error::` when
+  `ETFH_USER_AGENT`, `ETFH_GIT_NAME`, `ETFH_GIT_EMAIL` or the
+  `ETFH_DATA_DEPLOY_KEY` secret is unset, so a missing setting is a one-line
+  error instead of a cryptic failure mid-run.
+- **Private data repository.** The job checks out
+  `vars.ETFH_DATA_REPO` (default `broiisapro/cad-etf-holdings-data`) into
+  `data/` with an SSH deploy key. That repository tracks `raw/` in the same
+  layout as the local store; it is private and nothing raw appears in the
+  public repository, its logs, its job summaries or its artifacts (D77).
+- **The pass.** `ops/actions_collect.sh DATA_CHECKOUT [DATE]` runs
+  `etfh collect`, `etfh collect-aum`, `python -m etfh.rawcheck verify`, then
+  stages `raw/`, commits with the human's identity passed through `git -c`
+  (`ETFH_GIT_NAME`/`ETFH_GIT_EMAIL`, D81; no `git config` is run) and pushes
+  `HEAD:<branch>`. Only after the push does it build from the data checkout
+  into `$RUNNER_TEMP/build`, append `etfh qa --format markdown` to the job
+  summary (counts and check names only, interfaces §1), export derived
+  aggregates with `--asof` the collection date, and exit with QA's status.
+- **Failure handling.** A failed collection, verify, build or push exits
+  non-zero. Because the push precedes the build, a QA exit 3 or a build error
+  still leaves the day's raw files on the data repository's branch — collected
+  data is never lost to a later failure. The uploaded artifact contains
+  `$RUNNER_TEMP/aggregates` only and is kept for 30 days.
+- **Seeding.** `ops/seed_data_repo.sh RAW_DIR DATA_CHECKOUT` verifies the local
+  store, syncs the data-file/sidecar pairs into `DATA_CHECKOUT/raw`, verifies
+  the destination and commits `data: seed raw store` in that checkout. It
+  never pushes: push it yourself after checking it. Use it to give the Actions
+  job the local history instead of starting from day one.
+- **Switches at the public ship.** Required to enable collection:
+  `ETFH_ACTIONS_COLLECT=true` plus the `ETFH_USER_AGENT`, `ETFH_GIT_NAME` and
+  `ETFH_GIT_EMAIL` variables and the `ETFH_DATA_DEPLOY_KEY` secret;
+  `ETFH_DATA_REPO` and `OPENFIGI_API_KEY` are optional. Until then the launchd
+  guard remains the schedule.
+- **Retiring the launchd job.** Keep `ops/install_launchd.sh`'s job installed
+  until **two consecutive scheduled runs are green**. Then unload the
+  LaunchAgent (`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.etfh.collect.plist`
+  — or remove it) and delete the plist so the laptop and Actions never run the
+  same collection twice. Two green runs prove the deploy key, the identity and
+  the raw layout before the local fallback is removed; the tag
+  `epic-04-complete` follows that first green collection.
+
 ### CLI and operations
 
 | Command | Purpose |
@@ -133,6 +186,7 @@ missing.
 | `etfh flows --fund F --from D1 --to D2 --db PATH [--asof D] [--json]` | Flow estimates plus the D67 method line |
 | `etfh backfill-qpd --issuer I --quarters N --raw DIR [--config DIR]` | Quarterly disclosure backfill with per-quarter status |
 | `etfh qa --db PATH [--asof D] [--max-unmatched-share X]` | QA report, now including fund metrics and an as-of weight view |
+| `etfh verify-raw --raw DIR` · `etfh sync-raw --from SRC --to DST` | Raw-store integrity and a verified copy for the data repository |
 
 `ops/run_collect.sh` now runs `collect → collect-aum → build → qa`, and
 `ops/collect_guard.sh` is the sleep-proof daily trigger (D64): launchd polls it
@@ -140,7 +194,10 @@ every 30 minutes and at login, it collects at most once per local day after
 18:00 (or immediately after a missed day), and it stamps the day only when at
 least one source/fund pair was fetched or confirmed unchanged. State lives in
 `<repo>/.cache/etfh/`; the guard log is
-`~/Library/Logs/etfh/guard.log`.
+`~/Library/Logs/etfh/guard.log`. The GitHub Actions equivalents are
+`ops/actions_collect.sh` (the same pass against a private data checkout) and
+`ops/seed_data_repo.sh` (verify and seed that data repository); see
+"Scheduled collection" above.
 
 ## Key decisions and reasoning
 
@@ -162,8 +219,14 @@ least one source/fund pair was fetched or confirmed unchanged. State lives in
 - **D68 — conservative backfill.** Only approved PDF sources, only links the
   issuer publishes, and every quarter accounted for. A quarter that is no longer
   online is `missing`, not guessed from a URL pattern.
-- **D69 — time-split epic.** FR-2.1/FR-2.2 ship now; FR-2.3 (GitHub Actions
-  scheduling) waits for the public ship, so the epic is tagged only after it.
+- **D69 — time-split epic.** FR-2.1/FR-2.2 shipped first while Epic 2 waited for
+  its collection days; the FR-2.3 code followed in wave 08 and ships disabled
+  (D76), so the epic is tagged only after the first green scheduled collection.
+- **D76/D77 — private data, public aggregates.** Scheduled collection must not
+  put raw files where the public repository, its logs or its artifacts can see
+  them, so the workflow writes to a separate private repository and publishes
+  only counts and derived aggregates. Shipping the switch off means the code
+  can be reviewed and merged without collecting anything.
 
 ## Interfaces
 
@@ -190,15 +253,33 @@ All names match the merged code.
   asof=None)`.
 - `etfh.backfill.backfill_qpd(...) -> list[BackfillResult]` and
   `BackfillResult(fund_ticker, quarter_end, status, detail, raw)`.
-- `etfh.cli`: `collect-aum`, `flows`, `backfill-qpd`, `qa --asof`.
+- `etfh.cli`: `collect-aum`, `flows`, `backfill-qpd`, `qa --asof`, `verify-raw`,
+  `sync-raw`.
+- `etfh.rawcheck`: `verify_raw_store`, `sync_raw_store`, `RawCheckReport`,
+  `SyncReport`.
 - `ops/collect_guard.sh`, `ops/run_collect.sh`, `ops/launchd/com.etfh.collect.plist`
   (`StartInterval 1800`, `RunAtLoad`), `ops/install_launchd.sh`.
+- `.github/workflows/collect.yml` (weekday schedule, `ETFH_ACTIONS_COLLECT`
+  switch); `ops/actions_collect.sh DATA_CHECKOUT [DATE]`;
+  `ops/seed_data_repo.sh RAW_DIR DATA_CHECKOUT`.
+- Repository variables `ETFH_ACTIONS_COLLECT`, `ETFH_DATA_REPO`,
+  `ETFH_USER_AGENT`, `ETFH_GIT_NAME`, `ETFH_GIT_EMAIL`; secret
+  `ETFH_DATA_DEPLOY_KEY`.
 
 ## Deviations from the plan
 
-- **FR-2.3 is deferred, not delivered.** GitHub Actions scheduling has to wait
-  for the repository to be public (D69); the local launchd guard remains the
-  production schedule until then.
+- **FR-2.3 ships as code with every switch off.** The workflow, the pass script
+  and the seeding script are merged and tested offline, but the data repository,
+  deploy key and variables are human setup after the release (D76/D77), so no
+  scheduled run has happened. The local launchd guard remains the production
+  schedule until two Actions runs are green.
+- **The collection pass pushes before it builds.** A QA failure after a
+  successful push exits non-zero but leaves the day's raw files on the data
+  repository; the alternative (build first) could lose collected files to a
+  validation problem that is fixable later.
+- **`etfh verify-raw` exits 2 for a missing directory.** The module entry point
+  uses 1 for problems as contracted; a path that is not a store is a usage
+  error, consistent with the rest of the CLI.
 - **BMO metrics are PDF factsheets, not the profile JSON endpoint.** A live check
   on 2026-10-23 found the profile endpoint returns a JavaScript shell with no
   fund data, so the collector uses the factsheet PDFs the issuer links; the
@@ -318,5 +399,10 @@ output still shows the method. The synthetic end-to-end test
 - **No metrics for Vanguard or Global X.** Their product pages have no static
   source and were marked unsupported under D65 rather than worked around with a
   browser.
-- **FR-2.3 (GitHub Actions scheduling) is deferred** until the public ship, as
-  is the `epic-04-complete` tag.
+- **FR-2.3 runs nowhere yet.** The workflow and scripts are merged but ship
+  disabled (D76); the data repository, deploy key and variables are human setup.
+  Nothing on GitHub Actions has collected a real file, so the first two green
+  scheduled runs are still ahead, and so is the `epic-04-complete` tag.
+- **The two schedules can overlap by design during the switch.** The launchd
+  guard and the Actions workflow are independent; retire the laptop job only
+  after two green Actions runs, as described above.
