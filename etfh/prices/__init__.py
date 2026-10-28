@@ -15,13 +15,23 @@ from etfh.prices.budget import BudgetExceededError, PriceBudget, PriceBudgetUsag
 from etfh.prices.frames import CLOSE_SCHEMA, closes_frame
 from etfh.prices.symbols import symbol_for
 from etfh.prices.synthetic import SyntheticPrices
+from etfh.prices.tiingo import (
+    ApiKeyMissingError,
+    PriceFetchError,
+    PriceSourceError,
+    TiingoPrices,
+)
 
 __all__ = [
     "CLOSE_SCHEMA",
+    "ApiKeyMissingError",
     "BudgetExceededError",
     "PriceBudget",
     "PriceBudgetUsage",
+    "PriceFetchError",
+    "PriceSourceError",
     "SyntheticPrices",
+    "TiingoPrices",
     "closes_frame",
     "symbol_for",
 ]
