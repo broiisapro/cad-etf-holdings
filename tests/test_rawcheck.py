@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from etfh.rawcheck import (
     RawCheckReport,
     RawProblem,
+    SyncReport,
     main,
     sync_raw_store,
     verify_raw_store,
@@ -430,3 +435,66 @@ def test_module_sync_dry_run_flag(tmp_path: Path, capsys: pytest.CaptureFixture[
         f"sync {source} -> {destination} (dry run): 1 copied, 0 identical, 0 conflict(s)"
     ]
     assert not destination.exists()
+
+
+def test_committed_synthetic_store_verifies_clean() -> None:
+    report = verify_raw_store(SYNTHETIC_STORE)
+
+    assert report.ok
+    assert report.problems == ()
+    assert report.files_checked == 15
+
+
+@settings(max_examples=20, deadline=None)
+@given(
+    st.lists(
+        st.tuples(
+            st.integers(min_value=0, max_value=2),
+            st.integers(min_value=0, max_value=2),
+            st.binary(min_size=1, max_size=32),
+        ),
+        min_size=1,
+        max_size=6,
+    )
+)
+def test_sync_then_verify_round_trip(entries: list[tuple[int, int, bytes]]) -> None:
+    tmp_path = Path(tempfile.mkdtemp(prefix="etfh-rawcheck-"))
+    try:
+        source = tmp_path / "source"
+        destination = tmp_path / "destination"
+        store = RawStore(source)
+        for index, (issuer_index, ticker_index, content) in enumerate(entries):
+            store.write(
+                content,
+                source_id="syn_csv",
+                issuer=f"issuer{issuer_index}",
+                fund_ticker=f"SYN{ticker_index}",
+                url="synthetic://fixtures/property.csv",
+                fetched_at=FETCHED + timedelta(seconds=index),
+                ext="csv",
+                content_type="text/csv",
+                as_of_hint=DAY,
+            )
+
+        report = sync_raw_store(source, destination)
+        checked = verify_raw_store(destination)
+
+        assert report.ok
+        assert report.conflicts == ()
+        assert checked.ok
+        assert _relative_files(destination) == _relative_files(source)
+        assert len(report.copied) == checked.files_checked
+        assert report.identical == 0
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_reports_are_comparable_and_immutable() -> None:
+    problem = RawProblem("a/b/2026-10-29/20261029T220000Z.csv", "sha_mismatch", "x")
+    report = RawCheckReport(files_checked=1, problems=(problem,))
+    sync_report = SyncReport(copied=("a",), identical=0, conflicts=())
+
+    assert not report.ok
+    assert sync_report.ok
+    with pytest.raises(AttributeError):
+        problem.path = "other"  # type: ignore[misc]
