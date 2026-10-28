@@ -1,17 +1,29 @@
-"""Integrity checks for the raw store.
+"""Integrity checks and safe synchronisation for the raw store.
 
 The raw store (D20) is a directory tree of unmodified issuer files, each with a
 ``<fetched_at>.meta.json`` sidecar recording its SHA-256. D77 moves that tree
-into a separate private data repository, so the tree needs a check that is safe
-outside the collector which wrote it: ``verify_raw_store`` walks the store once,
-recomputes every data file's SHA-256 in chunks and reports *all* problems
-instead of stopping at the first one.
+into a separate private data repository, so the tree needs tooling that is safe
+outside the collector which wrote it:
+
+``verify_raw_store``
+    Walks the store once, recomputes every data file's SHA-256 in chunks and
+    reports *all* problems instead of stopping at the first one.
+
+``sync_raw_store``
+    Copies whole data-file/sidecar pairs into another store. A pair is written
+    both or neither, identical pairs are skipped, and a relative path that
+    already holds different bytes is reported as a conflict and never
+    overwritten. Files are staged next to their destination and renamed into
+    place, so an interrupted copy cannot leave a partial file.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -24,6 +36,8 @@ __all__ = [
     "ProblemKind",
     "RawCheckReport",
     "RawProblem",
+    "SyncReport",
+    "sync_raw_store",
     "verify_raw_store",
 ]
 
@@ -276,3 +290,142 @@ def verify_raw_store(root: Path) -> RawCheckReport:
 
     problems.sort(key=lambda problem: (problem.path, problem.kind, problem.detail))
     return RawCheckReport(files_checked=len(data_files), problems=tuple(problems))
+
+
+def _temp_path(target: Path) -> Path:
+    descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    os.close(descriptor)
+    return Path(name)
+
+
+def _stage_copy(source: Path, target: Path) -> Path:
+    """Copy ``source`` into a temporary sibling of ``target`` and return it."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _temp_path(target)
+    try:
+        with source.open("rb") as reader, temp_path.open("wb") as writer:
+            shutil.copyfileobj(reader, writer, length=_CHUNK)
+            writer.flush()
+            os.fsync(writer.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def _atomic_write(target: Path, content: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    temp_path = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_copy(source: Path, target: Path) -> None:
+    temp_path = _stage_copy(source, target)
+    try:
+        os.replace(temp_path, target)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_pair(
+    source_data: Path, source_sidecar: Path, target_data: Path, target_sidecar: Path
+) -> None:
+    """Stage both files, then rename them into place (both or neither)."""
+    data_temp = _stage_copy(source_data, target_data)
+    sidecar_temp: Path | None = None
+    try:
+        sidecar_temp = _stage_copy(source_sidecar, target_sidecar)
+        os.replace(data_temp, target_data)
+        try:
+            os.replace(sidecar_temp, target_sidecar)
+        except BaseException:
+            # Do not leave a data file whose sidecar never arrived.
+            target_data.unlink(missing_ok=True)
+            raise
+    finally:
+        data_temp.unlink(missing_ok=True)
+        if sidecar_temp is not None:
+            sidecar_temp.unlink(missing_ok=True)
+
+
+def sync_raw_store(src: Path, dst: Path, *, dry_run: bool = False) -> SyncReport:
+    """Copy every verified data-file/sidecar pair from ``src`` into ``dst``.
+
+    The source must verify clean (:func:`verify_raw_store`), otherwise a
+    ``ValueError`` names the problems instead of copying an incomplete store.
+    Identical pairs are skipped; a destination path holding different bytes is
+    a conflict and is left untouched. The destination root is created on a real
+    run when it does not exist yet. With ``dry_run`` nothing is created,
+    copied or replaced, but the report is the same as a real run would give.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    source_report = verify_raw_store(src)
+    if not source_report.ok:
+        preview = "; ".join(
+            f"{problem.kind} {problem.path}" for problem in source_report.problems[:3]
+        )
+        raise ValueError(
+            f"source raw store has {len(source_report.problems)} problem(s) "
+            f"({preview}); run verify first"
+        )
+    if not dry_run:
+        dst.mkdir(parents=True, exist_ok=True)
+
+    copied: list[str] = []
+    conflicts: list[str] = []
+    identical = 0
+    for data_relative in _data_files(src):
+        sidecar_relative = _sidecar_for(data_relative)
+        source_data = src / data_relative
+        source_sidecar = src / sidecar_relative
+        data_digest = _sha256_file(source_data)
+        sidecar_bytes = source_sidecar.read_bytes()
+        target_data = dst / data_relative
+        target_sidecar = dst / sidecar_relative
+        relative = data_relative.as_posix()
+
+        data_present = target_data.exists() or target_data.is_symlink()
+        sidecar_present = target_sidecar.exists() or target_sidecar.is_symlink()
+        if data_present:
+            if not _is_regular_file(target_data) or _sha256_file(target_data) != data_digest:
+                conflicts.append(relative)
+                continue
+            if sidecar_present:
+                if (
+                    not _is_regular_file(target_sidecar)
+                    or target_sidecar.read_bytes() != sidecar_bytes
+                ):
+                    conflicts.append(relative)
+                    continue
+                identical += 1
+                continue
+            if not dry_run:
+                _atomic_write(target_sidecar, sidecar_bytes)
+            copied.append(relative)
+            continue
+
+        if sidecar_present:
+            if not _is_regular_file(target_sidecar) or target_sidecar.read_bytes() != sidecar_bytes:
+                conflicts.append(relative)
+                continue
+            if not dry_run:
+                _atomic_copy(source_data, target_data)
+            copied.append(relative)
+            continue
+
+        if not dry_run:
+            _copy_pair(source_data, source_sidecar, target_data, target_sidecar)
+        copied.append(relative)
+
+    return SyncReport(copied=tuple(copied), identical=identical, conflicts=tuple(conflicts))
