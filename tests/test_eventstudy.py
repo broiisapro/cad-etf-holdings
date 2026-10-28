@@ -165,10 +165,6 @@ def _mapper(mapping: Mapping[str, str]) -> Any:
     return resolve
 
 
-def _day_index(days: Sequence[date], day: date) -> int:
-    return list(days).index(day)
-
-
 # --------------------------------------------------------------------------- #
 # Known effects and the two models
 # --------------------------------------------------------------------------- #
@@ -748,4 +744,3 @@ def test_fetch_range_covers_estimation_and_the_forward_window() -> None:
     assert symbols == ("AAA", "SPY")
     assert start <= known - timedelta(days=190)
     assert end >= known + timedelta(days=10)
-    assert _day_index(days, known) == index
