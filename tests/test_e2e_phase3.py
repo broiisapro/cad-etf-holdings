@@ -214,6 +214,69 @@ def test_the_public_outputs_name_no_fund_or_security(
     assert "ISIN:" in internal
 
 
+def test_the_window_option_decides_which_sub_windows_are_reported(
+    synthetic_db: Path, tmp_path: Path
+) -> None:
+    """``--window`` reaches the study: -3,3 cannot report [0,5] or [-5,5]."""
+    out = tmp_path / "narrow"
+    result = runner.invoke(
+        app,
+        [
+            "event-study",
+            "--db",
+            str(synthetic_db),
+            "--raw",
+            str(RAW_ROOT),
+            "--out",
+            str(out),
+            "--source",
+            "synthetic",
+            "--window",
+            "-3,3",
+            "--config",
+            str(CONFIG_DIR),
+        ],
+        env=_WIDE,
+    )
+    assert result.exit_code == 0, result.output
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["window"] == [-3, 3]
+    assert set(summary["windows"]) == {"[-1,1]", "[0,1]"}
+    assert "CAR[0,5]" not in result.output
+    assert "CAR[-1,1]" in result.output
+
+
+def test_the_market_model_option_is_honoured(synthetic_db: Path, tmp_path: Path) -> None:
+    """``--model market_model`` runs the OLS variant and still reports aggregates."""
+    out = tmp_path / "market-model"
+    result = runner.invoke(
+        app,
+        [
+            "event-study",
+            "--db",
+            str(synthetic_db),
+            "--raw",
+            str(RAW_ROOT),
+            "--out",
+            str(out),
+            "--source",
+            "synthetic",
+            "--model",
+            "market_model",
+            "--config",
+            str(CONFIG_DIR),
+        ],
+        env=_WIDE,
+    )
+    assert result.exit_code == 0, result.output
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["model"] == "market_model"
+    # The synthetic walk starts in 1990, so every event has a full estimation
+    # window; nothing is skipped for want of history.
+    assert summary["skipped"]["short_estimation"] == 0
+    assert summary["n_used"] == 31
+
+
 def test_verify_raw_accepts_the_committed_fixtures() -> None:
     result = runner.invoke(app, ["verify-raw", "--raw", str(RAW_ROOT)], env=_WIDE)
     assert result.exit_code == 0, result.output
