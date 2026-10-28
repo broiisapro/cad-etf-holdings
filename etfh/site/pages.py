@@ -57,7 +57,6 @@ def render_index(
     older: date | None = None,
 ) -> str:
     """The latest week's page, also served as ``index.html``."""
-    canonical = base_url if base_url is not None else None
     body = _week_content(digest, prefix="", latest=True, older=older, newer=None)
     return _document(
         title=site_title,
@@ -65,7 +64,7 @@ def render_index(
             "Weekly changes in Canadian ETF holdings. Latest week: "
             f"{format_week_range(digest.week_start, digest.week_end)}."
         ),
-        canonical=canonical,
+        canonical=base_url,
         prefix="",
         site_title=site_title,
         current="index",
@@ -168,7 +167,7 @@ def _week_content(
             f'<p class="lede">{_LEDE}</p>',
             '<p class="week-meta">'
             f"Week {week_range} \u00b7 "
-            f'known by <time datetime="{iso_timestamp(digest.known_by)}">'
+            f'known by <time datetime="{_esc(iso_timestamp(digest.known_by))}">'
             f"{_esc(format_known_by(digest.known_by))}</time>"
             "</p>",
         ]
