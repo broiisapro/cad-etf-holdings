@@ -41,14 +41,30 @@ Commands:
   sampled raw values next to normalized weights for the latest file per issuer.
 - ``export --db PATH --out DIR [--asof D] [--funds F1,F2,...]`` writes derived
   aggregates only (FR-1.12).
+- ``weekly --db PATH --out DIR [--week-end D] [--weeks N]
+  [--public/--internal] [--demo]`` writes the static weekly digest site
+  (FR-3.1): one document per week end, validated, then rendered to ``DIR``.
+  ``--demo`` builds the committed synthetic store in a temporary directory and
+  ignores ``--db`` (D62).
+- ``prices fetch --symbols A,B --from D --to D --raw DIR`` fetches daily
+  adjusted closes from the metered, terms-gated source and stores the raw
+  responses (D78/D84); the request budget is shared between commands.
+- ``event-study --db PATH --raw DIR --out DIR [--source tiingo|synthetic]
+  [--benchmark SPY] [--min-weight X] [--window -5,5]
+  [--model market_adjusted|market_model]`` measures abnormal returns around
+  large additions (FR-3.2) and writes the public aggregates plus the internal
+  per-event table.
+- ``verify-raw --raw DIR`` / ``sync-raw --from SRC --to DST [--dry-run]``
+  check the raw store against its sidecars and copy verified pairs into
+  another store (interfaces wave 08 §2).
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
-from datetime import date, datetime
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
@@ -66,13 +82,27 @@ from etfh.backfill import BackfillError, backfill_qpd
 from etfh.build import build as run_build
 from etfh.build import connect as connect_duckdb
 from etfh.collect.registry import CollectError, collector_for
+from etfh.digest import build_digest, default_week_end, validate_digest
+from etfh.events import large_additions
+from etfh.eventstudy import EventStudyResult, run_event_study, write_outputs
 from etfh.export import export_aggregates
 from etfh.http import PoliteClient
 from etfh.parse.registry import find_parser
+from etfh.prices import (
+    ApiKeyMissingError,
+    BudgetExceededError,
+    PriceFetchError,
+    PriceSourceError,
+    SyntheticPrices,
+    TiingoPrices,
+    symbol_for,
+)
+from etfh.rawcheck import sync_raw_store, verify_raw_store
 from etfh.registry import Fund, Source, TermsNotAllowedError, load_funds, load_sources
 from etfh.secmaster.openfigi import FigiLookup
 from etfh.secmaster.overrides import load_overrides
 from etfh.secmaster.review import append_overrides, approve
+from etfh.site import render_site
 from etfh.spotcheck import spotcheck as run_spotcheck
 from etfh.storage import RawStore
 from etfh.types import Decision, SourceKind
@@ -209,6 +239,10 @@ def parse(
             typer.echo(f"error {raw_file.path}: unknown source {raw_file.source_id!r}")
             failures += 1
             continue
+        if source.kind is SourceKind.prices:
+            # Price responses share the raw store (D78/D84) but no holdings
+            # parser ever claims them; they are not a parse failure.
+            continue
         parser = find_parser(raw_file, source)
         if parser is None:
             typer.echo(f"error {raw_file.path}: no parser for .{raw_file.ext} files")
@@ -292,8 +326,8 @@ def qa(
 ) -> None:
     """Report validation results, excluded files and unmatched weight.
 
-    With ``--asof`` every section describes only the versions known by that
-    date (``summarize(..., asof=...)``, D7/D30). ``--format markdown`` prints a
+    With ``--asof`` every section uses only versions known by that date
+    (``summarize(..., asof=...)``, D7/D30). ``--format markdown`` prints a
     publish-safe summary for a workflow job summary (interfaces wave 08 §1);
     ``--format json`` prints the same numbers for machines. Exit codes are
     unchanged: 1 for an inconsistent database, 3 for the unmatched threshold,
@@ -324,8 +358,8 @@ def qa(
     else:
         if asof_date is not None:
             typer.echo(
-                f"as of {asof_date.isoformat()}: unmatched weight uses only versions "
-                "known by then (America/Toronto cutoff)"
+                f"as of {asof_date.isoformat()}: every section uses only versions "
+                "known by the as-of date (America/Toronto cutoff)"
             )
         typer.echo(qa_module.render(summary))
     if code != 0:
@@ -548,6 +582,368 @@ def export(
         typer.echo(f"wrote {path}")
 
 
+_DEMO_SOURCE = "synthetic"
+_PRICE_SOURCE_ID = "tiingo_prices"
+
+
+@app.command()
+def weekly(
+    db: Annotated[
+        Path, typer.Option("--db", help="built DuckDB file (ignored with --demo)")
+    ] = Path("build/etfh.duckdb"),
+    out: Annotated[Path, typer.Option("--out", help="site output directory")] = Path("site"),
+    week_end: Annotated[
+        str | None,
+        typer.Option(
+            "--week-end",
+            help="last day of the newest week (YYYY-MM-DD); default: the most recent Friday",
+        ),
+    ] = None,
+    weeks: Annotated[
+        int, typer.Option("--weeks", help="how many week ends to publish, newest first")
+    ] = 1,
+    public: Annotated[
+        bool,
+        typer.Option(
+            "--public/--internal",
+            help="apply the D79 publication policy (default) or include security lines",
+        ),
+    ] = True,
+    demo: Annotated[
+        bool,
+        typer.Option("--demo", help="build the committed synthetic store and ignore --db"),
+    ] = False,
+    config: Annotated[Path, typer.Option("--config", help="config directory")] = Path("config"),
+) -> None:
+    """Build the weekly digest documents and render the static site (FR-3.1).
+
+    One document is built per week end (interfaces wave 08 §3), each is checked
+    with :func:`etfh.digest.validate_digest` and the set is rendered into ``out``
+    (interfaces wave 08 §4). A week whose funds have no comparable portfolio is
+    reported and left out of the site; when no requested week has any holding the
+    command exits 1.
+
+    ``--demo`` builds the committed synthetic store into a temporary directory
+    (D62), ignores ``--db``, marks every document ``"demo": true`` and takes the
+    newest week end from the synthetic data's latest as-of date instead of the
+    clock. An explicit ``--week-end`` still wins, so older demo weeks can be
+    rebuilt. ``--public`` (the default) shows security names, identifiers and
+    weights only for funds the terms allow (D79); ``--internal`` includes them
+    for every fund and must not be published.
+    """
+    if weeks < 1:
+        typer.echo("error: --weeks must be at least 1", err=True)
+        raise typer.Exit(code=2)
+    sources = load_sources(config / "sources.yaml")
+    funds = load_funds(config / "funds.csv", sources)
+
+    demo_database = None
+    if demo:
+        from etfh.dashboard.demo import build_demo_database
+
+        try:
+            demo_database = build_demo_database(config_dir=config)
+        except Exception as error:
+            typer.echo(f"error: {error}", err=True)
+            raise typer.Exit(code=2) from None
+        connection = connect_duckdb(demo_database.db_path, read_only=True)
+    else:
+        connection = _connect(db)
+
+    try:
+        newest: date
+        if week_end is not None:
+            newest = _parse_date(week_end, "--week-end")
+        elif demo_database is not None:
+            latest = _synthetic_latest_asof(connection)
+            if latest is None:
+                typer.echo("error: the demo store has no holdings", err=True)
+                raise typer.Exit(code=1)
+            newest = latest
+        else:
+            newest = default_week_end(datetime.now(tz=_TORONTO).date())
+        week_ends = [newest - timedelta(days=7 * index) for index in range(weeks)]
+        documents = []
+        for end in week_ends:
+            document = build_digest(connection, end, public=public, sources=sources, funds=funds)
+            document["demo"] = demo
+            try:
+                validate_digest(document)
+            except ValueError as error:
+                typer.echo(f"error: week ending {end.isoformat()}: {error}", err=True)
+                raise typer.Exit(code=1) from None
+            if not document["funds"]:
+                typer.echo(f"skipped week ending {end.isoformat()}: no comparable portfolio")
+                continue
+            typer.echo(
+                f"week ending {end.isoformat()}: {len(document['funds'])} fund(s), "
+                f"{sum(len(fund['changes']) for fund in document['funds'])} change line(s)"
+            )
+            documents.append(document)
+    finally:
+        connection.close()
+        if demo_database is not None:
+            demo_database._tempdir.cleanup()
+
+    if not documents:
+        typer.echo(
+            f"error: no holdings for the requested week(s) "
+            f"{week_ends[-1].isoformat()}..{week_ends[0].isoformat()}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    written = render_site(documents, out)
+    typer.echo(f"wrote {len(written)} file(s) to {Path(out)}")
+    typer.echo(f"index {Path(out) / 'index.html'}")
+    if not public:
+        typer.echo("internal document: security-level lines included, do not publish")
+
+
+prices_app = typer.Typer(
+    help="Fetch and store daily prices for the event study (D78/D84).",
+    no_args_is_help=True,
+)
+
+
+@prices_app.command(name="fetch")
+def prices_fetch(
+    symbols: Annotated[str, typer.Option("--symbols", help="comma-separated ticker symbols")],
+    from_date: Annotated[str, typer.Option("--from", help="YYYY-MM-DD")],
+    to_date: Annotated[str, typer.Option("--to", help="YYYY-MM-DD")],
+    raw: Annotated[Path, typer.Option("--raw", help="raw store directory")] = Path("raw"),
+    config: Annotated[Path, typer.Option("--config", help="config directory")] = Path("config"),
+    budget: Annotated[
+        Path | None,
+        typer.Option(
+            "--budget",
+            help="shared request budget file (default: <raw>/../.etfh/price_budget.json)",
+        ),
+    ] = None,
+) -> None:
+    """Fetch daily adjusted closes and store the raw responses.
+
+    The source is ``tiingo_prices``; it is contacted only when its terms
+    decision allows it (D3/D84), so a source recorded as ``pending_review``
+    prints ``skipped: terms`` and exits 2 exactly like collection. Without
+    ``TIINGO_API_KEY`` the command exits 2 with a clear message before any
+    request. Responses are cached in the raw store and reused, and the free-plan
+    request budget is read and written before every request; the budget file is
+    shared with ``etfh event-study`` so the plan limits are honoured across
+    commands. ``--raw`` only ever receives price files, never holdings.
+    """
+    start = _parse_date(from_date, "--from")
+    end = _parse_date(to_date, "--to")
+    if start > end:
+        typer.echo("error: --from must not be after --to", err=True)
+        raise typer.Exit(code=2)
+    wanted = _parse_symbols(symbols)
+    if not wanted:
+        typer.echo("error: --symbols must name at least one symbol", err=True)
+        raise typer.Exit(code=2)
+    sources = load_sources(config / "sources.yaml")
+    source = sources.get(_PRICE_SOURCE_ID)
+    if not _gate_price_source(source):
+        raise typer.Exit(code=2)
+    assert source is not None  # narrowed by _gate_price_source
+    budget_path = budget if budget is not None else _default_price_budget(raw)
+    try:
+        prices = TiingoPrices.from_env(raw, sources=sources, budget_path=budget_path)
+    except ApiKeyMissingError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except PriceSourceError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        with prices:
+            frame = prices.daily_closes(wanted, start, end)
+    except TermsNotAllowedError as error:
+        typer.echo(f"skipped: terms source={_PRICE_SOURCE_ID} ({error})")
+        raise typer.Exit(code=2) from None
+    except BudgetExceededError as error:
+        typer.echo(f"error: {error} ({budget_path})", err=True)
+        raise typer.Exit(code=2) from None
+    except PriceFetchError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    for symbol in wanted:
+        rows = frame.filter(pl.col("symbol") == symbol)
+        if rows.is_empty():
+            typer.echo(f"{symbol}: no rows")
+            continue
+        days = rows["date"].to_list()
+        typer.echo(f"{symbol}: {rows.height} row(s) {days[0].isoformat()}..{days[-1].isoformat()}")
+    typer.echo(
+        f"prices: {frame.height} row(s) for {frame['symbol'].n_unique()} of "
+        f"{len(wanted)} symbol(s); stored under {Path(raw)}"
+    )
+
+
+@app.command("event-study")
+def event_study(
+    db: Annotated[Path, typer.Option("--db", help="built DuckDB file")] = Path("build/etfh.duckdb"),
+    raw: Annotated[Path, typer.Option("--raw", help="raw store directory")] = Path("raw"),
+    out: Annotated[Path, typer.Option("--out", help="output directory")] = Path("event-study"),
+    source: Annotated[
+        Literal["tiingo", "synthetic"],
+        typer.Option("--source", help="price source: the metered real one (default) or offline"),
+    ] = "tiingo",
+    benchmark: Annotated[str, typer.Option("--benchmark", help="benchmark symbol")] = "SPY",
+    min_weight: Annotated[
+        float, typer.Option("--min-weight", help="minimum weight for an add/increase")
+    ] = 0.01,
+    window: Annotated[
+        str, typer.Option("--window", help="event window as low,high (e.g. -5,5)")
+    ] = "-5,5",
+    model: Annotated[
+        Literal["market_adjusted", "market_model"],
+        typer.Option("--model", help="abnormal-return model"),
+    ] = "market_adjusted",
+    config: Annotated[Path, typer.Option("--config", help="config directory")] = Path("config"),
+    budget: Annotated[
+        Path | None,
+        typer.Option(
+            "--budget",
+            help="shared request budget file (default: <raw>/.etfh/price_budget.json)",
+        ),
+    ] = None,
+) -> None:
+    """Measure abnormal returns around large additions (FR-3.2, exploratory).
+
+    Events come from :func:`etfh.events.large_additions` and prices from the
+    source named by ``--source``; identifiers stay in the internal per-event
+    table while the printed summary and the two other output files carry
+    aggregates only (D79/D84). ``--source synthetic`` uses deterministic offline
+    prices and resolves a US-listed ticker to the security's own ticker on any
+    venue, because the committed fixtures are TSX-listed - demo behaviour, and
+    the numbers it prints are simulated.
+    """
+    if not 0.0 < min_weight <= 1.0:
+        typer.echo("error: --min-weight must be a fraction in (0, 1]", err=True)
+        raise typer.Exit(code=2)
+    low, high = _parse_window(window, "--window")
+    connection = _connect(db)
+    try:
+        events = large_additions(connection, min_weight=min_weight)
+    except duckdb.Error as error:
+        typer.echo(f"error: cannot read events from {db}: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    finally:
+        connection.close()
+
+    prices: SyntheticPrices | TiingoPrices
+    resolve_symbol: Callable[[str | None, str | None, str | None], str | None]
+    if source == _DEMO_SOURCE:
+        typer.echo("price source: synthetic (offline simulation; demo ticker resolution)")
+        prices = SyntheticPrices()
+        resolve_symbol = _demo_symbol_for
+    else:
+        sources = load_sources(config / "sources.yaml")
+        configured = sources.get(_PRICE_SOURCE_ID)
+        if not _gate_price_source(configured):
+            raise typer.Exit(code=2)
+        budget_path = budget if budget is not None else _default_price_budget(raw)
+        try:
+            prices = TiingoPrices.from_env(raw, sources=sources, budget_path=budget_path)
+        except (ApiKeyMissingError, PriceSourceError) as error:
+            typer.echo(f"error: {error}", err=True)
+            raise typer.Exit(code=2) from None
+        typer.echo(f"price source: {_PRICE_SOURCE_ID} (budget {budget_path})")
+        resolve_symbol = symbol_for
+
+    try:
+        if isinstance(prices, TiingoPrices):
+            with prices:
+                result = run_event_study(
+                    events,
+                    prices,
+                    symbol_for=resolve_symbol,
+                    benchmark=benchmark,
+                    window=(low, high),
+                    model=model,
+                )
+        else:
+            result = run_event_study(
+                events,
+                prices,
+                symbol_for=resolve_symbol,
+                benchmark=benchmark,
+                window=(low, high),
+                model=model,
+            )
+    except (TermsNotAllowedError, BudgetExceededError, PriceSourceError) as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except PriceFetchError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    except ValueError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+
+    written = write_outputs(result, out)
+    typer.echo(_event_study_report(result))
+    if events.is_empty():
+        typer.echo(f"no large additions at min-weight {min_weight} (nothing to measure)")
+    for path in written:
+        typer.echo(f"wrote {path}")
+    typer.echo("results are exploratory; not investment advice")
+
+
+@app.command("verify-raw")
+def verify_raw(
+    raw: Annotated[Path, typer.Option("--raw", help="raw store directory")] = Path("raw"),
+) -> None:
+    """Check every raw file against its sidecar (interfaces wave 08 §2)."""
+    try:
+        report = verify_raw_store(raw)
+    except OSError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"verify {raw}: {report.files_checked} file(s) checked, {len(report.problems)} problem(s)"
+    )
+    for problem in report.problems:
+        typer.echo(f"{problem.kind}: {problem.path}: {problem.detail}")
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command("sync-raw")
+def sync_raw(
+    source: Annotated[Path, typer.Option("--from", help="source raw store")],
+    destination: Annotated[Path, typer.Option("--to", help="destination raw store")],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="report what would be copied and write nothing")
+    ] = False,
+) -> None:
+    """Copy verified raw data-file/sidecar pairs into another store.
+
+    A pair is written both or neither, identical pairs are skipped and a
+    destination path holding different bytes is a conflict that is never
+    overwritten (interfaces wave 08 §2). Exit 0 when there is no conflict, 1
+    when at least one path conflicts or the source does not verify clean.
+    """
+    try:
+        report = sync_raw_store(source, destination, dry_run=dry_run)
+    except (OSError, ValueError) as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(
+        f"sync {source} -> {destination}: {len(report.copied)} copied, "
+        f"{report.identical} identical, {len(report.conflicts)} conflict(s)"
+    )
+    for path in report.conflicts:
+        typer.echo(f"conflict: {path}: destination holds different bytes, not overwritten")
+    if dry_run:
+        typer.echo("dry run: nothing written")
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+app.add_typer(prices_app, name="prices")
+
 review_app = typer.Typer(
     help="Review name-match proposals and record approved overrides.",
     no_args_is_help=True,
@@ -757,6 +1153,140 @@ def _gate_source(source_id: str, fund_ticker: str, source: Source | None) -> boo
 def _is_metrics_source(source: Source) -> bool:
     """True for ``SourceKind.fund_metrics`` (D66)."""
     return source.kind is SourceKind.fund_metrics
+
+
+def _synthetic_latest_asof(con: duckdb.DuckDBPyConnection) -> date | None:
+    """The newest as-of date the built store holds, or None when it holds none.
+
+    ``weekly --demo`` uses it as its newest week end: the committed fixtures
+    are dated in 2026, so a clock-based week would be empty until that date.
+    """
+    try:
+        row = con.execute("SELECT max(as_of_date) FROM holdings").fetchone()
+    except duckdb.Error:
+        return None
+    if row is None or row[0] is None:
+        return None
+    latest: date = row[0]
+    return latest
+
+
+def _parse_symbols(value: str) -> list[str]:
+    """Split ``--symbols A,B`` into unique upper-case symbols, keeping order."""
+    seen: dict[str, None] = {}
+    for part in value.split(","):
+        symbol = part.strip().upper()
+        if symbol:
+            seen.setdefault(symbol, None)
+    return list(seen)
+
+
+def _gate_price_source(source: Source | None) -> bool:
+    """Apply the terms/unsupported/synthetic gate to ``tiingo_prices`` (D3).
+
+    Mirrors :func:`_gate_source` line for line, but a price fetch is keyed by a
+    ticker symbol rather than a fund in ``funds.csv``, so the label is
+    ``symbol=`` and the argument is the source id itself.
+    """
+    label = f"source={_PRICE_SOURCE_ID} fund={_PRICE_SOURCE_ID}"
+    if source is None:
+        typer.echo(f"error {label}: unknown source", err=True)
+        return False
+    if source.terms.decision not in (Decision.allowed, Decision.allowed_with_conditions):
+        typer.echo(f"skipped: terms {label} decision={source.terms.decision.value}")
+        return False
+    if not source.supported:
+        typer.echo(f"skipped: unsupported {label}")
+        return False
+    if source.kind is SourceKind.synthetic:
+        typer.echo(f"skipped: synthetic {label}")
+        return False
+    return True
+
+
+def _default_price_budget(raw: Path) -> Path:
+    """The budget file shared by ``prices fetch`` and ``event-study``.
+
+    ``<raw>/../.etfh/price_budget.json``: next to the raw store but never inside
+    it, because it is command state and not a collected file, and the raw store
+    is synced file-for-file to the data repository (D77).
+    """
+    return Path(raw).expanduser().absolute().parent / ".etfh" / "price_budget.json"
+
+
+def _demo_symbol_for(
+    security_id: str | None,
+    security_ticker: str | None,
+    exchange: str | None,
+) -> str | None:
+    """Demo ticker resolution for ``--source synthetic``: the security's ticker.
+
+    The committed fixtures are TSX-listed, so the real
+    :func:`etfh.prices.symbol_for` (US venues only) would skip every synthetic
+    event as ``no_symbol``. The offline demo therefore prices the security's own
+    ticker whatever the venue, which is what makes the synthetic end-to-end run
+    land on day 0. It is demo behaviour, never used for the real source.
+    """
+    del security_id, exchange
+    if security_ticker is None:
+        return None
+    symbol = security_ticker.strip().upper().replace(".", "-")
+    return symbol or None
+
+
+def _parse_window(value: str, option: str) -> tuple[int, int]:
+    """Parse ``--window low,high`` into a pair of relative days."""
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 2:
+        raise typer.BadParameter(f"{value!r} is not 'low,high' (e.g. -5,5)", param_hint=option)
+    try:
+        low, high = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise typer.BadParameter(
+            f"{value!r} is not 'low,high' with integer days", param_hint=option
+        ) from None
+    if low > high:
+        raise typer.BadParameter(
+            f"window must be ordered low..high, got {low},{high}", param_hint=option
+        )
+    return low, high
+
+
+def _event_study_report(result: EventStudyResult) -> str:
+    """The public summary as text: aggregates only, no fund or security identity."""
+    summary = result.to_public_json()
+    skipped = summary.get("skipped", {})
+    skipped_text = ", ".join(f"{reason}={count}" for reason, count in sorted(skipped.items()))
+    bootstrap = summary.get("bootstrap", {})
+    window = summary.get("window", ())
+    lines = [
+        "event study — exploratory aggregate statistics, not investment advice",
+        (
+            f"events {summary.get('n_events', 0)}: used {summary.get('n_used', 0)}"
+            + (f"; skipped {skipped_text}" if skipped_text else "")
+        ),
+        (
+            f"model {summary.get('model')} · benchmark {summary.get('benchmark')} · "
+            f"window {list(window)} · bootstrap {bootstrap.get('resamples')} resamples "
+            f"({bootstrap.get('method')}, {bootstrap.get('level')})"
+        ),
+    ]
+    windows = summary.get("windows", {})
+    for label, stats in windows.items():
+        mean_car = stats.get("mean_car")
+        if mean_car is None:
+            lines.append(f"  CAR{label}: not estimable (n={stats.get('n', 0)})")
+            continue
+        t_stat = stats.get("t_stat")
+        low = stats.get("ci_low")
+        high = stats.get("ci_high")
+        ci = "n/a" if low is None or high is None else f"[{low:+.4f}, {high:+.4f}]"
+        t_text = "n/a" if t_stat is None else f"{t_stat:+.2f}"
+        lines.append(
+            f"  CAR{label}: mean {mean_car:+.4f} t={t_text} "
+            f"bootstrap 95% CI {ci} n={stats.get('n', 0)}"
+        )
+    return "\n".join(lines)
 
 
 def _qa_summary(
