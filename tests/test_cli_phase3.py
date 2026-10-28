@@ -10,6 +10,8 @@ line for a source recorded as ``pending_review`` (D3), the missing
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -17,10 +19,11 @@ from typing import Any
 
 import polars as pl
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from etfh.cli import app
-from etfh.prices import CLOSE_SCHEMA
+from etfh.prices import CLOSE_SCHEMA, SyntheticPrices
 from etfh.storage import RawStore
 from tests._build_helpers import CONFIG_DIR, RAW_ROOT
 
@@ -416,3 +419,107 @@ def test_sync_raw_refuses_an_unclean_source(tmp_path: Path) -> None:
     assert result.exit_code == 1, result.output
     assert "problem(s)" in result.output
     assert not (tmp_path / "dst").exists()
+
+
+# --- event-study symbol resolution (D90a) ------------------------------------
+
+_RESOLUTION = re.compile(
+    r"symbols: (\d+) of (\d+) event\(s\) resolved "
+    r"\((\d+) by ticker, (\d+) by cached OpenFIGI mapping, (\d+) not resolved\)"
+)
+
+
+def _write_figi_cache(cache: Path, isin: str, composite: str, ticker: str) -> None:
+    """Two `FigiLookup` cache files: the ISIN's composite and its US ticker."""
+    cache.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {"id_type": "ID_ISIN", "value": isin, "mic": None, "exch_code": None},
+        {"id_type": "TICKER", "value": ticker, "mic": None, "exch_code": "US"},
+    ]
+    for entry in entries:
+        suffix = f"{entry['mic'] or 'none'}_{entry['exch_code'] or 'none'}"
+        name = f"{entry['id_type']}_{entry['value']}_{suffix}.json"
+        (cache / name).write_text(
+            json.dumps({**entry, "composite_figi": composite, "ambiguous": False}),
+            encoding="utf-8",
+        )
+
+
+class _OfflinePrices:
+    """A ``TiingoPrices`` stand-in so the tiingo path needs no key or network."""
+
+    @classmethod
+    def from_env(cls, raw: Path, *, sources: object, budget_path: Path) -> SyntheticPrices:
+        del raw, sources, budget_path
+        return SyntheticPrices()
+
+
+def test_event_study_help_lists_the_figi_cache_option() -> None:
+    """The option is registered on the command (help text wraps in CI panels)."""
+    command = get_command(app).commands["event-study"]
+    options = {option for param in command.params for option in param.opts}
+    assert "--figi-cache" in options
+    assert "--source" in options
+
+
+def test_event_study_reports_synthetic_resolutions_by_ticker(tmp_path: Path) -> None:
+    """The demo run resolves every event by its own ticker and says so."""
+    from etfh.build import build
+
+    db = build(RAW_ROOT, tmp_path / "build", config_dir=CONFIG_DIR).db_path
+    result = _run(
+        "event-study",
+        "--db",
+        str(db),
+        "--raw",
+        str(RAW_ROOT),
+        "--out",
+        str(tmp_path / "out"),
+        "--source",
+        "synthetic",
+        "--config",
+        str(CONFIG_DIR),
+    )
+    assert result.exit_code == 0, result.output
+    match = _RESOLUTION.search(result.output)
+    assert match is not None, result.output
+    resolved, total, by_ticker, by_figi, unresolved = (int(value) for value in match.groups())
+    assert (resolved, by_figi, unresolved) == (total, 0, 0)
+    assert by_ticker == total == 39
+
+
+def test_event_study_tiingo_resolves_isin_events_from_the_cached_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ISIN event with no venue gets its US ticker from the cached mapping."""
+    from etfh.build import build
+
+    monkeypatch.setenv("TIINGO_API_KEY", "not-a-real-key")
+    monkeypatch.setattr("etfh.cli.TiingoPrices", _OfflinePrices)
+    db = build(RAW_ROOT, tmp_path / "build", config_dir=CONFIG_DIR).db_path
+    cache = tmp_path / "figi-cache"
+    _write_figi_cache(cache, "CA600000AA15", "BBG000000001", "NWM")
+
+    result = _run(
+        "event-study",
+        "--db",
+        str(db),
+        "--raw",
+        str(RAW_ROOT),
+        "--out",
+        str(tmp_path / "out"),
+        "--source",
+        "tiingo",
+        "--figi-cache",
+        str(cache),
+        "--config",
+        str(CONFIG_DIR),
+    )
+    assert result.exit_code == 0, result.output
+    assert f"figi cache: {cache}" in result.output
+    match = _RESOLUTION.search(result.output)
+    assert match is not None, result.output
+    resolved, total, by_ticker, by_figi, unresolved = (int(value) for value in match.groups())
+    assert resolved + unresolved == total == 39
+    assert by_figi == 2  # the two CA600000AA15 events, resolved only through the cache
+    assert resolved == by_ticker + by_figi

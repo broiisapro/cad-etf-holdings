@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from etfh.prices.budget import BudgetExceededError, PriceBudget, PriceBudgetUsage
 from etfh.prices.frames import CLOSE_SCHEMA, closes_frame
-from etfh.prices.symbols import symbol_for
+from etfh.prices.symbols import cached_figi_resolver, symbol_for
 from etfh.prices.synthetic import SyntheticPrices
 from etfh.prices.tiingo import (
     ApiKeyMissingError,
@@ -32,6 +32,7 @@ __all__ = [
     "PriceSourceError",
     "SyntheticPrices",
     "TiingoPrices",
+    "cached_figi_resolver",
     "closes_frame",
     "symbol_for",
 ]
