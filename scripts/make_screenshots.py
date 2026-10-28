@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 try:
@@ -124,6 +124,19 @@ def calendar_label(day: date) -> str:
     return f"{day:%A, %B} {day.day}, {day.year}"
 
 
+def week_ending(day: date) -> date:
+    """The most recent Friday on or before ``day`` (``etfh.digest.default_week_end``)."""
+    return day - timedelta(days=(day.weekday() - 4) % 7)
+
+
+def display_path(path: Path) -> str:
+    """``path`` relative to the repository when possible (``--out`` may be elsewhere)."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def hide_streamlit_chrome(page: Page) -> None:
     """Hide the deploy toolbar and header so the image shows the app only."""
     page.add_style_tag(
@@ -154,7 +167,7 @@ def capture(page: Page, path: Path) -> None:
         raise RuntimeError(f"{path.name} is {width}x{height}, expected 1400x900")
     if size > MAX_BYTES:
         raise RuntimeError(f"{path.name} is {size} bytes, larger than {MAX_BYTES} bytes")
-    print(f"wrote {path.relative_to(REPO_ROOT)} ({width}x{height}, {size} bytes)")
+    print(f"wrote {display_path(path)} ({width}x{height}, {size} bytes)")
 
 
 def png_size(path: Path) -> tuple[int, int]:
