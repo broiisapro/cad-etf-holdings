@@ -10,14 +10,16 @@ specified. Nothing here touches the network or a real issuer file.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import duckdb
 import polars as pl
 import pytest
 
+from etfh import analytics
 from etfh.build import BuildResult, build
-from etfh.qa import exit_code, summarize, unmatched_shares
+from etfh.qa import exit_code, render, summarize, unmatched_shares
 from etfh.storage import RawStore
 from tests._qa_live_helpers import (
     LookAlike,
@@ -27,6 +29,7 @@ from tests._qa_live_helpers import (
     broken_unit_contradiction,
     broken_weight_sum,
     clean_look_alikes,
+    covered_call_lookalike,
     duplicate_lines_copy,
     write_look_alikes,
 )
@@ -238,3 +241,56 @@ def test_inconsistent_database_exits_one(tmp_path: Path) -> None:
     assert entry.fund_ticker == "PHR"
     assert entry.reason == "errored file has no file_versions row"
     assert entry.findings
+
+
+def test_partial_daily_file_under_the_limit_is_included_as_partial(tmp_path: Path) -> None:
+    """D80a: an evidenced partial daily list at sum 1.0064 enters as partial."""
+    items = clean_look_alikes(tmp_path)
+    items.append(covered_call_lookalike())
+    result = _build(tmp_path, items)
+    assert result.n_excluded_files == 0
+    assert "BNC" in _included_funds(result.db_path)
+    con = _connect(result.db_path)
+    try:
+        events = con.execute(
+            'SELECT severity, "check", excluded FROM qa_events '
+            "WHERE fund_ticker = 'BNC' ORDER BY \"check\""
+        ).fetchall()
+        versions = con.execute(
+            "SELECT status FROM file_versions WHERE fund_ticker = 'BNC'"
+        ).fetchall()
+        summary = summarize(con)
+        partial = analytics.concentration(con, "BNC", date(2026, 10, 23)).partial
+    finally:
+        con.close()
+    assert versions == [("included",)]
+    assert ("info", "partial_list", False) in events
+    assert ("info", "partial_weight_exemption", False) in events
+    assert ("error", "weight_sum_over_one", False) not in events
+    assert partial is True
+    assert summary.files_excluded == 0
+    assert exit_code(summary) == 0
+    assert "excluded files:" not in render(summary)
+
+
+def test_a_quarterly_stated_total_mismatch_stays_excluded_with_its_version(
+    tmp_path: Path,
+) -> None:
+    """D80b regression: issuer errors are never hand-corrected or dropped."""
+    items = clean_look_alikes(tmp_path)
+    items.append(broken_qpd_stated_total(tmp_path))
+    result = _build(tmp_path, items)
+    assert result.n_excluded_files == 1
+    con = _connect(result.db_path)
+    try:
+        versions = con.execute(
+            "SELECT status, count(*) FROM file_versions WHERE fund_ticker = 'ZLB' GROUP BY 1"
+        ).fetchall()
+        errors = con.execute(
+            "SELECT \"check\", severity FROM qa_events WHERE fund_ticker = 'ZLB' "
+            "AND severity = 'error'"
+        ).fetchall()
+    finally:
+        con.close()
+    assert versions == [("excluded", 1)]
+    assert ("qpd_stated_total",) in [(check,) for check, _severity in errors]

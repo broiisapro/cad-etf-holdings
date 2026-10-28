@@ -34,6 +34,7 @@ PURPOSE_LOOKALIKE = FIXTURES / "purpose" / "lookalike.json"
 PURPOSE_OPTIONS = FIXTURES / "purpose" / "options.json"
 PURPOSE_PARTIAL = FIXTURES / "purpose" / "partial.json"
 PURPOSE_TOP_TEN = FIXTURES / "purpose" / "top_ten.json"
+PURPOSE_COVERED_CALL = FIXTURES / "purpose" / "covered_call.json"
 EVOLVE_CSV = FIXTURES / "evolve" / "lookalike.csv"
 BMO_EQUITY = FIXTURES / "bmo" / "equity.xlsx"
 BMO_FIXED_INCOME = FIXTURES / "bmo" / "fixed_income.xlsx"
@@ -90,6 +91,24 @@ def clean_look_alikes(tmp_path: Path) -> list[LookAlike]:
 def _json_file(fund_ticker: str, path: Path, as_of: date) -> LookAlike:
     return LookAlike(
         "purpose_daily", "purpose", fund_ticker, path, as_of, "json", "application/json"
+    )
+
+
+def covered_call_lookalike(*, fund_ticker: str = "BNC") -> LookAlike:
+    """The committed Purpose covered-call look-alike (sum 1.0064, partial list).
+
+    It mirrors the BNC 2026-10-22 shape that D80a admits: the source publishes
+    its own weights above 100% with a complete breakdown and no cash row.
+    """
+    return LookAlike(
+        "purpose_daily",
+        "purpose",
+        fund_ticker,
+        PURPOSE_COVERED_CALL,
+        date(2026, 10, 22),
+        "json",
+        "application/json",
+        fetched_at=datetime(2026, 10, 22, 22, 0, tzinfo=UTC),
     )
 
 

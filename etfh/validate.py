@@ -15,6 +15,17 @@ rounding allowance is measurement error, so the two are added; the result is
 capped at :data:`TOLERANCE_CAP` (0.02) so a damaged file can never hide behind
 a large row count. Any file whose weights sum above ``1 + tolerance`` is an
 error regardless of source kind or ``partial_list`` (``weight_sum_over_one``).
+One exception (D80a): a *daily* file whose parser recorded ``partial_list``
+with documented evidence may sum up to :data:`PARTIAL_WEIGHT_LIMIT` (1.10); it
+stays included with its published weights unchanged and an ``info``
+``partial_weight_exemption`` finding names the exemption. Above that limit it
+remains excluded.
+
+Balancing lines such as "Other Assets less Liabilities" are not securities
+(D80c): :func:`is_balancing_line` recognises a small documented list
+case/whitespace-insensitively, and they are exempt from the negative-weight
+warning like cash/fx/derivative rows. The QA report excludes them from the
+unmatched share and counts them on their own line.
 
 :func:`validate_metrics` applies the same finding contract to the additive
 fund-metrics files (D66, FR-2.1): the frame must match
@@ -46,10 +57,13 @@ from etfh.types import AssetClass, FileFormat, ParsedFile, SourceKind
 from etfh.units import WeightUnit
 
 __all__ = [
+    "BALANCING_LINE_NAMES",
+    "PARTIAL_WEIGHT_LIMIT",
     "QaFinding",
     "Severity",
     "TOLERANCE_CAP",
     "ValidationConfig",
+    "is_balancing_line",
     "is_excluded",
     "tolerance_for",
     "validate_file",
@@ -60,6 +74,34 @@ Severity = Literal["error", "warning", "info"]
 
 #: Ceiling for the rounding-aware weight-sum tolerance (D56).
 TOLERANCE_CAP = 0.02
+
+#: Largest weight sum a daily partial list may publish (D80a). Above it the
+#: file stays excluded: the source's own weights no longer reconcile.
+PARTIAL_WEIGHT_LIMIT = 1.10
+
+#: Names that are portfolio balancing lines rather than securities (D80c).
+#: Compared case- and whitespace-insensitively after collapsing spaces.
+BALANCING_LINE_NAMES: tuple[str, ...] = (
+    "other assets less liabilities",
+    "other assets (less liabilities)",
+    "net other assets",
+    "net other assets (liabilities)",
+    "other net assets",
+    "other net assets (liabilities)",
+)
+
+
+def _normalize_line_name(name: str | None) -> str:
+    """Case- and whitespace-insensitive form of a holding's name."""
+    if name is None:
+        return ""
+    return " ".join(name.split()).lower()
+
+
+def is_balancing_line(name: str | None) -> bool:
+    """True for a documented balancing line, not a security (D80c)."""
+    return _normalize_line_name(name) in BALANCING_LINE_NAMES
+
 
 _TORONTO = ZoneInfo("America/Toronto")
 _NON_SECURITY_ASSET_CLASSES = ("cash", "fx", "derivative")
@@ -310,6 +352,7 @@ def _check_weight_sum(
 def _check_weight_sum_over_one(
     parsed: ParsedFile,
     *,
+    source: Source,
     fund_asset_class: AssetClass,
     config: ValidationConfig,
 ) -> list[QaFinding]:
@@ -318,6 +361,11 @@ def _check_weight_sum_over_one(
     Quarterly disclosures are top-holdings lists and normally sum well below
     1.0, so this check is what catches a parser that mixes units or includes
     non-holding rows (for example a disclosure whose weights summed to 3.07).
+
+    A daily file whose parser recorded ``partial_list`` with documented
+    evidence is exempt up to :data:`PARTIAL_WEIGHT_LIMIT` (D80a): it stays
+    included, keeps its published weights and gets an ``info`` finding naming
+    the exemption. Above that limit, or without the note, it is an error.
     """
     if _weight_dtype(parsed.frame) is None:
         return []
@@ -326,12 +374,28 @@ def _check_weight_sum_over_one(
     limit = 1.0 + tolerance
     if total <= limit:
         return []
+    partial = not _is_quarterly(source) and _note_value(parsed.notes, "partial_list") == "true"
+    if partial and total <= PARTIAL_WEIGHT_LIMIT:
+        return [
+            QaFinding(
+                "partial_weight_exemption",
+                "info",
+                f"sum={total:.4f} is at or below the {PARTIAL_WEIGHT_LIMIT:g} partial-list "
+                f"limit; partial_list=true: exempt from weight_sum_over_one (D80a) "
+                f"({_tolerance_detail(parsed, asset_class=fund_asset_class, tolerance=tolerance)})",
+            )
+        ]
     return [
         QaFinding(
             "weight_sum_over_one",
             "error",
             f"sum={total:.4f} exceeds 1+tolerance={limit:.4f} "
-            f"({_tolerance_detail(parsed, asset_class=fund_asset_class, tolerance=tolerance)})",
+            f"({_tolerance_detail(parsed, asset_class=fund_asset_class, tolerance=tolerance)})"
+            + (
+                f"; partial_list=true but above the {PARTIAL_WEIGHT_LIMIT:g} limit (D80a)"
+                if partial
+                else ""
+            ),
         )
     ]
 
@@ -513,13 +577,26 @@ def _check_unit_contradiction(parsed: ParsedFile) -> list[QaFinding]:
     return findings
 
 
+def _balancing_mask(frame: pl.DataFrame) -> pl.Series:
+    """Boolean mask marking the documented balancing lines (D80c)."""
+    normalized = (
+        frame["security_name"].fill_null("").str.to_lowercase().str.strip_chars()
+    ).str.replace_all(r"\s+", " ")
+    return normalized.is_in(list(BALANCING_LINE_NAMES))
+
+
 def _check_negative_weight(parsed: ParsedFile) -> list[QaFinding]:
-    """Negative weights on security rows are a warning; cash/fx/derivative rows may be negative."""
+    """Negative weights on security rows are a warning; non-security rows may be negative.
+
+    Cash, FX and derivative rows are non-securities, and so are the documented
+    balancing lines such as "Other Assets less Liabilities" (D80c).
+    """
     frame = parsed.frame
     if _weight_dtype(frame) is None or not {"asset_class", "security_name"}.issubset(frame.columns):
         return []
     negative = (frame["weight"] < 0).fill_null(False)
     non_security = frame["asset_class"].str.to_lowercase().is_in(_NON_SECURITY_ASSET_CLASSES)
+    non_security = non_security | _balancing_mask(frame)
     if frame.schema.get("security_id") == pl.String:
         ids = frame["security_id"].fill_null("")
         for prefix in _NON_SECURITY_ID_PREFIXES:
@@ -554,7 +631,9 @@ def validate_file(
         _check_weight_sum(parsed, source=source, fund_asset_class=fund_asset_class, config=config)
     )
     findings.extend(
-        _check_weight_sum_over_one(parsed, fund_asset_class=fund_asset_class, config=config)
+        _check_weight_sum_over_one(
+            parsed, source=source, fund_asset_class=fund_asset_class, config=config
+        )
     )
     findings.extend(_check_qpd_stated_total(parsed, source=source, config=config))
     findings.extend(_check_duplicate_security(parsed))
