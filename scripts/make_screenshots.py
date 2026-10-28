@@ -4,8 +4,8 @@
 The images must be reproducible and must never contain real issuer data, so the
 script starts the dashboard in demo mode (``ETFH_DEMO=1``), ignores any
 ``ETFH_DB`` in the environment, pins the as-of date to the committed synthetic
-expectation in ``tests/fixtures/expected_overlap.json`` and captures three
-1400x900 PNGs into ``docs/img/``.
+expectation in ``tests/fixtures/expected_overlap.json`` and captures four
+1400x900 PNGs into ``docs/img/``: the Fund, This week, Overlap and Heatmap tabs.
 
 Playwright is a development-only tool, not a project dependency::
 
@@ -181,7 +181,7 @@ def png_size(path: Path) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Start the demo, capture the three README images and stop the server."""
+    """Start the demo, capture the four README images and stop the server."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="image directory")
     parser.add_argument("--timeout", type=float, default=120.0, help="server startup timeout")
@@ -209,6 +209,16 @@ def main(argv: list[str] | None = None) -> int:
             page.locator('[data-testid="stDataFrame"]').first.wait_for(timeout=60_000)
             page.wait_for_timeout(500)
             capture(page, out_dir / "fund.png")
+
+            page.get_by_role("tab", name="This week").click()
+            week_label = f"Week ending {week_ending(as_of).isoformat()}"
+            page.get_by_text(week_label).wait_for(timeout=120_000)
+            page.get_by_text("Security changes").wait_for(timeout=60_000)
+            page.locator(
+                '[data-testid="stTabPanel"]:visible [data-testid="stDataFrame"]'
+            ).first.wait_for(timeout=60_000)
+            page.wait_for_timeout(500)
+            capture(page, out_dir / "week.png")
 
             page.get_by_role("tab", name="Overlap").click()
             page.get_by_text("Common holdings").wait_for(timeout=60_000)
