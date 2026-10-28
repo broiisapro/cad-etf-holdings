@@ -122,6 +122,15 @@ def _write_executable(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
+# The fixture repositories must not pick up the host's git configuration
+# (``commit.gpgsign``, hooks, templates): only what the script or the test sets.
+_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", *args],
@@ -129,6 +138,7 @@ def _git(*args: str, cwd: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        env={**os.environ, **_GIT_ENV},
     ).stdout.strip()
 
 
@@ -150,12 +160,14 @@ def _sandbox(tmp_path: Path) -> Sandbox:
         check=True,
         capture_output=True,
         text=True,
+        env={**os.environ, **_GIT_ENV},
     )
     subprocess.run(
         ["git", "clone", str(origin), str(data)],
         check=True,
         capture_output=True,
         text=True,
+        env={**os.environ, **_GIT_ENV},
     )
     _git(
         "-c",
@@ -198,6 +210,8 @@ def _run(
         "PATH": f"{sandbox.bin_dir}:/usr/bin:/bin",
         "LC_ALL": "C",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
         "RUNNER_TEMP": str(sandbox.runner_temp),
         "ETFH_TEST_BIN": str(sandbox.bin_dir),
         "ETFH_TEST_UV_LOG": str(sandbox.uv_log),
