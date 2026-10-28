@@ -353,3 +353,67 @@ def test_build_is_byte_stable_and_rejects_bad_arguments() -> None:
         build_digest(con, DAY, public=True, sources=REGISTRY, funds=TESTA, overlap_threshold=-1)
     with pytest.raises(ValueError, match="duplicate fund ticker"):
         build_digest(con, DAY, public=True, sources=REGISTRY, funds=[fund("TESTA"), fund("TESTA")])
+
+
+def test_quarterly_history_does_not_make_a_new_daily_fund_look_old() -> None:
+    rows = [
+        holding(
+            "TESTA",
+            "ISIN:AA0000000001",
+            0.10,
+            as_of=date(2026, 9, 30),
+            source_id=QUARTERLY,
+            name="Quarter Corp",
+        ),
+        holding("TESTA", "ISIN:AA0000000001", 0.50, as_of=date(2026, 10, 27)),
+        holding("TESTA", "ISIN:AA0000000002", 0.50, as_of=date(2026, 10, 27)),
+        holding("TESTA", "ISIN:AA0000000001", 0.70, as_of=DAY),
+        holding("TESTA", "ISIN:AA0000000002", 0.30, as_of=DAY),
+    ]
+    entry = _entry(build_digest(make_con(rows), DAY, public=False, sources=REGISTRY, funds=TESTA))
+    assert entry["status"] == "new_in_window"
+    assert entry["portfolio_date_start"] == "2026-10-27"
+    assert entry["counts"] == {"adds": 0, "drops": 0, "weight_changes": 2}
+
+
+def test_a_correction_between_the_cutoffs_is_reported_as_a_change() -> None:
+    rows = [
+        holding("TESTA", "ISIN:AA0000000001", 1.0, as_of=WEEK_START),
+        holding("TESTA", "ISIN:AA0000000001", 0.60, as_of=DAY),
+        holding("TESTA", "ISIN:AA0000000002", 0.40, as_of=DAY),
+        # The same as-of date republished inside the week with one weight fixed.
+        holding(
+            "TESTA",
+            "ISIN:AA0000000001",
+            0.70,
+            as_of=DAY,
+            file_version=2,
+            known_at=datetime(2026, 10, 30, 18, tzinfo=UTC),
+        ),
+        holding(
+            "TESTA",
+            "ISIN:AA0000000002",
+            0.30,
+            as_of=DAY,
+            file_version=2,
+            known_at=datetime(2026, 10, 30, 18, tzinfo=UTC),
+        ),
+    ]
+    doc = build_digest(make_con(rows), DAY, public=False, sources=REGISTRY, funds=TESTA)
+    validate_digest(doc)
+    entry = _entry(doc)
+
+    assert entry["status"] == "ok"
+    assert entry["portfolio_date_start"] == "2026-10-23"
+    assert entry["portfolio_date_end"] == "2026-10-30"
+    assert entry["counts"] == {"adds": 1, "drops": 0, "weight_changes": 1}
+    # 0.3 of turnover comes from version 2 (0.70/0.30); version 1 would give 0.4.
+    assert entry["turnover"] == pytest.approx(0.3, abs=1e-9)
+
+
+def test_an_empty_universe_is_a_valid_document() -> None:
+    doc = build_digest(make_con(two_snapshot_store()), DAY, public=True, sources=REGISTRY, funds=[])
+    validate_digest(doc)
+    assert doc["funds"] == []
+    assert doc["overlap_shifts"] == []
+    assert doc["quality"]["funds_without_data"] == []
