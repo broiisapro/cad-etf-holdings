@@ -147,6 +147,17 @@ dividend-adjusted closes, and omits unknown symbols instead of raising.
   venues (`XNYS`, `XNAS`, `XASE`, `ARCX`, `BATS`) to a ticker; class shares use
   `-` (`BRK.B` → `BRK-B`). ISIN-only, name-only, TSX-listed and
   country-composite rows resolve to `None`.
+- **`cached_figi_resolver(cache_dir)`** (D90a) adds the offline fallback for the
+  issuers that identify holdings by ISIN or composite FIGI (BMO, Purpose). The
+  returned callable tries `symbol_for` first and, only on a miss, reads the JSON
+  cache `etfh build --openfigi` already wrote (read-only, never a request):
+  the security id's cached composite FIGI, then a cached `TICKER` entry for that
+  composite whose venue is US (`exchCode` `US`, or a venue that maps to a US
+  MIC). It returns the ticker in Tiingo form (`BRK/B`, `BRK.B` → `BRK-B`), and
+  `None` when no US listing is cached or a composite resolves to more than one
+  US ticker. A missing or unreadable cache leaves the answer identical to
+  `symbol_for`. The index and the answers are kept in memory per resolver, so a
+  run reads the cache once.
 - **`TiingoPrices.from_env(raw_root, *, sources, budget_path)`** reads
   `TIINGO_API_KEY` and sends it only as an `Authorization` header. It refuses
   unless `tiingo_prices` passes the terms gate (`allowed_with_conditions`, D84),
@@ -202,14 +213,17 @@ model="market_adjusted", bootstrap=2000, seed=7)`.
   published.
 - **CLI.** `etfh event-study --db PATH --raw DIR --out DIR [--source
   tiingo|synthetic] [--benchmark SPY] [--min-weight 0.01] [--window -5,5]
-  [--model market_adjusted|market_model] [--budget PATH] [--config DIR]`. It
-  prints the public summary, the three output paths and "results are
-  exploratory". Missing prices or identifiers never raise: they are counted
-  skips.
+  [--model market_adjusted|market_model] [--budget PATH] [--config DIR]
+  [--figi-cache DIR]`. It prints the public summary, how many events resolved
+  by ticker, by cached OpenFIGI mapping and not at all, the three output paths
+  and "results are exploratory". Missing prices or identifiers never raise:
+  they are counted skips. `--figi-cache` defaults to the build's
+  `~/.cache/etfh/openfigi`.
 - **Demo resolution.** `--source synthetic` runs `SyntheticPrices` offline and
   resolves a security's own ticker on any venue, because the committed fixtures
-  are TSX-listed; the command says so. The real source uses
-  `etfh.prices.symbol_for` and is gated and budgeted like `prices fetch`.
+  are TSX-listed; the command says so. The real source resolves a row by its US
+  venue first and then through `cached_figi_resolver` — the build's cached
+  OpenFIGI mappings, D90a — and is gated and budgeted like `prices fetch`.
 
 ### Raw-store tools
 
@@ -351,12 +365,14 @@ All names below match the merged code.
 
 ## Known limitations
 
-- **A real event study resolves no symbols on today's live data.** Every large
-  addition in the store comes from BMO or Purpose rows identified by ISIN or
-  name, and `etfh.prices.symbol_for` maps only US-listed tickers, so a real run
-  reports `no_symbol` for all of them. Ticker resolution from the cached
-  OpenFIGI mappings (US exchange code + ticker) is the planned fix in wave 09
-  (D90); today the method is demonstrable only with `--source synthetic`.
+- **A real event study still resolves nothing on today's live events.** The
+  cached-mapping fallback (D90a) resolves 633 of the live store's 4,701 distinct
+  non-cash security rows — the US-listed portion — but every one of the 12 large
+  additions the 2026-10-27 store reports is a Canadian bond or a non-US equity,
+  so a real run on that store still counts all of them as `no_symbol`. The
+  fallback only knows what the build cached: a security whose US listing was
+  never looked up, and a security with no US listing at all, stay unresolved,
+  and the method remains demonstrable end to end only with `--source synthetic`.
 - **The study is exploratory and small.** It has no size, sector or
   event-clustering controls, relies on adjusted closes from one vendor and
   reports a handful of events at best. Every output says "exploratory", and
