@@ -104,3 +104,25 @@ if [ -d "$RAW" ]; then
 else
     echo "etfh: no raw directory under $DATA; nothing to commit"
 fi
+
+uv run etfh build --raw "$RAW" --out "$BUILD_DIR"
+
+# QA exits 0 only when every errored file is excluded and reported; 3 means the
+# informational unmatched gate fired. Either way the report is published and the
+# derived aggregates still run, so the script's status carries QA's status.
+QA_STATUS=0
+if QA_REPORT="$(uv run etfh qa --db "$BUILD_DIR/etfh.duckdb" --format markdown)"; then
+    QA_STATUS=0
+else
+    QA_STATUS=$?
+fi
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '%s\n' "$QA_REPORT" >> "$GITHUB_STEP_SUMMARY"
+else
+    printf '%s\n' "$QA_REPORT"
+fi
+
+uv run etfh export --db "$BUILD_DIR/etfh.duckdb" --out "$AGGREGATES_DIR" --asof "$DATE"
+
+echo "etfh: collect done $DATE qa_exit=$QA_STATUS"
+exit "$QA_STATUS"
