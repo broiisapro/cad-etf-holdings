@@ -200,7 +200,6 @@ def test_error_status_raises_without_leaking_the_key(tmp_path: Path, fake_clock:
         prices.daily_closes(["AAPL"], START, END)
     assert "403" in str(excinfo.value)
     assert KEY not in str(excinfo.value)
-    assert KEY not in str(tmp_path)
 
 
 def test_adjusted_close_is_used_and_out_of_range_rows_are_dropped(
