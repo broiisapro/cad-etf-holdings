@@ -6,6 +6,10 @@ changes table with one row per fund that has data for the week. These tests
 drive the real command (BuildResult in a temp directory, ``etfh weekly`` through
 Typer's runner) and read the HTML it writes.
 
+Without ``--week-end`` the command follows the database: the most recent Friday
+on or before the newest daily portfolio date (D91). That default is tested
+against a frozen clock, a database whose newest date is already a Friday, and an
+empty database, so the behaviour never depends on the day the tests run.
 ``--demo``, ``--weeks``, the empty week and the ``--internal``/``--public``
 split (D79) are covered too, because they are the four ways the command can be
 wired wrongly while the single-week public page still looks right.
@@ -16,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,17 +32,50 @@ from etfh.build import build
 from etfh.cli import app
 from etfh.digest import build_digest
 from etfh.registry import load_funds, load_sources
-from tests._build_helpers import CONFIG_DIR, RAW_ROOT
+from etfh.storage import RawStore
+from tests._build_helpers import CONFIG_DIR, RAW_ROOT, copy_raw_files
 
 runner = CliRunner()
 #: Wide terminal so Typer's error panel does not truncate the message in CI.
 _WIDE = {"COLUMNS": "200"}
 
-#: The synthetic fixtures run to 2026-11-03; the week ending then has three
-#: funds with a comparable portfolio (SYNA, SYNB, SYNE).
-LATEST_WEEK_END = date(2026, 11, 3)
+#: The newest as-of date in the synthetic store: a Tuesday. The digest cannot
+#: end a week on it, but it is also a valid explicit ``--week-end`` and the older
+#: tests use it that way to prove an explicit date is honoured unchanged.
+NEWEST_PORTFOLIO_DATE = date(2026, 11, 3)
+#: The Friday on or before ``NEWEST_PORTFOLIO_DATE`` — the default week end.
+DEFAULT_WEEK_END = date(2026, 10, 30)
+#: The default week end one week earlier: still empty for the synthetic store.
+DEFAULT_PREVIOUS_WEEK_END = date(2026, 10, 23)
 #: One week earlier: nothing is known by its cutoff yet, so the week is empty.
 EMPTY_WEEK_END = date(2026, 10, 27)
+
+#: A "today" two years past every fixture date. The default week end must come
+#: from the database, so freezing the clock far away proves it does not use it.
+FROZEN_TODAY = datetime(2031, 6, 2, 15, 0, tzinfo=UTC)
+
+
+class _FrozenDateTime(datetime):
+    """``datetime`` stand-in with a fixed ``now()`` for ``etfh.cli``."""
+
+    @classmethod
+    def now(cls, tz: Any = None) -> datetime:
+        if tz is None:
+            return FROZEN_TODAY.replace(tzinfo=None)
+        return FROZEN_TODAY.astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def frozen_today(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """Freeze "today" in the CLI for every test in this module.
+
+    The default week end follows the database (D91), and the empty-database
+    failure must not change with the calendar, so nothing here may read the
+    real clock.
+    """
+    monkeypatch.setattr("etfh.cli.datetime", _FrozenDateTime)
+    return FROZEN_TODAY
+
 
 _CHANGES_TABLE = re.compile(r'<table id="changes">.*?</table>', re.DOTALL)
 _FUND_ROW = re.compile(r'<tr><th scope="row">([A-Z0-9.]+)</th>')
@@ -49,6 +86,24 @@ def synthetic_build(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out_dir = tmp_path_factory.mktemp("weekly-build")
     result = build(RAW_ROOT, out_dir, config_dir=CONFIG_DIR)
     return result.db_path
+
+
+@pytest.fixture(scope="module")
+def friday_build(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A build whose newest portfolio date is itself a Friday (2026-10-30).
+
+    The committed fixtures run to Tuesday 2026-11-03; copying only the files
+    dated on or before the Friday gives a store that ends exactly on a week end,
+    so the default has to return that Friday rather than the one before it.
+    """
+    work = tmp_path_factory.mktemp("weekly-friday")
+    wanted = {
+        (raw.fund_ticker, raw.as_of_hint)
+        for raw in RawStore(RAW_ROOT).iter_raw()
+        if raw.as_of_hint is not None and raw.as_of_hint <= DEFAULT_WEEK_END
+    }
+    copy_raw_files(RAW_ROOT, work / "raw", wanted)
+    return build(work / "raw", work / "build", config_dir=CONFIG_DIR).db_path
 
 
 def _changes_funds(index_html: str) -> list[str]:
@@ -68,7 +123,12 @@ def test_index_has_one_changes_row_per_synthetic_fund_with_data(
     """The PRD acceptance check: build, run ``etfh weekly``, read the index."""
     out = tmp_path / "site"
     result = _run(
-        "--db", str(synthetic_build), "--out", str(out), "--week-end", LATEST_WEEK_END.isoformat()
+        "--db",
+        str(synthetic_build),
+        "--out",
+        str(out),
+        "--week-end",
+        NEWEST_PORTFOLIO_DATE.isoformat(),
     )
     assert result.exit_code == 0, result.output
     index = out / "index.html"
@@ -82,7 +142,7 @@ def test_index_has_one_changes_row_per_synthetic_fund_with_data(
     try:
         expected = build_digest(
             connection,
-            LATEST_WEEK_END,
+            NEWEST_PORTFOLIO_DATE,
             public=True,
             sources=sources,
             funds=load_funds(CONFIG_DIR / "funds.csv", sources),
@@ -98,10 +158,103 @@ def test_index_has_one_changes_row_per_synthetic_fund_with_data(
         "archive.html",
         "feed.xml",
         ".nojekyll",
-        f"weeks/{LATEST_WEEK_END.isoformat()}.html",
-        f"data/{LATEST_WEEK_END.isoformat()}.json",
+        f"weeks/{NEWEST_PORTFOLIO_DATE.isoformat()}.html",
+        f"data/{NEWEST_PORTFOLIO_DATE.isoformat()}.json",
     ):
         assert (out / relative).is_file(), relative
+
+
+def test_prd_command_without_week_end_follows_the_database(
+    synthetic_build: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal PRD command: no ``--week-end``, run outside the checkout.
+
+    ``etfh weekly --db ./build/etfh.duckdb --out site/`` is the acceptance
+    command from the PRD's Phase 3. It is run here from a scratch directory, as
+    a user would, with "today" frozen far away: the week end must still come
+    from the newest daily portfolio in the database.
+    """
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+
+    result = _run("--db", str(synthetic_build), "--out", "site")
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"newest portfolio date {NEWEST_PORTFOLIO_DATE.isoformat()} "
+        f"→ week ending {DEFAULT_WEEK_END.isoformat()}" in result.output
+    )
+    index = scratch / "site" / "index.html"
+    assert index.is_file()
+    assert _changes_funds(index.read_text(encoding="utf-8")) == ["SYNA", "SYNB", "SYNE"]
+    # The newest week is the Friday, not the newest as-of date (a Tuesday).
+    assert (scratch / "site" / "data" / f"{DEFAULT_WEEK_END.isoformat()}.json").is_file()
+    assert not (scratch / "site" / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").exists()
+
+
+def test_a_database_ending_on_a_friday_uses_that_friday(friday_build: Path, tmp_path: Path) -> None:
+    """When the newest portfolio date is a Friday it is the week end itself."""
+    out = tmp_path / "friday-site"
+    result = _run("--db", str(friday_build), "--out", str(out))
+    assert result.exit_code == 0, result.output
+    assert (
+        f"newest portfolio date {DEFAULT_WEEK_END.isoformat()} "
+        f"→ week ending {DEFAULT_WEEK_END.isoformat()}" in result.output
+    )
+    assert (out / "data" / f"{DEFAULT_WEEK_END.isoformat()}.json").is_file()
+    assert (out / "weeks" / f"{DEFAULT_WEEK_END.isoformat()}.html").is_file()
+    assert _changes_funds((out / "index.html").read_text(encoding="utf-8")) == [
+        "SYNA",
+        "SYNB",
+        "SYNE",
+    ]
+
+
+def test_weeks_two_from_the_database_default(synthetic_build: Path, tmp_path: Path) -> None:
+    """``--weeks 2`` counts back from the default week end, skipping empty weeks."""
+    out = tmp_path / "two-weeks-default"
+    result = _run("--db", str(synthetic_build), "--out", str(out), "--weeks", "2")
+    assert result.exit_code == 0, result.output
+    assert (
+        f"newest portfolio date {NEWEST_PORTFOLIO_DATE.isoformat()} "
+        f"→ week ending {DEFAULT_WEEK_END.isoformat()}" in result.output
+    )
+    assert (
+        f"skipped week ending {DEFAULT_PREVIOUS_WEEK_END.isoformat()}: "
+        "no comparable portfolio" in result.output
+    )
+    pages = sorted(path.name for path in (out / "weeks").glob("*.html"))
+    assert pages == [f"{DEFAULT_WEEK_END.isoformat()}.html"]
+    assert (out / "data" / f"{DEFAULT_WEEK_END.isoformat()}.json").is_file()
+    assert not (out / "data" / f"{DEFAULT_PREVIOUS_WEEK_END.isoformat()}.json").exists()
+
+
+def test_explicit_week_end_is_used_unchanged(synthetic_build: Path, tmp_path: Path) -> None:
+    """An explicit ``--week-end`` still wins and does not consult the database."""
+    out = tmp_path / "explicit"
+    result = _run(
+        "--db",
+        str(synthetic_build),
+        "--out",
+        str(out),
+        "--week-end",
+        NEWEST_PORTFOLIO_DATE.isoformat(),
+    )
+    assert result.exit_code == 0, result.output
+    assert "newest portfolio date" not in result.output
+    assert (out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").is_file()
+
+
+def test_empty_database_exits_1_with_the_existing_message(tmp_path: Path) -> None:
+    """A database with no holdings cannot follow a date; it fails as it always did."""
+    empty_raw = tmp_path / "empty-raw"
+    empty_raw.mkdir()
+    db = build(empty_raw, tmp_path / "empty-build", config_dir=CONFIG_DIR).db_path
+    result = _run("--db", str(db), "--out", str(tmp_path / "empty-site"))
+    assert result.exit_code == 1, result.output
+    assert "error: no holdings for the requested week(s)" in result.output
+    assert not (tmp_path / "empty-site" / "index.html").exists()
 
 
 def test_the_published_json_is_the_validated_document(tmp_path: Path) -> None:
@@ -112,12 +265,12 @@ def test_the_published_json_is_the_validated_document(tmp_path: Path) -> None:
         "--out",
         str(out),
         "--week-end",
-        LATEST_WEEK_END.isoformat(),
+        NEWEST_PORTFOLIO_DATE.isoformat(),
     )
     assert result.exit_code == 0, result.output
-    document = json.loads((out / "data" / f"{LATEST_WEEK_END.isoformat()}.json").read_text())
+    document = json.loads((out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").read_text())
     assert document["schema_version"] == 1
-    assert document["week_end"] == LATEST_WEEK_END.isoformat()
+    assert document["week_end"] == NEWEST_PORTFOLIO_DATE.isoformat()
     assert document["public"] is True
     assert document["demo"] is False
     assert [fund["ticker"] for fund in document["funds"]] == _changes_funds(
@@ -133,9 +286,9 @@ def test_demo_builds_the_synthetic_store_and_flags_every_document(tmp_path: Path
     html = (out / "index.html").read_text(encoding="utf-8")
     assert "Demo data" in html
     # The week end is the synthetic data's latest as-of date, not the clock.
-    assert (out / "data" / f"{LATEST_WEEK_END.isoformat()}.json").is_file()
+    assert (out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").is_file()
     document = json.loads(
-        (out / "data" / f"{LATEST_WEEK_END.isoformat()}.json").read_text(encoding="utf-8")
+        (out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").read_text(encoding="utf-8")
     )
     assert document["demo"] is True
     assert [fund["ticker"] for fund in document["funds"]] == _changes_funds(html)
@@ -152,7 +305,7 @@ def test_weeks_two_skips_the_week_without_a_comparable_portfolio(
         "--out",
         str(out),
         "--week-end",
-        LATEST_WEEK_END.isoformat(),
+        NEWEST_PORTFOLIO_DATE.isoformat(),
         "--weeks",
         "2",
     )
@@ -161,7 +314,7 @@ def test_weeks_two_skips_the_week_without_a_comparable_portfolio(
         result.output
     )
     pages = sorted(path.name for path in (out / "weeks").glob("*.html"))
-    assert pages == [f"{LATEST_WEEK_END.isoformat()}.html"]
+    assert pages == [f"{NEWEST_PORTFOLIO_DATE.isoformat()}.html"]
     assert "Week ending 2026-10-27" not in (out / "index.html").read_text(encoding="utf-8")
 
 
@@ -204,7 +357,7 @@ def test_internal_and_public_differ_for_a_non_redistributable_fund(
         "--db",
         str(synthetic_build),
         "--week-end",
-        LATEST_WEEK_END.isoformat(),
+        NEWEST_PORTFOLIO_DATE.isoformat(),
         "--config",
         str(config),
     ]
@@ -223,10 +376,14 @@ def test_internal_and_public_differ_for_a_non_redistributable_fund(
     assert "Security changes for SYNA" in internal_html
     assert "Security changes for SYNA" not in public_html
     public_document = json.loads(
-        (public_out / "data" / f"{LATEST_WEEK_END.isoformat()}.json").read_text(encoding="utf-8")
+        (public_out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").read_text(
+            encoding="utf-8"
+        )
     )
     internal_document = json.loads(
-        (internal_out / "data" / f"{LATEST_WEEK_END.isoformat()}.json").read_text(encoding="utf-8")
+        (internal_out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").read_text(
+            encoding="utf-8"
+        )
     )
     by_ticker = {fund["ticker"]: fund for fund in public_document["funds"]}
     assert by_ticker["SYNA"]["securities_disclosed"] is False
