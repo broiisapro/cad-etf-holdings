@@ -69,6 +69,11 @@ DATA_FILES=$(find "$DEST_RAW" -type f ! -name '*.meta.json' | wc -l | tr -d ' ')
 SIDECARS=$(find "$DEST_RAW" -type f -name '*.meta.json' | wc -l | tr -d ' ')
 echo "etfh: raw store: $DATA_FILES data file(s), $SIDECARS sidecar(s)"
 
+if [ "$DATA_FILES" -eq 0 ]; then
+    echo "etfh: no data files to seed; nothing committed"
+    exit 0
+fi
+
 git -C "$DATA_CHECKOUT" add raw
 if git -C "$DATA_CHECKOUT" diff --cached --quiet; then
     echo "etfh: data repository already up to date; nothing committed"

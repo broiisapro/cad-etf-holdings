@@ -203,6 +203,19 @@ def test_a_destination_conflict_fails_before_committing(tmp_path: Path) -> None:
     assert _commits(sandbox.checkout) == ["data: seed raw store"]
 
 
+def test_an_empty_source_commits_nothing(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path)
+    shutil.rmtree(sandbox.source)
+    sandbox.source.mkdir()
+
+    result = _run(sandbox, sandbox.source, sandbox.checkout)
+
+    assert result.returncode == 0, result.stderr
+    assert "0 data file(s), 0 sidecar(s)" in result.stdout
+    assert "no data files to seed; nothing committed" in result.stdout
+    assert _commits(sandbox.checkout) == []
+
+
 def test_rejects_a_checkout_that_is_not_a_git_repository(tmp_path: Path) -> None:
     sandbox = _sandbox(tmp_path, git_checkout=False)
 
