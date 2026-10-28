@@ -15,6 +15,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OPS_DIR = REPO_ROOT / "ops"
@@ -369,3 +372,112 @@ def test_without_a_job_summary_the_report_goes_to_stdout(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     assert _QA_MARKDOWN.strip() in result.stdout
     assert not sandbox.summary.exists()
+
+
+# ---------------------------------------------------------------------------
+# .github/workflows/collect.yml
+# ---------------------------------------------------------------------------
+
+
+def _workflow(path: Path = WORKFLOW) -> dict[str, Any]:
+    document: dict[Any, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+    # PyYAML resolves the unquoted ``on:`` key to the boolean True (YAML 1.1).
+    if True in document:
+        document["on"] = document.pop(True)
+    return document
+
+
+def _steps() -> list[dict[str, Any]]:
+    return _workflow()["jobs"]["collect"]["steps"]
+
+
+def _used_actions(document: dict[str, Any]) -> set[str]:
+    return {
+        step["uses"] for job in document["jobs"].values() for step in job["steps"] if "uses" in step
+    }
+
+
+def _versions(uses: set[str], action: str) -> set[str]:
+    return {entry.split("@", 1)[1] for entry in uses if entry.split("@", 1)[0] == action}
+
+
+def test_workflow_triggers_on_weeknights_and_dispatch() -> None:
+    triggers = _workflow()["on"]
+    assert [entry["cron"] for entry in triggers["schedule"]] == ["17 23 * * 1-5"]
+    dispatch = triggers["workflow_dispatch"]["inputs"]["date"]
+    assert dispatch["required"] is False
+    assert dispatch["default"] == ""
+    assert "YYYY-MM-DD" in dispatch["description"]
+    assert "America/Toronto" in dispatch["description"]
+
+
+def test_workflow_ships_disabled_behind_the_repository_variable() -> None:
+    document = _workflow()
+    job = document["jobs"]["collect"]
+    assert job["if"] == "vars.ETFH_ACTIONS_COLLECT == 'true'"
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 45
+    assert job["permissions"] == {"contents": "read"}
+    assert document["permissions"] == {"contents": "read"}
+    assert document["concurrency"] == {"group": "collect", "cancel-in-progress": False}
+
+
+def test_workflow_pins_the_same_actions_as_ci() -> None:
+    ci = _used_actions(_workflow(CI_WORKFLOW))
+    collect = _used_actions(_workflow())
+    for action in ("actions/checkout", "astral-sh/setup-uv"):
+        assert _versions(collect, action), f"{action} is missing from collect.yml"
+        assert _versions(collect, action) == _versions(ci, action), action
+
+
+def test_workflow_checks_out_the_private_data_repository() -> None:
+    checkouts = [
+        step
+        for step in _steps()
+        if step.get("uses") == "actions/checkout@v7" and step.get("with", {}).get("path") == "data"
+    ]
+    assert len(checkouts) == 1
+    options = checkouts[0]["with"]
+    assert options["repository"] == (
+        "${{ vars.ETFH_DATA_REPO || 'broiisapro/cad-etf-holdings-data' }}"
+    )
+    assert options["ssh-key"] == "${{ secrets.ETFH_DATA_DEPLOY_KEY }}"
+
+
+def test_workflow_runs_the_ops_script_with_the_documented_environment() -> None:
+    steps = [step for step in _steps() if "ops/actions_collect.sh" in step.get("run", "")]
+    assert len(steps) == 1
+    step = steps[0]
+    assert step["run"] == 'ops/actions_collect.sh data "$COLLECT_DATE"'
+    assert step["env"]["COLLECT_DATE"] == "${{ inputs.date }}"
+    assert step["env"]["ETFH_USER_AGENT"] == "${{ vars.ETFH_USER_AGENT }}"
+    assert step["env"]["ETFH_GIT_NAME"] == "${{ vars.ETFH_GIT_NAME }}"
+    assert step["env"]["ETFH_GIT_EMAIL"] == "${{ vars.ETFH_GIT_EMAIL }}"
+    assert step["env"]["OPENFIGI_API_KEY"] == "${{ secrets.OPENFIGI_API_KEY }}"
+
+
+def test_workflow_artifact_holds_only_derived_aggregates() -> None:
+    uploads = [
+        step for step in _steps() if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    assert len(uploads) == 1
+    options = uploads[0]["with"]
+    assert options["retention-days"] == 30
+    assert options["path"] == "${{ runner.temp }}/aggregates"
+    assert "data" not in options["path"]
+
+
+def test_workflow_fails_early_and_never_echoes_the_configuration() -> None:
+    first = _steps()[0]
+    assert "run" in first
+    for name in ("ETFH_USER_AGENT", "ETFH_GIT_NAME", "ETFH_GIT_EMAIL", "ETFH_DATA_DEPLOY_KEY"):
+        assert name in first["env"]
+        assert name in first["run"]
+    assert first["env"]["ETFH_DATA_DEPLOY_KEY"] == "${{ secrets.ETFH_DATA_DEPLOY_KEY }}"
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "${{ secrets." in line:
+            # Secrets may feed inputs and env, never an echo.
+            assert "echo" not in line, line
+    assert 'echo "::error::' in first["run"]
