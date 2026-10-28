@@ -23,6 +23,7 @@ from streamlit.delta_generator import DeltaGenerator
 from etfh import analytics
 from etfh.build import connect
 from etfh.dashboard import demo, quality
+from etfh.dashboard.format import format_amount, format_number, percent
 
 DEFAULT_DB_PATH = "./build/etfh.duckdb"
 CHANGE_WINDOWS: dict[str, int] = {
@@ -45,11 +46,6 @@ def today() -> date:
 def open_database(path: Path) -> duckdb.DuckDBPyConnection:
     """Open ``path`` read-only, honouring ``ETFH_DUCKDB_THREADS`` (D49)."""
     return connect(path, read_only=True)
-
-
-def percent(value: float) -> str:
-    """Format a fraction as a percentage string."""
-    return f"{value:.2%}"
 
 
 def breakdown_chart(data: pl.DataFrame, title: str) -> alt.Chart:
@@ -175,19 +171,6 @@ def render_metrics_qa(state: quality.MetricsQa) -> None:
         st.caption(f"Fund-metrics findings: {state.counts_label}.")
     else:
         st.caption("No fund-metrics findings.")
-
-
-def format_number(value: float | None, places: int) -> str:
-    """Format a metric figure with thousands separators, or ``-`` when missing."""
-    return "-" if value is None else f"{value:,.{places}f}"
-
-
-def format_amount(value: float | None, currency: str | None) -> str:
-    """Format an AUM figure with its currency when the source states one."""
-    if value is None:
-        return "-"
-    text = f"{value:,.0f}"
-    return f"{text} {currency}" if currency else text
 
 
 def flows_table(flows: pl.DataFrame) -> pl.DataFrame:
