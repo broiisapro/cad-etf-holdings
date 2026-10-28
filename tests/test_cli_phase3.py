@@ -11,7 +11,7 @@ line for a source recorded as ``pending_review`` (D3), the missing
 from __future__ import annotations
 
 import shutil
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from etfh.cli import app
 from etfh.prices import CLOSE_SCHEMA
+from etfh.storage import RawStore
 from tests._build_helpers import CONFIG_DIR, RAW_ROOT
 
 runner = CliRunner()
@@ -315,6 +316,51 @@ def test_event_study_from_tiingo_without_a_key_exits_2(
     assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
     assert "TIINGO_API_KEY is not set" in result.output  # type: ignore[attr-defined]
     assert not (tmp_path / "out").exists()
+
+
+def test_a_raw_store_with_a_price_response_builds_reports_and_parses_clean(
+    tmp_path: Path,
+) -> None:
+    """The prices fix request: one stored price file must not disturb the pipeline.
+
+    ``etfh prices fetch`` writes responses into the same raw store the build and
+    the QA report read. Before the diversion each response became an excluded
+    file with an ``unknown_fund`` **error**, so ``etfh qa`` moved to exit 3 after
+    the first price fetch. Build, QA and parse must all stay clean, and parse
+    must not report a missing parser for a file that is not a disclosure.
+    """
+    store = tmp_path / "raw"
+    shutil.copytree(RAW_ROOT, store)
+    RawStore(store).write(
+        b'[{"date":"2026-10-23T00:00:00.000Z","close":100.0,"adjClose":99.5}]',
+        source_id="tiingo_prices",
+        issuer="tiingo",
+        fund_ticker="AAPL",
+        url=(
+            "https://api.tiingo.com/tiingo/daily/AAPL/prices"
+            "?startDate=2026-10-19&endDate=2026-10-23&format=json"
+        ),
+        fetched_at=datetime(2026, 10, 24, 12, tzinfo=UTC),
+        ext="json",
+        content_type="application/json",
+        http_status=200,
+        as_of_hint=date(2026, 10, 23),
+    )
+    out = tmp_path / "build"
+    built = _run("build", "--raw", str(store), "--out", str(out), "--config", str(CONFIG_DIR))
+    assert built.exit_code == 0, built.output  # type: ignore[attr-defined]
+    assert "file versions 15 (13 included, 2 excluded)" in built.output  # type: ignore[attr-defined]
+
+    report = _run("qa", "--db", str(out / "etfh.duckdb"))
+    assert report.exit_code == 0, report.output  # type: ignore[attr-defined]
+    assert "files: 15 total (13 included, 2 excluded)" in report.output  # type: ignore[attr-defined]
+
+    parsed = _run("parse", "--raw", str(store), "--out", str(out / "parsed"))
+    assert parsed.exit_code == 0, parsed.output  # type: ignore[attr-defined]
+    assert "failed" in parsed.output  # type: ignore[attr-defined]
+    assert "0 failed" in parsed.output  # type: ignore[attr-defined]
+    assert "no parser" not in parsed.output  # type: ignore[attr-defined]
+    assert "tiingo" not in parsed.output  # type: ignore[attr-defined]
 
 
 def test_verify_raw_reports_every_problem_and_exits_1(tmp_path: Path) -> None:
