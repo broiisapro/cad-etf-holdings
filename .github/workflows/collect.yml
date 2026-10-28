@@ -1,0 +1,100 @@
+name: Collect
+
+# FR-2.3 (D69/D76/D77): daily collection on a GitHub-hosted runner after the
+# public ship. Raw files and their sidecars are committed and pushed to the
+# separate private data repository only; this repository, its logs, job
+# summaries and artifacts carry derived aggregates and QA counts, never raw
+# files (D77). The job ships disabled: set the repository variable
+# ETFH_ACTIONS_COLLECT to "true" to switch it on (D76).
+
+on:
+  schedule:
+    # Weekdays at 23:17 UTC. The Toronto evening publication is done by then
+    # (19:17 EDT / 18:17 EST), so the run sees the same day's files.
+    - cron: "17 23 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Collection date (YYYY-MM-DD); empty means today in America/Toronto"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    # D76: the workflow ships disabled. No value, or anything but "true",
+    # skips the job and lets the run turn green without collecting.
+    if: vars.ETFH_ACTIONS_COLLECT == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check the required configuration
+        # Fails before any checkout or fetch so a missing variable is a clear
+        # one-line error, not a cryptic failure deeper in the run. Only the
+        # variable names are printed, never their values.
+        env:
+          ETFH_USER_AGENT: ${{ vars.ETFH_USER_AGENT }}
+          ETFH_GIT_NAME: ${{ vars.ETFH_GIT_NAME }}
+          ETFH_GIT_EMAIL: ${{ vars.ETFH_GIT_EMAIL }}
+          ETFH_DATA_DEPLOY_KEY: ${{ secrets.ETFH_DATA_DEPLOY_KEY }}
+        run: |
+          set -u
+          missing=""
+          for name in ETFH_USER_AGENT ETFH_GIT_NAME ETFH_GIT_EMAIL ETFH_DATA_DEPLOY_KEY; do
+            if [ -z "${!name:-}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::scheduled collection is enabled but these repository variables or secrets are unset:$missing (see docs/epic-04-flows-and-history.md, FR-2.3)"
+            exit 1
+          fi
+
+      # Same pinned actions as ci.yml (D60/D81): a version bump happens there
+      # first, then here.
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Check out the private data repository
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.ETFH_DATA_REPO || 'broiisapro/cad-etf-holdings-data' }}
+          path: data
+          ssh-key: ${{ secrets.ETFH_DATA_DEPLOY_KEY }}
+
+      - name: Collect, verify, push and rebuild
+        # ops/actions_collect.sh commits the new raw files with the human's
+        # identity through `git -c` (D81) and pushes them before the build, so
+        # a QA failure never loses collected files.
+        env:
+          COLLECT_DATE: ${{ inputs.date }}
+          ETFH_USER_AGENT: ${{ vars.ETFH_USER_AGENT }}
+          ETFH_GIT_NAME: ${{ vars.ETFH_GIT_NAME }}
+          ETFH_GIT_EMAIL: ${{ vars.ETFH_GIT_EMAIL }}
+          OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
+        run: ops/actions_collect.sh data "$COLLECT_DATE"
+
+      - name: Upload derived aggregates
+        # D77: derived aggregates only. The data checkout holds the raw files
+        # and is never uploaded, logged or summarized.
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: derived-aggregates
+          path: ${{ runner.temp }}/aggregates
+          retention-days: 30
+          if-no-files-found: warn
