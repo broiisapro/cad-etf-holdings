@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
 import pytest
 
-from etfh.events import large_additions
+from etfh.events import EVENT_COLUMNS, large_additions
 
 from ._events_helpers import (
     D0,
@@ -17,6 +17,8 @@ from ._events_helpers import (
     K1,
     K2,
     K3,
+    Q1,
+    Q2,
     holding,
     make_con,
     portfolio,
@@ -265,3 +267,269 @@ def test_excluded_version_never_produces_events() -> None:
         con.close()
 
     assert events["security_id"].to_list() == ["ISIN:C"]
+
+
+# --------------------------------------------------------------------------- #
+# Non-security and unmatched rows
+# --------------------------------------------------------------------------- #
+
+
+def test_cash_derivative_balancing_and_unmatched_rows_never_become_events() -> None:
+    con = make_con(
+        [
+            portfolio(
+                "XFUND",
+                D0,
+                K0,
+                [
+                    holding("ISIN:A", 0.4),
+                    holding("CASH:CAD", 0.06, asset_class="cash"),
+                    holding("DERIV:OLD", 0.04, asset_class="derivative"),
+                    holding(
+                        "TKR:XTSE:OTHER",
+                        0.05,
+                        name="Other Assets less Liabilities",
+                        asset_class="other",
+                    ),
+                    holding(None, 0.05, name="Unmatched Old"),
+                    holding("FX:USD", 0.05, asset_class="fx"),
+                    holding("ISIN:B", 0.35),
+                ],
+            ),
+            portfolio(
+                "XFUND",
+                D1,
+                K1,
+                [
+                    holding("ISIN:A", 0.4),
+                    holding("CASH:CAD", 0.06, asset_class="cash"),
+                    holding("CASH:USD", 0.05, asset_class="cash"),
+                    holding("DERIV:NEW", 0.04, asset_class="derivative"),
+                    holding(
+                        "TKR:XTSE:OTHER",
+                        0.05,
+                        name="Other Assets less Liabilities",
+                        asset_class="other",
+                    ),
+                    holding(
+                        "TKR:XTSE:NETOTHER",
+                        0.01,
+                        name="Net Other Assets (Liabilities)",
+                        asset_class="other",
+                    ),
+                    holding(None, 0.15, name="Unmatched New"),
+                    holding("FX:USD", 0.05, asset_class="fx"),
+                    holding("ISIN:B", 0.35),
+                    holding("ISIN:E", 0.02),
+                ],
+            ),
+        ]
+    )
+    try:
+        events = large_additions(con)
+    finally:
+        con.close()
+
+    assert events.height == 1
+    assert events["security_id"].to_list() == ["ISIN:E"]
+
+
+def test_repeated_lines_for_one_security_are_summed_before_comparing() -> None:
+    con = make_con(
+        [
+            portfolio("XFUND", D0, K0, [holding("ISIN:A", 0.97), holding("ISIN:B", 0.03)]),
+            # Same identifier on two lines: 0.006 + 0.006 = 0.012 together.
+            portfolio(
+                "XFUND",
+                D1,
+                K1,
+                [
+                    holding("ISIN:A", 0.97),
+                    holding("ISIN:B", 0.018),
+                    holding("ISIN:C", 0.006),
+                    holding("ISIN:C", 0.006),
+                ],
+            ),
+        ]
+    )
+    try:
+        events = large_additions(con)
+    finally:
+        con.close()
+
+    assert events.height == 1
+    row = events.row(0, named=True)
+    assert row["security_id"] == "ISIN:C"
+    assert row["weight_after"] == pytest.approx(0.012)
+
+
+# --------------------------------------------------------------------------- #
+# Quarterly mode
+# --------------------------------------------------------------------------- #
+
+
+def _quarterly_fixture() -> list[dict[str, object]]:
+    return [
+        portfolio(
+            "QFUND",
+            Q1,
+            datetime(2026, 7, 2, 15, 0, tzinfo=UTC),
+            [holding("ISIN:A", 0.4), holding("ISIN:X", 0.1)],
+            source_id="quarterly",
+        ),
+        portfolio(
+            "QFUND",
+            Q2,
+            datetime(2026, 10, 1, 15, 0, tzinfo=UTC),
+            [holding("ISIN:A", 0.5), holding("ISIN:Y", 0.15)],
+            source_id="quarterly",
+        ),
+        portfolio("QFUND", D0, K0, [holding("ISIN:A", 0.5)]),
+        portfolio(
+            "QFUND",
+            D1,
+            K1,
+            [holding("ISIN:A", 0.45), holding("ISIN:Z", 0.05)],
+        ),
+    ]
+
+
+def test_quarterly_versions_are_ignored_by_default() -> None:
+    con = make_con(_quarterly_fixture())
+    try:
+        events = large_additions(con)
+    finally:
+        con.close()
+
+    assert events["security_id"].to_list() == ["ISIN:Z"]
+    assert set(events["source_kind"].to_list()) == {"daily"}
+
+
+def test_quarterly_mode_adds_only_relative_to_the_previous_quarterly_list() -> None:
+    con = make_con(_quarterly_fixture())
+    try:
+        events = large_additions(con, include_quarterly=True)
+    finally:
+        con.close()
+
+    quarterly = events.filter(pl.col("source_kind") == "quarterly")
+    # Y is new to the Q2 list; X is missing from it (never a drop) and A's
+    # weight change between partial lists is never an increase.
+    assert quarterly["security_id"].to_list() == ["ISIN:Y"]
+    row = quarterly.row(0, named=True)
+    assert row["event_type"] == "add"
+    assert row["portfolio_date"] == Q2
+    assert row["weight_after"] == pytest.approx(0.15)
+    # The daily chain is unchanged and never compares against quarterly rows.
+    daily = events.filter(pl.col("source_kind") == "daily")
+    assert daily["security_id"].to_list() == ["ISIN:Z"]
+
+
+def test_quarterly_only_fund_has_no_events_without_a_previous_list() -> None:
+    con = make_con(
+        [
+            portfolio(
+                "QFUND",
+                Q2,
+                datetime(2026, 10, 1, 15, 0, tzinfo=UTC),
+                [holding("ISIN:A", 0.5), holding("ISIN:Y", 0.15)],
+                source_id="quarterly",
+            )
+        ]
+    )
+    try:
+        assert large_additions(con, include_quarterly=True).is_empty()
+    finally:
+        con.close()
+
+
+# --------------------------------------------------------------------------- #
+# Filters, dates, order and dtypes
+# --------------------------------------------------------------------------- #
+
+
+def test_known_date_uses_toronto_not_utc() -> None:
+    con = make_con(
+        [
+            portfolio("XFUND", D0, K0, [holding("ISIN:A", 1.0)]),
+            portfolio(
+                "XFUND",
+                D1,
+                # 02:00Z on 3 October is still 2 October in Toronto.
+                datetime(2026, 10, 3, 2, 0, tzinfo=UTC),
+                [holding("ISIN:A", 0.9), holding("ISIN:B", 0.1)],
+            ),
+        ]
+    )
+    try:
+        events = large_additions(con)
+    finally:
+        con.close()
+
+    assert events["known_date"].to_list() == [date(2026, 10, 2)]
+
+
+def test_start_and_end_filter_known_date_inclusively() -> None:
+    con = make_con(
+        [
+            portfolio("XFUND", D0, K0, [holding("ISIN:A", 1.0)]),
+            portfolio("XFUND", D1, K1, [holding("ISIN:A", 0.9), holding("ISIN:B", 0.1)]),
+            portfolio(
+                "XFUND",
+                D2,
+                K2,
+                [holding("ISIN:A", 0.9), holding("ISIN:B", 0.05), holding("ISIN:C", 0.05)],
+            ),
+        ]
+    )
+    try:
+        all_events = large_additions(con)
+        after = large_additions(con, start=D2)
+        before = large_additions(con, end=D1)
+        exact = large_additions(con, start=D1, end=D1)
+    finally:
+        con.close()
+
+    assert all_events["security_id"].to_list() == ["ISIN:B", "ISIN:C"]
+    assert after["security_id"].to_list() == ["ISIN:C"]
+    assert before["security_id"].to_list() == ["ISIN:B"]
+    assert exact["security_id"].to_list() == ["ISIN:B"]
+
+
+def test_result_is_sorted_and_typed() -> None:
+    con = make_con(
+        [
+            portfolio("ZFUND", D0, K0, [holding("ISIN:A", 1.0)]),
+            portfolio(
+                "ZFUND",
+                D1,
+                K1,
+                [holding("ISIN:A", 0.8), holding("ISIN:B", 0.2, ticker="B", exchange="XTSE")],
+            ),
+            portfolio("AFUND", D0, K0, [holding("ISIN:A", 1.0)]),
+            portfolio("AFUND", D1, K1, [holding("ISIN:A", 0.9), holding("ISIN:C", 0.1)]),
+        ]
+    )
+    try:
+        events = large_additions(con)
+    finally:
+        con.close()
+
+    assert events.columns == list(EVENT_COLUMNS)
+    assert events.schema == _EXPECTED_SCHEMA
+    keys = list(
+        zip(
+            events["known_date"].to_list(),
+            events["fund_ticker"].to_list(),
+            events["security_id"].to_list(),
+            strict=True,
+        )
+    )
+    assert keys == sorted(keys)
+    assert keys == [
+        (date(2026, 10, 2), "AFUND", "ISIN:C"),
+        (date(2026, 10, 2), "ZFUND", "ISIN:B"),
+    ]
+    ticker_row = events.filter(pl.col("security_id") == "ISIN:B").row(0, named=True)
+    assert ticker_row["security_ticker"] == "B"
+    assert ticker_row["exchange"] == "XTSE"
