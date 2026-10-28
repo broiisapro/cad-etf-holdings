@@ -246,6 +246,17 @@ def test_explicit_week_end_is_used_unchanged(synthetic_build: Path, tmp_path: Pa
     assert (out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").is_file()
 
 
+def test_empty_database_exits_1_with_the_existing_message(tmp_path: Path) -> None:
+    """A database with no holdings cannot follow a date; it fails as it always did."""
+    empty_raw = tmp_path / "empty-raw"
+    empty_raw.mkdir()
+    db = build(empty_raw, tmp_path / "empty-build", config_dir=CONFIG_DIR).db_path
+    result = _run("--db", str(db), "--out", str(tmp_path / "empty-site"))
+    assert result.exit_code == 1, result.output
+    assert "error: no holdings for the requested week(s)" in result.output
+    assert not (tmp_path / "empty-site" / "index.html").exists()
+
+
 def test_the_published_json_is_the_validated_document(tmp_path: Path) -> None:
     out = tmp_path / "site"
     result = _run(
