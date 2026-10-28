@@ -1,4 +1,4 @@
-"""Tests for raw-store verification and safe sync."""
+"""Tests for raw-store verification, safe sync and the module command line."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pytest
 from etfh.rawcheck import (
     RawCheckReport,
     RawProblem,
+    main,
     sync_raw_store,
     verify_raw_store,
 )
@@ -360,4 +361,72 @@ def test_sync_refuses_a_broken_source(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="1 problem"):
         sync_raw_store(source, destination)
 
+    assert not destination.exists()
+
+
+def test_module_verify_exit_codes_and_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = RawStore(tmp_path)
+    _write(store)
+
+    assert main(["verify", str(tmp_path)]) == 0
+    clean = capsys.readouterr()
+    assert clean.err == ""
+    assert clean.out.splitlines() == [f"verify {tmp_path}: 1 file(s) checked, 0 problem(s)"]
+
+    data = tmp_path / "synthetic/SYNA/2026-10-29/20261029T220000Z.csv"
+    data.unlink()
+
+    assert main(["verify", str(tmp_path)]) == 1
+    broken = capsys.readouterr()
+    lines = broken.out.splitlines()
+    assert lines[0] == f"verify {tmp_path}: 0 file(s) checked, 1 problem(s)"
+    assert lines[1].startswith("orphan_sidecar: synthetic/SYNA/2026-10-29/")
+    assert broken.err == ""
+
+
+def test_module_verify_reports_a_missing_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["verify", str(tmp_path / "missing")]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not a directory" in captured.err
+
+
+def test_module_sync_prints_summary_and_exit_codes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write(RawStore(source))
+
+    assert main(["sync", str(source), str(destination)]) == 0
+    copied = capsys.readouterr()
+    assert copied.out.splitlines() == [
+        f"sync {source} -> {destination}: 1 copied, 0 identical, 0 conflict(s)"
+    ]
+
+    target = destination / "synthetic/SYNA/2026-10-29/20261029T220000Z.csv"
+    target.write_bytes(b"different")
+    assert main(["sync", str(source), str(destination)]) == 1
+    conflict = capsys.readouterr()
+    assert conflict.out.splitlines() == [
+        f"sync {source} -> {destination}: 0 copied, 0 identical, 1 conflict(s)",
+        "conflict: synthetic/SYNA/2026-10-29/20261029T220000Z.csv: "
+        "destination holds different bytes; left untouched",
+    ]
+
+
+def test_module_sync_dry_run_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write(RawStore(source))
+
+    assert main(["sync", str(source), str(destination), "--dry-run"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        f"sync {source} -> {destination} (dry run): 1 copied, 0 identical, 0 conflict(s)"
+    ]
     assert not destination.exists()
