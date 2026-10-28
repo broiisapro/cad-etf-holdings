@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
+import polars as pl
 import pytest
 from typer.testing import CliRunner
 
@@ -317,3 +318,74 @@ def test_qa_summary_type_is_stable_for_the_formats(synthetic_build: BuildResult)
         con.close()
     assert isinstance(summary, QaSummary)
     assert summary.asof is None
+
+
+def _share_frame(rows: list[tuple[str, date, str, float, float]]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fund_ticker": [row[0] for row in rows],
+            "as_of_date": [row[1] for row in rows],
+            "source_id": [row[2] for row in rows],
+            "unmatched_weight": [row[3] for row in rows],
+            "total_weight": [row[4] for row in rows],
+            "share": [row[3] / row[4] if row[4] else 0.0 for row in rows],
+        }
+    )
+
+
+def test_asof_measures_unmatched_weight_on_the_versions_known_by_then(
+    synthetic_build: BuildResult, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The text preamble says every section is point-in-time, not only the shares.
+
+    Moved here from ``tests/test_cli.py`` with the wave-08 QaSummary change
+    (issue #180's fix request): ``--asof`` now filters every section, so the
+    wording cannot claim less than the report does.
+    """
+    whole_store = _share_frame([("SYNA", date(2026, 11, 2), "syn_csv", 0.0, 1.0)])
+    as_of = _share_frame([("SYNA", date(2026, 10, 21), "syn_csv", 0.25, 1.0)])
+    calls: list[date | None] = []
+
+    def fake_shares(con: object, asof: date | None = None) -> pl.DataFrame:
+        calls.append(asof)
+        return whole_store if asof is None else as_of
+
+    monkeypatch.setattr("etfh.qa.unmatched_shares", fake_shares)
+    result = runner.invoke(
+        app,
+        ["qa", "--db", str(synthetic_build.db_path), "--asof", "2026-10-22"],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [None, date(2026, 10, 22)]
+    assert (
+        "as of 2026-10-22: every section uses only versions known by the as-of date "
+        "(America/Toronto cutoff)" in result.output
+    )
+    assert "SYNA as_of=2026-10-21 source=syn_csv share=25.00%" in result.output
+
+
+def test_asof_feeds_the_max_unmatched_share_threshold(
+    synthetic_build: BuildResult, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole_store = _share_frame([("SYNA", date(2026, 11, 2), "syn_csv", 0.0, 1.0)])
+    as_of = _share_frame([("SYNA", date(2026, 10, 21), "syn_csv", 0.5, 1.0)])
+
+    def fake_shares(con: object, asof: date | None = None) -> pl.DataFrame:
+        return whole_store if asof is None else as_of
+
+    monkeypatch.setattr("etfh.qa.unmatched_shares", fake_shares)
+    result = runner.invoke(
+        app,
+        [
+            "qa",
+            "--db",
+            str(synthetic_build.db_path),
+            "--asof",
+            "2026-10-22",
+            "--max-unmatched-share",
+            "0.4",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    assert "unmatched threshold 40.00% exceeded by 1 included daily file(s)" in result.output
+    assert "SYNA as_of=2026-10-21 source=syn_csv share=50.00%" in result.output

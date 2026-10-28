@@ -62,6 +62,12 @@ the ordinary excluded ``no_parser`` row. The opposite also holds: a metrics
 failure never excludes a holdings file and a holdings failure never excludes
 metrics rows.
 
+Price responses (``SourceKind.prices``, D78/D84) are diverted before the fund
+lookup for the same reason: ``etfh prices fetch`` writes daily closes into the
+raw store under the symbol, and a price file is neither a holdings disclosure
+nor fund metrics. It produces no file version and no QA event, so a store that
+also holds prices still builds and reports a clean ``etfh qa``.
+
 Metrics versions use the same D20 rules, keyed on the *metrics* source recorded
 in the parsed rows and on each row's ``as_of_date`` — a NAV history file holds
 many dates and therefore many versions. ``known_at`` is the parsed file's stated
@@ -389,6 +395,15 @@ def build(
 
     for raw in raws:
         source = sources.get(raw.source_id)
+        if source is not None and source.kind is SourceKind.prices:
+            # Price responses (``tiingo_prices``, D78/D84) live in the same raw
+            # store as holdings but are not dataset inputs: they never become a
+            # file version, a QA event or a metrics row, exactly like the
+            # metrics-only diversion below. The lookup happens before the fund
+            # test on purpose - a price file is keyed by its ticker symbol, which
+            # is not a fund in ``funds.csv``, and reporting ``unknown_fund``
+            # would turn a healthy ``etfh qa`` into exit 3.
+            continue
         fund = funds_by_ticker.get(raw.fund_ticker)
         metrics_parsers = (
             find_metrics_parsers(raw, source) if source is not None and fund is not None else []
