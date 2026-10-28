@@ -1155,3 +1155,154 @@ def test_metrics_render_does_not_depend_on_insertion_order(tmp_path: Path) -> No
     assert "  files: 4 total (3 included, 1 excluded)" in forward
     assert "files: 1 total (1 included, 0 excluded)" in forward
     assert forward.index("    bmo") < forward.index("    purpose")
+
+
+# --- non-security lines (D80c, D82) and point-in-time summaries -----------------
+
+
+def test_balancing_lines_leave_the_unmatched_share_and_get_their_own_line(
+    tmp_path: Path,
+) -> None:
+    con = _connect(tmp_path)
+    _file_version(con, SHA_A)
+    _holding(con, 0, security_id=None, name="Fictional Alpha Corp.", weight=0.4)
+    _holding(con, 1, security_id="ISIN:CA600000AA15", name="Fictional Beta Corp.", weight=0.5)
+    _holding(
+        con,
+        2,
+        security_id=None,
+        name="  OTHER   assets less Liabilities ",
+        asset_class="other",
+        weight=-0.1,
+    )
+    _holding(con, 3, security_id=None, asset_class="cash", name="Cash", weight=0.1)
+
+    frame = unmatched_shares(con)
+    row = frame.row(0, named=True)
+    assert row["unmatched_weight"] == pytest.approx(0.4)
+    assert row["total_weight"] == pytest.approx(0.9)
+    assert row["share"] == pytest.approx(0.4 / 0.9)
+
+    summary = summarize(con)
+    assert summary.unmatched_rows == 1
+    assert summary.balancing_lines.rows == 1
+    assert summary.balancing_lines.weight_sum == pytest.approx(-0.1)
+    assert summary.physical_commodity_lines.rows == 0
+    text = render(summary)
+    assert "balancing lines: 1 rows, Σ weight -0.1000" in text
+    assert "physical commodity lines" not in text
+
+
+def test_physical_commodity_lines_are_non_securities_and_counted(tmp_path: Path) -> None:
+    con = _connect(tmp_path)
+    _file_version(con, SHA_B, fund="KILO", source="purpose_daily")
+    _holding(
+        con,
+        0,
+        security_id=None,
+        fund="KILO",
+        source="purpose_daily",
+        sha=SHA_B,
+        name="Gold Bars",
+        asset_class="commodity",
+        weight=1.0,
+    )
+    _qa_event(
+        con,
+        SHA_B,
+        fund="KILO",
+        source="purpose_daily",
+        check="commodity_quantity",
+        severity="info",
+        detail="191,450 oz",
+        excluded=False,
+    )
+    row = unmatched_shares(con).row(0, named=True)
+    assert row["unmatched_weight"] == 0.0
+    assert row["total_weight"] == 0.0
+    assert row["share"] == 0.0
+
+    summary = summarize(con)
+    assert summary.unmatched_rows == 0
+    assert summary.physical_commodity_lines.rows == 1
+    assert summary.physical_commodity_lines.weight_sum == pytest.approx(1.0)
+    assert summary.balancing_lines.rows == 0
+    assert "physical commodity lines: 1 rows, Σ weight 1.0000" in render(summary)
+
+
+def test_asof_summary_is_point_in_time_in_every_section(tmp_path: Path) -> None:
+    con = _connect(tmp_path, sources=True, metrics=True)
+    _source(con, "syn_csv", issuer="synthetic", kind="daily_holdings")
+    _source(con, "syn_metrics", issuer="synthetic", kind="fund_metrics")
+    # Version 1 is the only one known on 2026-11-04.
+    _versioned_share(
+        con,
+        SHA_A,
+        version=1,
+        known_at=datetime(2026, 11, 2, 22, tzinfo=UTC),
+        unmatched=0.4,
+        matched=0.5,
+    )
+    # A republished version that fails validation is known later.
+    _file_version(
+        con, SHA_B, version=2, known_at=datetime(2026, 11, 5, 22, tzinfo=UTC), status="excluded"
+    )
+    _qa_event(con, SHA_B, check="weight_sum", excluded=True)
+    # A third, failing version is also known later.
+    _versioned_share(
+        con,
+        SHA_C,
+        version=3,
+        known_at=datetime(2026, 11, 6, 22, tzinfo=UTC),
+        unmatched=0.9,
+        matched=0.1,
+    )
+    _qa_event(
+        con,
+        SHA_C,
+        check="negative_weight",
+        severity="warning",
+        detail="1 non-cash/fx/derivative row(s) have negative weights",
+        excluded=False,
+    )
+    # Fund metrics are only known after the date too.
+    _file_version(
+        con,
+        SHA_D,
+        fund="SYNQ",
+        source="syn_metrics",
+        known_at=datetime(2026, 11, 6, 22, tzinfo=UTC),
+    )
+    _fund_metric(
+        con,
+        fund="SYNQ",
+        source="syn_metrics",
+        sha=SHA_D,
+        known_at=datetime(2026, 11, 6, 22, tzinfo=UTC),
+    )
+
+    whole = summarize(con)
+    assert (whole.files_included, whole.files_excluded) == (2, 1)
+    assert [entry.fund_ticker for entry in whole.excluded_files] == ["SYNA"]
+    assert whole.warnings == 1
+    assert whole.unmatched_shares[0].share == pytest.approx(0.9)
+    assert whole.metrics.files_included == 1
+    assert whole.metrics.funds == ("SYNQ",)
+    assert whole.metrics.latest_by_issuer == (("synthetic", AS_OF),)
+    assert exit_code(whole) == 0
+
+    at = summarize(con, asof=date(2026, 11, 4))
+    assert at.asof == date(2026, 11, 4)
+    assert (at.files_included, at.files_excluded) == (1, 0)
+    assert at.excluded_files == ()
+    assert at.inconsistent_files == ()
+    assert at.warnings == 0
+    assert at.unmatched_rows == 1
+    assert at.unmatched_shares[0].share == pytest.approx(0.4 / 0.9)
+    assert at.balancing_lines.rows == 0
+    assert at.metrics.files_included == 0
+    assert at.metrics.funds == ()
+    assert at.metrics.latest_by_issuer == ()
+    assert exit_code(at) == 0
+    assert "excluded files:" not in render(at)
+    assert "SYNA as_of=2026-11-02 source=syn_csv share=44.44%" in render(at)
