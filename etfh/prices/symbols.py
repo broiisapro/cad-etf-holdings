@@ -25,7 +25,7 @@ from etfh.secmaster.identifiers import normalize_exchange, normalize_ticker
 __all__ = ["cached_figi_resolver", "symbol_for"]
 
 #: MICs of the US venues the free price plan covers: the five venues named in
-#: the wave-08 interface (``XNYS``, ``XNAS``, ``XASE``, ``ARCA``, ``BATS``).
+#: the wave-08 interface (``XNYS``, ``XNAS``, ``XASE``, ``ARCX``, ``BATS``).
 #: ``etfh.secmaster`` maps the Bloomberg labels for most of them onto these
 #: codes (D22); ``XASE`` is accepted as a raw MIC because the alias table does
 #: not list it yet.
