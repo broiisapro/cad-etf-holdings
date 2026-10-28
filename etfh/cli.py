@@ -54,9 +54,10 @@ Commands:
   responses (D78/D84); the request budget is shared between commands.
 - ``event-study --db PATH --raw DIR --out DIR [--source tiingo|synthetic]
   [--benchmark SPY] [--min-weight X] [--window -5,5]
-  [--model market_adjusted|market_model]`` measures abnormal returns around
-  large additions (FR-3.2) and writes the public aggregates plus the internal
-  per-event table.
+  [--model market_adjusted|market_model] [--figi-cache DIR]`` measures abnormal
+  returns around large additions (FR-3.2) and writes the public aggregates plus
+  the internal per-event table; the real source resolves ISIN/FIGI rows through
+  the build's cached OpenFIGI mappings (D90a).
 - ``verify-raw --raw DIR`` / ``sync-raw --from SRC --to DST [--dry-run]``
   check the raw store against its sidecars and copy verified pairs into
   another store (interfaces wave 08 §2).
@@ -99,6 +100,7 @@ from etfh.prices import (
     PriceSourceError,
     SyntheticPrices,
     TiingoPrices,
+    cached_figi_resolver,
     symbol_for,
 )
 from etfh.rawcheck import sync_raw_store, verify_raw_store
@@ -864,6 +866,13 @@ def event_study(
             help="shared request budget file (default: <raw>/.etfh/price_budget.json)",
         ),
     ] = None,
+    figi_cache: Annotated[
+        Path,
+        typer.Option(
+            "--figi-cache",
+            help="OpenFIGI cache directory read for ISIN/FIGI symbol resolution",
+        ),
+    ] = _DEFAULT_FIGI_CACHE,
 ) -> None:
     """Measure abnormal returns around large additions (FR-3.2, exploratory).
 
@@ -873,7 +882,10 @@ def event_study(
     aggregates only (D79/D84). ``--source synthetic`` uses deterministic offline
     prices and resolves a US-listed ticker to the security's own ticker on any
     venue, because the committed fixtures are TSX-listed - demo behaviour, and
-    the numbers it prints are simulated.
+    the numbers it prints are simulated. ``--source tiingo`` resolves a row by
+    its US venue first and then, offline, through the build's cached OpenFIGI
+    mappings (D90a), which is how ISIN-only holdings reach a US ticker; the
+    command prints how many events each path resolved.
     """
     if not 0.0 < min_weight <= 1.0:
         typer.echo("error: --min-weight must be a fraction in (0, 1]", err=True)
@@ -890,10 +902,11 @@ def event_study(
 
     prices: SyntheticPrices | TiingoPrices
     resolve_symbol: Callable[[str | None, str | None, str | None], str | None]
+    resolution_counts: dict[str, int]
     if source == _DEMO_SOURCE:
         typer.echo("price source: synthetic (offline simulation; demo ticker resolution)")
         prices = SyntheticPrices()
-        resolve_symbol = _demo_symbol_for
+        resolve_symbol, resolution_counts = _counted_resolution(_demo_symbol_for)
     else:
         sources = load_sources(config / "sources.yaml")
         configured = sources.get(_PRICE_SOURCE_ID)
@@ -906,7 +919,10 @@ def event_study(
             typer.echo(f"error: {error}", err=True)
             raise typer.Exit(code=2) from None
         typer.echo(f"price source: {_PRICE_SOURCE_ID} (budget {budget_path})")
-        resolve_symbol = symbol_for
+        typer.echo(f"figi cache: {figi_cache}")
+        resolve_symbol, resolution_counts = _counted_resolution(
+            symbol_for, cached_figi_resolver(figi_cache)
+        )
 
     try:
         with nullcontext(prices) as price_source:
@@ -930,6 +946,7 @@ def event_study(
 
     written = write_outputs(result, out)
     typer.echo(_event_study_report(result))
+    typer.echo(_symbol_resolution_line(resolution_counts))
     if events.is_empty():
         typer.echo(f"no large additions at min-weight {min_weight} (nothing to measure)")
     for path in written:
@@ -1322,6 +1339,50 @@ def _demo_symbol_for(
         return None
     symbol = security_ticker.strip().upper().replace(".", "-")
     return symbol or None
+
+
+def _counted_resolution(
+    first: Callable[[str | None, str | None, str | None], str | None],
+    fallback: Callable[[str | None, str | None, str | None], str | None] | None = None,
+) -> tuple[Callable[[str | None, str | None, str | None], str | None], dict[str, int]]:
+    """Wrap symbol resolution so the command can say where each symbol came from.
+
+    ``first`` is the venue-based resolver (:func:`etfh.prices.symbol_for`, or the
+    demo resolver for ``--source synthetic``); ``fallback`` is the cached
+    OpenFIGI resolver the real source adds (D90a). The counts are aggregates over
+    events, so printing them publishes nothing security-level (D79).
+    """
+    counts = {"ticker": 0, "figi": 0, "none": 0}
+
+    def resolve(
+        security_id: str | None,
+        security_ticker: str | None,
+        exchange: str | None,
+    ) -> str | None:
+        symbol = first(security_id, security_ticker, exchange)
+        if symbol is not None:
+            counts["ticker"] += 1
+            return symbol
+        if fallback is not None:
+            symbol = fallback(security_id, security_ticker, exchange)
+            if symbol is not None:
+                counts["figi"] += 1
+                return symbol
+        counts["none"] += 1
+        return None
+
+    return resolve, counts
+
+
+def _symbol_resolution_line(counts: Mapping[str, int]) -> str:
+    """One aggregate line: how many events found a symbol, and through which path."""
+    resolved = counts["ticker"] + counts["figi"]
+    total = resolved + counts["none"]
+    return (
+        f"symbols: {resolved} of {total} event(s) resolved "
+        f"({counts['ticker']} by ticker, {counts['figi']} by cached OpenFIGI mapping, "
+        f"{counts['none']} not resolved)"
+    )
 
 
 def _parse_window(value: str, option: str) -> tuple[int, int]:
