@@ -32,7 +32,9 @@ uv run etfh weekly --demo --out /tmp/etfh-demo-site      # synthetic store, no d
 - **`--demo`** builds the committed synthetic store in a temporary directory, ignores `--db`, marks every document `"demo": true` and takes the week end from the synthetic data instead of the clock. Every page then shows "Demo data — synthetic funds only".
 - **The site is small and self-contained.** No JavaScript, no external requests, light and dark themes, every page labels itself "Derived data · exploratory · not investment advice". An `archive.html` lists every published week; the renderer accepts a base URL for canonical links and Atom ids.
 - **Scheduling is opt-in.** `.github/workflows/pages.yml` runs every Saturday and publishes the site only when the repository variable `ETFH_PAGES` is `true`; `ETFH_PAGES_REAL=true` switches it from the synthetic demo to real aggregates and additionally needs the private data checkout and the human's go-ahead (D79). Both are unset today.
-- **The dashboard has a "This week" tab** showing the same digest for the selected date. The hosted demo builds the public document; the local dashboard an internal one.
+- **The dashboard has four tabs: Fund, This week, Overlap and Heatmap.** The "This week" tab shows the same digest for the selected date; the hosted demo builds the public document and the local dashboard an internal one.
+
+![Dashboard "This week" view: synthetic weekly fund changes and security changes](docs/img/week.png)
 
 ## Event study (exploratory)
 
@@ -147,7 +149,6 @@ One deterministic pipeline: collectors write every downloaded file unmodified in
 - **A real event study resolves no symbols today.** Every large addition in the live store comes from BMO or Purpose rows identified by ISIN or name, and `etfh prices` maps only US-listed tickers. The event study therefore reports `no_symbol` for them; ticker resolution from the cached OpenFIGI mappings is the next step (D90). `--source synthetic` exists so the method can be exercised today.
 - **Scheduled collection and the published site are off.** Nothing runs on a schedule in the public repository until `ETFH_ACTIONS_COLLECT` and `ETFH_PAGES` are set after the release; until then collection runs locally behind the launchd guard. `ETFH_PAGES_REAL` additionally needs the maintainer's explicit go-ahead (D79).
 - **Real holdings are not distributed.** Only derived aggregates are shareable; there is no public dataset of individual fund holdings and the data repository is private.
-- **The README screenshots show three tabs.** The dashboard gained a "This week" tab after the images were created; they are regenerated in the next wave, so read them as the Fund/Overlap/Heatmap views only.
 - **Research software.** This is an engineering and data-quality project, not investment advice.
 
 ## Licence
