@@ -13,11 +13,14 @@ Commands:
 - ``build --raw DIR --out DIR [--config DIR] [--openfigi [--figi-cache DIR]]``
   rebuilds the DuckDB and exports; ``--openfigi`` assigns cached composite
   FIGI ids to the rows that map.
-- ``qa --db PATH [--max-unmatched-share X] [--asof D]`` prints the QA report
-  and exits 0 only when every errored file is excluded and reported; the
-  optional threshold makes it exit 3 when an included daily file's unmatched
-  weight share exceeds ``X``, and ``--asof`` measures those shares on the
-  versions known by ``D`` (wave-05 review #3).
+- ``qa --db PATH [--max-unmatched-share X] [--asof D]
+  [--format text|markdown|json]`` prints the QA report and exits 0 only when
+  every errored file is excluded and reported; the optional threshold makes it
+  exit 3 when an included daily file's unmatched weight share exceeds ``X``;
+  ``--asof`` makes every section point-in-time (only versions known by ``D``),
+  and ``--format markdown`` prints a publish-safe job-summary report while
+  ``--format json`` prints the same numbers for machines (wave-05 review #3,
+  interfaces wave 08 §1).
 - ``flows --fund F --from D1 --to D2 --db PATH [--asof D] [--json]`` prints
   estimated creation/redemption flows (D67) and always the method line. A fund
   that has holdings but no metrics yet is reported as such (exit 0), never as
@@ -42,13 +45,11 @@ Commands:
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
-from statistics import median
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
@@ -87,9 +88,7 @@ _FLOW_METHOD = "Δshares × NAV (estimate; ignores distributions and in-kind eff
 # Metrics sources with no collector read files another source already stores
 # (interfaces-06 §1: purpose_metrics parses purpose_daily raw files).
 _DERIVED_METRICS = {"purpose_metrics": "purpose_daily"}
-_QA_QUALITY_KINDS = ("daily", "quarterly")
-_QUARTERLY_KIND = "quarterly_disclosure"
-_WORST_FUNDS = 10
+_QA_FORMATS = ("text", "markdown", "json")
 
 _NAME_PROPOSAL_SCHEMA = {
     "normalized_name": pl.String,
@@ -280,16 +279,30 @@ def qa(
         str | None,
         typer.Option(
             "--asof",
-            help="measure unmatched weight on versions known by this date (YYYY-MM-DD)",
+            help="use only versions known by this date (YYYY-MM-DD)",
         ),
     ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="text (default), markdown (publish-safe) or json",
+        ),
+    ] = "text",
 ) -> None:
     """Report validation results, excluded files and unmatched weight.
 
-    With ``--asof`` the unmatched-weight section describes the versions a
-    point-in-time query at that date would use (``unmatched_shares(con, asof)``,
-    wave-05 review #3); findings and file counts still cover the whole store.
+    With ``--asof`` every section describes only the versions known by that
+    date (``summarize(..., asof=...)``, D7/D30). ``--format markdown`` prints a
+    publish-safe summary for a workflow job summary (interfaces wave 08 §1);
+    ``--format json`` prints the same numbers for machines. Exit codes are
+    unchanged: 1 for an inconsistent database, 3 for the unmatched threshold,
+    0 otherwise.
     """
+    if output_format not in _QA_FORMATS:
+        raise typer.BadParameter(
+            f"--format must be one of {', '.join(_QA_FORMATS)}", param_hint="--format"
+        )
     asof_date = _parse_date(asof, "--asof") if asof is not None else None
     connection = _connect(db)
     try:
@@ -304,12 +317,17 @@ def qa(
         code = qa_module.exit_code(summary)
     finally:
         connection.close()
-    if asof_date is not None:
-        typer.echo(
-            f"as of {asof_date.isoformat()}: unmatched weight uses only versions "
-            "known by then (America/Toronto cutoff)"
-        )
-    typer.echo(qa_module.render(summary))
+    if output_format == "markdown":
+        typer.echo(qa_module.render_markdown(summary))
+    elif output_format == "json":
+        typer.echo(qa_module.render_json(summary))
+    else:
+        if asof_date is not None:
+            typer.echo(
+                f"as of {asof_date.isoformat()}: unmatched weight uses only versions "
+                "known by then (America/Toronto cutoff)"
+            )
+        typer.echo(qa_module.render(summary))
     if code != 0:
         raise typer.Exit(code=code)
 
@@ -747,104 +765,12 @@ def _qa_summary(
     max_unmatched_share: float | None,
     asof: date | None,
 ) -> qa_module.QaSummary:
-    """Build the QA summary, optionally measuring unmatched weight as of a date.
+    """Build the QA summary, optionally point-in-time at ``asof`` (D7/D30).
 
-    ``qa.summarize`` reads every included file; the ``--asof`` path replaces
-    only its unmatched-weight section with :func:`etfh.qa.unmatched_shares` at
-    that date, keeping the file findings whole-store (they describe the store,
-    not a point in time). The grouping mirrors the report's daily/quarterly
-    split.
+    ``qa.summarize`` owns the whole aggregation, including the ``--asof``
+    filtering of every section, so the CLI only wires options and formats.
     """
-    summary = qa_module.summarize(con, max_unmatched_share=max_unmatched_share)
-    if asof is None or summary.tables_missing:
-        return summary
-    frame = qa_module.unmatched_shares(con, asof)
-    shares = tuple(
-        qa_module.UnmatchedShare(
-            fund_ticker=str(row["fund_ticker"]),
-            as_of_date=row["as_of_date"],
-            source_id=str(row["source_id"]),
-            unmatched_weight=float(row["unmatched_weight"]),
-            total_weight=float(row["total_weight"]),
-            share=float(row["share"]),
-        )
-        for row in frame.iter_rows(named=True)
-    )
-    metadata = _qa_source_metadata(con)
-    shares_by_issuer: dict[str, dict[str, list[float]]] = {kind: {} for kind in _QA_QUALITY_KINDS}
-    worst_by_fund: dict[str, dict[str, qa_module.UnmatchedShare]] = {
-        kind: {} for kind in _QA_QUALITY_KINDS
-    }
-    for row in shares:
-        issuer, quality = metadata.get(row.source_id, (row.source_id, "daily"))
-        shares_by_issuer[quality].setdefault(issuer, []).append(row.share)
-        current = worst_by_fund[quality].get(row.fund_ticker)
-        if current is None or (row.share, row.as_of_date, row.source_id) > (
-            current.share,
-            current.as_of_date,
-            current.source_id,
-        ):
-            worst_by_fund[quality][row.fund_ticker] = row
-    quality_summaries = []
-    for quality in _QA_QUALITY_KINDS:
-        quality_summaries.append(
-            qa_module.UnmatchedQuality(
-                kind=quality,
-                issuer_medians=tuple(
-                    (issuer, float(median(values)))
-                    for issuer, values in sorted(shares_by_issuer[quality].items())
-                ),
-                worst_funds=tuple(
-                    sorted(
-                        (row for row in worst_by_fund[quality].values() if row.share > 0),
-                        key=lambda row: (
-                            -row.share,
-                            row.fund_ticker,
-                            row.as_of_date.isoformat(),
-                            row.source_id,
-                        ),
-                    )[:_WORST_FUNDS]
-                ),
-            )
-        )
-    over_threshold: tuple[qa_module.UnmatchedShare, ...] = ()
-    if max_unmatched_share is not None:
-        over_threshold = tuple(
-            row
-            for row in shares
-            if row.share > max_unmatched_share
-            and metadata.get(row.source_id, (row.source_id, "daily"))[1] == "daily"
-        )
-    return dataclasses.replace(
-        summary,
-        unmatched_shares=shares,
-        unmatched_quality=tuple(quality_summaries),
-        unmatched_over_threshold=over_threshold,
-    )
-
-
-def _qa_source_metadata(con: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, str]]:
-    """``source_id -> (issuer, 'daily'|'quarterly')`` from the additive ``sources``."""
-    rows: list[tuple[object, ...]] | None = None
-    for query in (
-        "SELECT source_id, issuer, kind, format FROM sources",
-        "SELECT source_id, issuer, kind, NULL AS format FROM sources",
-    ):
-        try:
-            rows = con.execute(query).fetchall()
-        except duckdb.Error:
-            continue
-        break
-    if rows is None:
-        return {}
-    metadata: dict[str, tuple[str, str]] = {}
-    for source_id, issuer, kind, source_format in rows:
-        quarterly = str(kind) == _QUARTERLY_KIND or str(source_format) == "pdf"
-        metadata[str(source_id)] = (
-            str(issuer) if issuer is not None else str(source_id),
-            "quarterly" if quarterly else "daily",
-        )
-    return metadata
+    return qa_module.summarize(con, max_unmatched_share=max_unmatched_share, asof=asof)
 
 
 def _has_holdings(con: duckdb.DuckDBPyConnection, fund: str) -> bool:
