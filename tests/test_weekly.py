@@ -18,6 +18,7 @@ import re
 import shutil
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pytest
@@ -57,7 +58,7 @@ def _changes_funds(index_html: str) -> list[str]:
     return _FUND_ROW.findall(table.group(0))
 
 
-def _run(*args: str) -> object:
+def _run(*args: str) -> Any:
     return runner.invoke(app, ["weekly", *args], env=_WIDE)
 
 
@@ -69,21 +70,25 @@ def test_index_has_one_changes_row_per_synthetic_fund_with_data(
     result = _run(
         "--db", str(synthetic_build), "--out", str(out), "--week-end", LATEST_WEEK_END.isoformat()
     )
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
     index = out / "index.html"
     assert index.is_file()
-    assert "wrote" in result.output and str(index) in result.output  # type: ignore[attr-defined]
+    assert "wrote" in result.output and str(index) in result.output
 
     html = index.read_text(encoding="utf-8")
     funds = _changes_funds(html)
     sources = load_sources(CONFIG_DIR / "sources.yaml")
-    expected = build_digest(
-        duckdb.connect(str(synthetic_build), read_only=True),
-        LATEST_WEEK_END,
-        public=True,
-        sources=sources,
-        funds=load_funds(CONFIG_DIR / "funds.csv", sources),
-    )
+    connection = duckdb.connect(str(synthetic_build), read_only=True)
+    try:
+        expected = build_digest(
+            connection,
+            LATEST_WEEK_END,
+            public=True,
+            sources=sources,
+            funds=load_funds(CONFIG_DIR / "funds.csv", sources),
+        )
+    finally:
+        connection.close()
     assert funds == [fund["ticker"] for fund in expected["funds"]]
     assert funds == ["SYNA", "SYNB", "SYNE"]
     assert "Derived data · exploratory · not investment advice" in html
@@ -109,7 +114,7 @@ def test_the_published_json_is_the_validated_document(tmp_path: Path) -> None:
         "--week-end",
         LATEST_WEEK_END.isoformat(),
     )
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
     document = json.loads((out / "data" / f"{LATEST_WEEK_END.isoformat()}.json").read_text())
     assert document["schema_version"] == 1
     assert document["week_end"] == LATEST_WEEK_END.isoformat()
@@ -124,7 +129,7 @@ def test_demo_builds_the_synthetic_store_and_flags_every_document(tmp_path: Path
     """``--demo`` ignores ``--db``, builds the fixtures and marks the documents."""
     out = tmp_path / "demo-site"
     result = _run("--demo", "--out", str(out), "--config", str(CONFIG_DIR))
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
     html = (out / "index.html").read_text(encoding="utf-8")
     assert "Demo data" in html
     # The week end is the synthetic data's latest as-of date, not the clock.
@@ -151,9 +156,9 @@ def test_weeks_two_skips_the_week_without_a_comparable_portfolio(
         "--weeks",
         "2",
     )
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
     assert f"skipped week ending {EMPTY_WEEK_END.isoformat()}: no comparable portfolio" in (
-        result.output  # type: ignore[attr-defined]
+        result.output
     )
     pages = sorted(path.name for path in (out / "weeks").glob("*.html"))
     assert pages == [f"{LATEST_WEEK_END.isoformat()}.html"]
@@ -204,11 +209,11 @@ def test_internal_and_public_differ_for_a_non_redistributable_fund(
         str(config),
     ]
     public_out = tmp_path / "public"
-    assert _run(*common, "--out", str(public_out)).exit_code == 0  # type: ignore[attr-defined]
+    assert _run(*common, "--out", str(public_out)).exit_code == 0
     internal_out = tmp_path / "internal"
     internal = _run(*common, "--out", str(internal_out), "--internal")
-    assert internal.exit_code == 0, internal.output  # type: ignore[attr-defined]
-    assert "do not publish" in internal.output  # type: ignore[attr-defined]
+    assert internal.exit_code == 0, internal.output
+    assert "do not publish" in internal.output
 
     public_html = (public_out / "index.html").read_text(encoding="utf-8")
     internal_html = (internal_out / "index.html").read_text(encoding="utf-8")
@@ -238,26 +243,26 @@ def test_no_holdings_for_the_requested_week_exits_1(synthetic_build: Path, tmp_p
     result = _run(
         "--db", str(synthetic_build), "--out", str(tmp_path / "empty"), "--week-end", "2020-01-03"
     )
-    assert result.exit_code == 1, result.output  # type: ignore[attr-defined]
-    assert "error: no holdings for the requested week(s)" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 1, result.output
+    assert "error: no holdings for the requested week(s)" in result.output
     assert not (tmp_path / "empty" / "index.html").exists()
 
 
 def test_missing_database_exits_2(tmp_path: Path) -> None:
     result = _run("--db", str(tmp_path / "nope.duckdb"), "--out", str(tmp_path / "site"))
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert f"error: database not found: {tmp_path / 'nope.duckdb'}" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert f"error: database not found: {tmp_path / 'nope.duckdb'}" in result.output
 
 
 def test_weeks_must_be_at_least_one(synthetic_build: Path, tmp_path: Path) -> None:
     result = _run("--db", str(synthetic_build), "--out", str(tmp_path / "site"), "--weeks", "0")
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "--weeks must be at least 1" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "--weeks must be at least 1" in result.output
 
 
 def test_week_end_must_be_a_date(synthetic_build: Path, tmp_path: Path) -> None:
     result = _run(
         "--db", str(synthetic_build), "--out", str(tmp_path / "site"), "--week-end", "last-week"
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "is not a date in YYYY-MM-DD form or 'today'" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "is not a date in YYYY-MM-DD form or 'today'" in result.output

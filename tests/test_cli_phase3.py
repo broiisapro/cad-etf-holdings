@@ -13,6 +13,7 @@ from __future__ import annotations
 import shutil
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pytest
@@ -28,7 +29,7 @@ _WIDE = {"COLUMNS": "200"}
 NEW_COMMANDS = ("weekly", "prices", "event-study", "verify-raw", "sync-raw")
 
 
-def _run(*args: str) -> object:
+def _run(*args: str) -> Any:
     return runner.invoke(app, list(args), env=_WIDE)
 
 
@@ -54,15 +55,15 @@ def _config_with_price_decision(tmp_path: Path, decision: str) -> Path:
 
 def test_help_lists_the_phase_three_commands() -> None:
     result = _run("--help")
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
     for command in NEW_COMMANDS:
-        assert command in result.output, command  # type: ignore[attr-defined]
+        assert command in result.output, command
 
 
 def test_prices_help_lists_fetch() -> None:
     result = _run("prices", "--help")
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
-    assert "fetch" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
+    assert "fetch" in result.output
 
 
 def test_prices_fetch_refuses_a_source_pending_review(tmp_path: Path) -> None:
@@ -82,9 +83,9 @@ def test_prices_fetch_refuses_a_source_pending_review(tmp_path: Path) -> None:
         "--config",
         str(config),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "skipped: terms" in result.output  # type: ignore[attr-defined]
-    assert "decision=pending_review" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "skipped: terms" in result.output
+    assert "decision=pending_review" in result.output
     assert not (tmp_path / "raw").exists()
 
 
@@ -108,9 +109,9 @@ def test_prices_fetch_prefers_the_terms_gate_over_the_missing_key(
         "--config",
         str(config),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "skipped: terms" in result.output  # type: ignore[attr-defined]
-    assert "TIINGO_API_KEY" not in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "skipped: terms" in result.output
+    assert "TIINGO_API_KEY" not in result.output
     assert not (tmp_path / "raw").exists()
 
 
@@ -132,8 +133,8 @@ def test_prices_fetch_without_a_key_exits_2(
         "--config",
         str(CONFIG_DIR),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "TIINGO_API_KEY is not set" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "TIINGO_API_KEY is not set" in result.output
     assert not (tmp_path / "raw").exists()
 
 
@@ -155,8 +156,8 @@ def test_prices_fetch_rejects_a_reversed_range(
         "--config",
         str(CONFIG_DIR),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "--from must not be after --to" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "--from must not be after --to" in result.output
 
 
 def test_prices_fetch_requires_at_least_one_symbol(
@@ -177,8 +178,8 @@ def test_prices_fetch_requires_at_least_one_symbol(
         "--config",
         str(CONFIG_DIR),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "--symbols must name at least one symbol" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "--symbols must name at least one symbol" in result.output
 
 
 def test_prices_fetch_rejects_a_bad_date(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,8 +198,8 @@ def test_prices_fetch_rejects_a_bad_date(tmp_path: Path, monkeypatch: pytest.Mon
         "--config",
         str(CONFIG_DIR),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "is not a date in YYYY-MM-DD form or 'today'" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "is not a date in YYYY-MM-DD form or 'today'" in result.output
 
 
 class _FakePrices:
@@ -256,11 +257,11 @@ def test_prices_fetch_prints_one_line_per_symbol(
         "--config",
         str(CONFIG_DIR),
     )
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
     assert _call_log == [(["AAPL", "MSFT"], date(2026, 10, 1), date(2026, 10, 10))]
-    assert "AAPL: 2 row(s) 2026-10-01..2026-10-02" in result.output  # type: ignore[attr-defined]
-    assert "MSFT: 1 row(s) 2026-10-01..2026-10-01" in result.output  # type: ignore[attr-defined]
-    assert "prices: 3 row(s) for 2 of 2 symbol(s)" in result.output  # type: ignore[attr-defined]
+    assert "AAPL: 2 row(s) 2026-10-01..2026-10-02" in result.output
+    assert "MSFT: 1 row(s) 2026-10-01..2026-10-01" in result.output
+    assert "prices: 3 row(s) for 2 of 2 symbol(s)" in result.output
 
 
 def test_event_study_rejects_a_bad_window() -> None:
@@ -272,15 +273,15 @@ def test_event_study_rejects_a_bad_window() -> None:
             "--window",
             window,
         )
-        assert result.exit_code == 2, (window, result.output)  # type: ignore[attr-defined]
-        assert "window" in result.output  # type: ignore[attr-defined]
+        assert result.exit_code == 2, (window, result.output)
+        assert "window" in result.output
 
 
 def test_event_study_rejects_a_min_weight_outside_zero_one() -> None:
     for value in ("0", "1.5", "-0.01"):
         result = _run("event-study", "--db", "missing.duckdb", "--min-weight", value)
-        assert result.exit_code == 2, (value, result.output)  # type: ignore[attr-defined]
-        assert "--min-weight must be a fraction in (0, 1]" in result.output  # type: ignore[attr-defined]
+        assert result.exit_code == 2, (value, result.output)
+        assert "--min-weight must be a fraction in (0, 1]" in result.output
 
 
 def test_event_study_needs_a_database(tmp_path: Path) -> None:
@@ -291,8 +292,8 @@ def test_event_study_needs_a_database(tmp_path: Path) -> None:
         "--source",
         "synthetic",
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "error: database not found" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "error: database not found" in result.output
 
 
 def test_event_study_from_tiingo_without_a_key_exits_2(
@@ -313,8 +314,8 @@ def test_event_study_from_tiingo_without_a_key_exits_2(
         "--config",
         str(CONFIG_DIR),
     )
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "TIINGO_API_KEY is not set" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "TIINGO_API_KEY is not set" in result.output
     assert not (tmp_path / "out").exists()
 
 
@@ -348,19 +349,19 @@ def test_a_raw_store_with_a_price_response_builds_reports_and_parses_clean(
     )
     out = tmp_path / "build"
     built = _run("build", "--raw", str(store), "--out", str(out), "--config", str(CONFIG_DIR))
-    assert built.exit_code == 0, built.output  # type: ignore[attr-defined]
-    assert "file versions 15 (13 included, 2 excluded)" in built.output  # type: ignore[attr-defined]
+    assert built.exit_code == 0, built.output
+    assert "file versions 15 (13 included, 2 excluded)" in built.output
 
     report = _run("qa", "--db", str(out / "etfh.duckdb"))
-    assert report.exit_code == 0, report.output  # type: ignore[attr-defined]
-    assert "files: 15 total (13 included, 2 excluded)" in report.output  # type: ignore[attr-defined]
+    assert report.exit_code == 0, report.output
+    assert "files: 15 total (13 included, 2 excluded)" in report.output
 
     parsed = _run("parse", "--raw", str(store), "--out", str(out / "parsed"))
-    assert parsed.exit_code == 0, parsed.output  # type: ignore[attr-defined]
-    assert "failed" in parsed.output  # type: ignore[attr-defined]
-    assert "0 failed" in parsed.output  # type: ignore[attr-defined]
-    assert "no parser" not in parsed.output  # type: ignore[attr-defined]
-    assert "tiingo" not in parsed.output  # type: ignore[attr-defined]
+    assert parsed.exit_code == 0, parsed.output
+    assert "failed" in parsed.output
+    assert "0 failed" in parsed.output
+    assert "no parser" not in parsed.output
+    assert "tiingo" not in parsed.output
 
 
 def test_verify_raw_reports_every_problem_and_exits_1(tmp_path: Path) -> None:
@@ -372,38 +373,38 @@ def test_verify_raw_reports_every_problem_and_exits_1(tmp_path: Path) -> None:
     orphan.write_text("{}", encoding="utf-8")
 
     result = _run("verify-raw", "--raw", str(store))
-    assert result.exit_code == 1, result.output  # type: ignore[attr-defined]
-    assert "sha_mismatch" in result.output  # type: ignore[attr-defined]
-    assert "orphan_sidecar" in result.output  # type: ignore[attr-defined]
-    assert "problem(s)" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 1, result.output
+    assert "sha_mismatch" in result.output
+    assert "orphan_sidecar" in result.output
+    assert "problem(s)" in result.output
 
 
 def test_verify_raw_on_a_missing_directory_exits_2(tmp_path: Path) -> None:
     result = _run("verify-raw", "--raw", str(tmp_path / "nope"))
-    assert result.exit_code == 2, result.output  # type: ignore[attr-defined]
-    assert "error:" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 2, result.output
+    assert "error:" in result.output
 
 
 def test_sync_raw_never_overwrites_a_conflicting_file(tmp_path: Path) -> None:
     destination = tmp_path / "copy"
-    assert _run("sync-raw", "--from", str(RAW_ROOT), "--to", str(destination)).exit_code == 0  # type: ignore[attr-defined]
+    assert _run("sync-raw", "--from", str(RAW_ROOT), "--to", str(destination)).exit_code == 0
     victim = sorted(path for path in destination.rglob("*.csv"))[0]
     original = victim.read_bytes()
     victim.write_bytes(original + b"\n")
 
     result = _run("sync-raw", "--from", str(RAW_ROOT), "--to", str(destination))
-    assert result.exit_code == 1, result.output  # type: ignore[attr-defined]
-    assert "conflict:" in result.output  # type: ignore[attr-defined]
-    assert "not overwritten" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 1, result.output
+    assert "conflict:" in result.output
+    assert "not overwritten" in result.output
     assert victim.read_bytes() == original + b"\n"
 
 
 def test_sync_raw_dry_run_writes_nothing(tmp_path: Path) -> None:
     destination = tmp_path / "dry"
     result = _run("sync-raw", "--from", str(RAW_ROOT), "--to", str(destination), "--dry-run")
-    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
-    assert "15 copied" in result.output  # type: ignore[attr-defined]
-    assert "dry run: nothing written" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 0, result.output
+    assert "15 copied" in result.output
+    assert "dry run: nothing written" in result.output
     assert not destination.exists()
 
 
@@ -412,6 +413,6 @@ def test_sync_raw_refuses_an_unclean_source(tmp_path: Path) -> None:
     shutil.copytree(RAW_ROOT, source)
     sorted(source.rglob("*.csv"))[0].write_bytes(b"corrupted")
     result = _run("sync-raw", "--from", str(source), "--to", str(tmp_path / "dst"))
-    assert result.exit_code == 1, result.output  # type: ignore[attr-defined]
-    assert "problem(s)" in result.output  # type: ignore[attr-defined]
+    assert result.exit_code == 1, result.output
+    assert "problem(s)" in result.output
     assert not (tmp_path / "dst").exists()

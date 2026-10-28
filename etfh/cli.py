@@ -64,6 +64,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -665,7 +666,13 @@ def weekly(
         week_ends = [newest - timedelta(days=7 * index) for index in range(weeks)]
         documents = []
         for end in week_ends:
-            document = build_digest(connection, end, public=public, sources=sources, funds=funds)
+            try:
+                document = build_digest(
+                    connection, end, public=public, sources=sources, funds=funds
+                )
+            except duckdb.Error as error:
+                typer.echo(f"error: cannot read the database: {error}", err=True)
+                raise typer.Exit(code=1) from None
             document["demo"] = demo
             try:
                 validate_digest(document)
@@ -776,7 +783,7 @@ def prices_fetch(
         typer.echo(f"{symbol}: {rows.height} row(s) {days[0].isoformat()}..{days[-1].isoformat()}")
     typer.echo(
         f"prices: {frame.height} row(s) for {frame['symbol'].n_unique()} of "
-        f"{len(wanted)} symbol(s); stored under {Path(raw)}"
+        f"{len(wanted)} symbol(s); raw store {Path(raw)}"
     )
 
 
@@ -853,20 +860,10 @@ def event_study(
         resolve_symbol = symbol_for
 
     try:
-        if isinstance(prices, TiingoPrices):
-            with prices:
-                result = run_event_study(
-                    events,
-                    prices,
-                    symbol_for=resolve_symbol,
-                    benchmark=benchmark,
-                    window=(low, high),
-                    model=model,
-                )
-        else:
+        with nullcontext(prices) as price_source:
             result = run_event_study(
                 events,
-                prices,
+                price_source,
                 symbol_for=resolve_symbol,
                 benchmark=benchmark,
                 window=(low, high),
@@ -895,7 +892,11 @@ def event_study(
 def verify_raw(
     raw: Annotated[Path, typer.Option("--raw", help="raw store directory")] = Path("raw"),
 ) -> None:
-    """Check every raw file against its sidecar (interfaces wave 08 §2)."""
+    """Check every raw file against its sidecar (interfaces wave 08 §2).
+
+    Every problem is reported, one line each, and the command exits 1 when there
+    is at least one; a missing directory is a usage error and exits 2.
+    """
     try:
         report = verify_raw_store(raw)
     except OSError as error:
@@ -1185,10 +1186,10 @@ def _gate_price_source(source: Source | None) -> bool:
     """Apply the terms/unsupported/synthetic gate to ``tiingo_prices`` (D3).
 
     Mirrors :func:`_gate_source` line for line, but a price fetch is keyed by a
-    ticker symbol rather than a fund in ``funds.csv``, so the label is
-    ``symbol=`` and the argument is the source id itself.
+    ticker symbol rather than a fund in ``funds.csv``, so the label names the
+    source only. Returns True only when the source may be contacted.
     """
-    label = f"source={_PRICE_SOURCE_ID} fund={_PRICE_SOURCE_ID}"
+    label = f"source={_PRICE_SOURCE_ID}"
     if source is None:
         typer.echo(f"error {label}: unknown source", err=True)
         return False
