@@ -408,6 +408,32 @@ sources:
       reviewed_on: 2026-10-17
       decision: not_allowed
 
+  - id: tiingo_prices
+    issuer: tiingo
+    kind: prices
+    format: json
+    url_patterns:
+      - "https://api.tiingo.com/tiingo/daily/<TICKER>/prices?startDate=<YYYY-MM-DD>&endDate=<YYYY-MM-DD>&format=json"
+    update_frequency: daily
+    supported: true
+    notes: >-
+      US-listed daily closes (adjusted for splits and dividends) for the event
+      study (FR-3.2). Not a holdings source: no fund lists it in funds.csv, and
+      the holdings build, `etfh collect` and `collect-aum` never fetch it. Key
+      from TIINGO_API_KEY, sent only as an Authorization header; raw responses
+      live in the raw store and stay out of git (D78/D84).
+    terms:
+      url: "https://www.tiingo.com/tos"
+      reviewer: Moksh Siruvani
+      reviewed_on: 2026-10-28
+      decision: allowed_with_conditions
+      redistribution_allowed: false
+      conditions:
+        - "internal research use only (free-plan licence)"
+        - "raw prices never committed, published or redistributed; only aggregate event-study statistics may be shown"
+        - "stay within free-plan limits: 50 requests/hour, 1,000/day, 500 unique symbols/month"
+        - "API key from TIINGO_API_KEY, never logged or stored"
+
   # Synthetic sources used by tests and fixtures. No network requests are ever
   # made for these; the URL scheme is synthetic://.
   - id: syn_csv

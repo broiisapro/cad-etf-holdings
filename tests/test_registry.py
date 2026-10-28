@@ -41,6 +41,7 @@ ALLOWED_REAL_SOURCES = {
     "purpose_metrics",
     "bmo_metrics",
     "evolve_metrics",
+    "tiingo_prices",
 }
 UNSUPPORTED_REAL_SOURCES = {
     "vanguard_ca_metrics",
@@ -63,10 +64,20 @@ METRICS_REAL_SOURCES = {
     "vanguard_ca_metrics",
     "globalx_ca_metrics",
 }
+PRICES_REAL_SOURCES = {"tiingo_prices"}
 COMMON_CONDITIONS = [
     "internal research use only",
     "no redistribution of raw holdings",
     "polite rate limit and identifiable User-Agent",
+]
+PRICE_CONDITIONS = [
+    "internal research use only (free-plan licence)",
+    (
+        "raw prices never committed, published or redistributed; "
+        "only aggregate event-study statistics may be shown"
+    ),
+    "stay within free-plan limits: 50 requests/hour, 1,000/day, 500 unique symbols/month",
+    "API key from TIINGO_API_KEY, never logged or stored",
 ]
 
 
@@ -268,7 +279,7 @@ class TestFundsForSource:
 class TestCommittedConfig:
     def test_sources_load_with_recorded_decisions(self) -> None:
         sources = load_sources(CONFIG_DIR / "sources.yaml")
-        assert len(sources) == 26
+        assert len(sources) == 27
         real = {
             source_id: source
             for source_id, source in sources.items()
@@ -279,9 +290,12 @@ class TestCommittedConfig:
         )
         for source_id, source in real.items():
             assert source.terms.reviewer == "Moksh Siruvani", source_id
-            expected_reviewed_on = (
-                date(2026, 10, 23) if source_id in METRICS_REAL_SOURCES else date(2026, 10, 17)
-            )
+            if source_id in METRICS_REAL_SOURCES:
+                expected_reviewed_on = date(2026, 10, 23)
+            elif source_id in PRICES_REAL_SOURCES:
+                expected_reviewed_on = date(2026, 10, 28)
+            else:
+                expected_reviewed_on = date(2026, 10, 17)
             assert source.terms.reviewed_on == expected_reviewed_on, source_id
             assert source.terms.url, source_id
             if source_id in NOT_ALLOWED_REAL_SOURCES:
@@ -290,9 +304,12 @@ class TestCommittedConfig:
                 assert not is_collectable(source), source_id
                 continue
             assert source.terms.decision is Decision.allowed_with_conditions, source_id
+            expected_conditions = (
+                PRICE_CONDITIONS if source_id in PRICES_REAL_SOURCES else COMMON_CONDITIONS
+            )
             missing = [
                 condition
-                for condition in COMMON_CONDITIONS
+                for condition in expected_conditions
                 if condition not in source.terms.conditions
             ]
             assert missing == [], source_id
