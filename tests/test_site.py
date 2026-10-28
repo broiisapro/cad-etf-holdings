@@ -328,6 +328,24 @@ def test_single_week_site_has_no_pager(tmp_path: Path) -> None:
     assert len(root.findall(f"{ATOM}entry")) == 1
 
 
+def test_custom_site_title_is_escaped_everywhere(tmp_path: Path) -> None:
+    render_site(load_digests(), tmp_path, site_title="Digest <weekly>")
+    index = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert "<title>Digest &lt;weekly&gt;</title>" in index
+    assert ">Digest &lt;weekly&gt;</a>" in index
+    feed = (tmp_path / "feed.xml").read_text(encoding="utf-8")
+    assert "<title>Digest &lt;weekly&gt;</title>" in feed
+
+
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_base_url_trailing_slash_does_not_matter(tmp_path: Path, suffix: str) -> None:
+    render_site(load_digests(), tmp_path, base_url="https://example.test/digest" + suffix)
+    root = ET.fromstring((tmp_path / "feed.xml").read_text(encoding="utf-8"))
+    assert root.findtext(f"{ATOM}id") == "https://example.test/digest/feed.xml"
+    index = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert 'href="https://example.test/digest/"' in index
+
+
 def test_base_url_drives_ids_and_canonical_links(tmp_path: Path) -> None:
     base = "https://example.test/digest"
     render_site(load_digests(), tmp_path, base_url=base + "/")
