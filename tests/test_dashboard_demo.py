@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import subprocess
+import sys
+import tempfile
 import tomllib
 from datetime import date
 from pathlib import Path
@@ -112,6 +115,86 @@ def test_cloud_entrypoint_forces_demo_mode(monkeypatch: pytest.MonkeyPatch, tmp_
     assert app.info[0].value.startswith("Demo data — synthetic funds")
     assert app.selectbox(key="fund").options == ["SYNA", "SYNB", "SYNE", "SYNF"]
     assert not app.error
+
+
+CLEAN_IMPORT_SCRIPT = """
+import os
+import socket
+import sys
+import tempfile
+from pathlib import Path
+
+def blocked(*args, **kwargs):
+    raise AssertionError("the demo entry point attempted network access")
+
+socket.socket.connect = blocked
+socket.create_connection = blocked
+
+import streamlit
+from etfh.dashboard import demo
+
+seen = {}
+original = demo.demo_database
+
+
+def recording():
+    store = original()
+    seen["db"] = str(store.db_path)
+    return store
+
+
+demo.demo_database = recording
+messages = []
+streamlit.info = lambda body, *args, **kwargs: messages.append(str(body))
+
+sys.argv = ["streamlit", "run", "streamlit_app.py"]
+import streamlit_app  # the entry point runs on import
+
+db = seen.get("db", "none")
+print("demo_db=" + db)
+print("built=" + ("yes" if db != "none" and Path(db).is_file() else "no"))
+print("same_as_etfh_db=" + ("yes" if db == os.environ.get("ETFH_DB") else "no"))
+print("banner=" + ("yes" if any(m.startswith("Demo data") for m in messages) else "no"))
+"""
+"""Import ``streamlit_app`` in a bare interpreter with no demo environment.
+
+Community Cloud starts the app from the repository root with nothing but the
+locked environment installed, so the entry point has to work on its own: it must
+force demo mode, must not read ``ETFH_DB`` (a real store is never opened) and
+must not reach the network while it builds the synthetic store.
+"""
+
+
+def test_cloud_entrypoint_imports_cleanly_in_a_clean_process(tmp_path: Path) -> None:
+    real_store = tmp_path / "real-store.duckdb"
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "PYTHONPATH": str(REPO_ROOT),
+        "ETFH_DB": str(real_store),
+        "TMPDIR": os.environ.get("TMPDIR", tempfile.gettempdir()),
+        "NO_PROXY": "*",
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", CLEAN_IMPORT_SCRIPT],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert values["banner"] == "yes"
+    assert values["built"] == "yes"
+    assert values["same_as_etfh_db"] == "no"
+    assert Path(values["demo_db"]).name == "etfh.duckdb"
+    assert Path(values["demo_db"]).parent.name.startswith("etfh-demo-")
+    assert not real_store.exists(), "the entry point touched ETFH_DB"
 
 
 def test_community_cloud_finds_the_uv_lock() -> None:
