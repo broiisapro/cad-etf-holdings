@@ -30,6 +30,7 @@ class SourceKind(StrEnum):
     daily_holdings = "daily_holdings"
     quarterly_disclosure = "quarterly_disclosure"
     fund_metrics = "fund_metrics"
+    prices = "prices"
     synthetic = "synthetic"
 
 
