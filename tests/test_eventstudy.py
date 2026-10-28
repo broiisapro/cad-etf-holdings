@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 import pytest
 
-from etfh.eventstudy import run_event_study
+from etfh.eventstudy import SKIP_REASONS, run_event_study
 
 PRICE_SCHEMA: dict[str, Any] = {
     "symbol": pl.String,
@@ -301,3 +301,140 @@ def test_duplicate_symbol_and_day_count_once_and_keep_the_first_fund() -> None:
     assert result.summary["skipped"]["duplicate"] == 1
     assert result.per_event["fund_ticker"].to_list() == ["FNDA", "FNDC"]
     assert "duplicate" in result.summary["notes"][0]
+
+
+# --------------------------------------------------------------------------- #
+# Skip reasons
+# --------------------------------------------------------------------------- #
+
+
+def test_events_without_a_symbol_are_skipped() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "AAA": (days, _symbol_path(days, benchmark_returns, shocks={index: 0.02})),
+        }
+    )
+    events = _events(
+        _event("FNDA", "TKR:XTSE:NOPE", days[index]),
+        _event("FNDB", "ISIN:AAA", days[index]),
+    )
+    result = run_event_study(events, FakePrices(frame), symbol_for=_mapper({"ISIN:AAA": "AAA"}))
+    assert result.summary["n_used"] == 1
+    assert result.summary["skipped"]["no_symbol"] == 1
+
+
+def test_symbols_without_prices_are_skipped() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    path = _symbol_path(days, benchmark_returns, shocks={index: 0.02})
+    frame = _prices({"SPY": (days, benchmark_closes), "AAA": (days, path)})
+    events = _events(
+        _event("FNDA", "ISIN:AAA", days[index]),
+        _event("FNDB", "ISIN:ABSENT", days[index]),
+    )
+    result = run_event_study(
+        events,
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA", "ISIN:ABSENT": "ABSENT"}),
+    )
+    assert result.summary["n_used"] == 1
+    assert result.summary["skipped"]["no_prices"] == 1
+
+
+def test_short_price_history_is_skipped_as_short_estimation() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _noisy_benchmark(days)
+    index = 150
+    path = _symbol_path(days, benchmark_returns, beta=1.0, shocks={index: 0.02})
+    short_days = days[index - 20 :]
+    short_closes = path[index - 20 :]
+    frame = _prices({"SPY": (days, benchmark_closes), "AAA": (short_days, short_closes)})
+    result = run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", days[index])),
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+        model="market_model",
+    )
+    assert result.summary["n_used"] == 0
+    assert result.summary["skipped"]["short_estimation"] == 1
+
+
+def test_windows_that_run_past_the_grid_are_skipped() -> None:
+    days = _days()
+    _, benchmark_closes = _flat_benchmark(days)
+    frame = _prices({"SPY": (days, benchmark_closes)})
+    result = run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", days[-2])),
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+    )
+    assert result.summary["n_used"] == 0
+    assert result.summary["skipped"]["window_incomplete"] == 1
+    assert all(stats["n"] == 0 for stats in result.summary["windows"].values())
+
+
+def test_events_far_beyond_the_benchmark_are_skipped() -> None:
+    days = _days()
+    _, benchmark_closes = _flat_benchmark(days)
+    frame = _prices({"SPY": (days, benchmark_closes)})
+    result = run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", days[-1] + timedelta(days=90))),
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+    )
+    assert result.summary["skipped"]["window_incomplete"] == 1
+
+
+def test_every_skip_reason_is_counted_with_a_zero_baseline() -> None:
+    result = run_event_study(
+        _events(), FakePrices(pl.DataFrame(schema=PRICE_SCHEMA)), symbol_for=_mapper({})
+    )
+    assert tuple(result.summary["skipped"]) == SKIP_REASONS
+    assert all(count == 0 for count in result.summary["skipped"].values())
+
+
+def test_used_and_skipped_events_add_up_to_the_input() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _noisy_benchmark(days)
+    index = 150
+    known = days[index]
+    good = _symbol_path(days, benchmark_returns, beta=1.0, shocks={index: 0.02})
+    short_days = days[index - 20 :]
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "AAA": (days, good),
+            "SHORT": (short_days, _symbol_path(days, benchmark_returns, beta=1.0)[index - 20 :]),
+        }
+    )
+    events = _events(
+        _event("FNDA", "ISIN:GOOD", known),
+        _event("FNDB", "ISIN:GOOD", known),
+        _event("FNDC", "TKR:XTSE:NONE", known),
+        _event("FNDD", "ISIN:ABSENT", known),
+        _event("FNDE", "ISIN:GOOD", days[-2]),
+        _event("FNDF", "ISIN:SHORT", known),
+        _event("FNDG", "ISIN:GOOD", None),
+    )
+    mapping = {"ISIN:GOOD": "AAA", "ISIN:ABSENT": "ABSENT", "ISIN:SHORT": "SHORT"}
+    result = run_event_study(
+        events,
+        FakePrices(frame),
+        symbol_for=_mapper(mapping),
+        model="market_model",
+    )
+    assert result.summary["n_events"] == 7
+    assert result.summary["n_used"] == 1
+    assert result.summary["skipped"] == {
+        "no_symbol": 1,
+        "no_prices": 1,
+        "short_estimation": 1,
+        "window_incomplete": 2,
+        "duplicate": 1,
+    }
+    assert sum(result.summary["skipped"].values()) + result.summary["n_used"] == 7
