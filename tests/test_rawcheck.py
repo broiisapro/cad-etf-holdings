@@ -1,13 +1,19 @@
-"""Tests for raw-store verification."""
+"""Tests for raw-store verification and safe sync."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from etfh.rawcheck import RawCheckReport, RawProblem, verify_raw_store
+from etfh.rawcheck import (
+    RawCheckReport,
+    RawProblem,
+    sync_raw_store,
+    verify_raw_store,
+)
 from etfh.storage import RawStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -221,3 +227,137 @@ def test_reports_every_problem_without_stopping(tmp_path: Path) -> None:
 def test_missing_root_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="not a directory"):
         verify_raw_store(tmp_path / "missing")
+
+
+def test_sync_copies_pairs_into_empty_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    store = RawStore(source)
+    first = _write(store)
+    second = _write(
+        store,
+        content=b"ticker,weight\nSHOP,0.03\n",
+        fund_ticker="SYNB",
+        fetched_at=FETCHED + timedelta(hours=1),
+    )
+
+    report = sync_raw_store(source, destination)
+
+    expected = {
+        first.relative_to(source).as_posix(),
+        second.relative_to(source).as_posix(),
+    }
+    assert report.copied == tuple(sorted(expected))
+    assert report.identical == 0
+    assert report.conflicts == ()
+    assert report.ok
+    assert verify_raw_store(destination).ok
+    assert _relative_files(destination) == _relative_files(source)
+    assert (destination / "synthetic/SYNA/2026-10-29/20261029T220000Z.csv").read_bytes() == CONTENT
+
+
+def test_sync_skips_identical_files(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write(RawStore(source))
+    sync_raw_store(source, destination)
+
+    report = sync_raw_store(source, destination)
+
+    assert report.copied == ()
+    assert report.identical == 1
+    assert report.conflicts == ()
+    assert report.ok
+
+
+def test_sync_reports_conflict_without_overwriting(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    data = _write(RawStore(source))
+    relative = data.relative_to(source)
+    target = destination / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"different bytes")
+    sidecar = target.with_name("20261029T220000Z.meta.json")
+    sidecar.write_text("{}", encoding="utf-8")
+
+    report = sync_raw_store(source, destination)
+
+    assert report.copied == ()
+    assert report.identical == 0
+    assert report.conflicts == (relative.as_posix(),)
+    assert not report.ok
+    assert target.read_bytes() == b"different bytes"
+    assert sidecar.read_text(encoding="utf-8") == "{}"
+
+
+def test_sync_conflicts_when_only_the_sidecar_differs(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    data = _write(RawStore(source))
+    relative = data.relative_to(source)
+    sync_raw_store(source, destination)
+    target = destination / relative
+    before = target.read_bytes()
+    sidecar = target.with_name("20261029T220000Z.meta.json")
+    sidecar.write_text(json.dumps({"sha256": "0" * 64}), encoding="utf-8")
+
+    report = sync_raw_store(source, destination)
+
+    assert report.conflicts == (relative.as_posix(),)
+    assert report.copied == ()
+    assert target.read_bytes() == before
+
+
+def test_sync_completes_a_pair_missing_its_sidecar(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    data = _write(RawStore(source))
+    relative = data.relative_to(source)
+    target = destination / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(CONTENT)
+
+    report = sync_raw_store(source, destination)
+
+    assert report.copied == (relative.as_posix(),)
+    assert verify_raw_store(destination).ok
+
+
+def test_sync_of_an_empty_store_creates_an_empty_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+
+    report = sync_raw_store(source, destination)
+
+    assert report.copied == ()
+    assert report.identical == 0
+    assert report.conflicts == ()
+    assert destination.is_dir()
+    assert verify_raw_store(destination).ok
+
+
+def test_sync_dry_run_writes_nothing(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write(RawStore(source))
+
+    report = sync_raw_store(source, destination, dry_run=True)
+
+    assert report.copied == ("synthetic/SYNA/2026-10-29/20261029T220000Z.csv",)
+    assert report.identical == 0
+    assert report.ok
+    assert not destination.exists()
+
+
+def test_sync_refuses_a_broken_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    data = _write(RawStore(source))
+    data.with_name("20261029T220000Z.meta.json").unlink()
+
+    with pytest.raises(ValueError, match="1 problem"):
+        sync_raw_store(source, destination)
+
+    assert not destination.exists()
