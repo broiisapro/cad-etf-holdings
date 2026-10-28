@@ -6,15 +6,23 @@ another issue of the same wave and cannot be imported here.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import polars as pl
 import pytest
 
-from etfh.eventstudy import SKIP_REASONS, EventStudyResult, run_event_study
+from etfh.eventstudy import (
+    EVENT_COLUMNS,
+    SKIP_REASONS,
+    EventStudyResult,
+    run_event_study,
+    write_outputs,
+)
 
 PRICE_SCHEMA: dict[str, Any] = {
     "symbol": pl.String,
@@ -540,3 +548,204 @@ def test_only_sub_windows_inside_the_requested_window_are_reported() -> None:
     assert row["car_0_1"] == pytest.approx(0.02, abs=1e-12)
     assert row["car_m1_1"] is None
     assert row["car_0_5"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Empty and invalid inputs
+# --------------------------------------------------------------------------- #
+
+
+def test_empty_events_give_a_valid_empty_result_without_fetching() -> None:
+    prices = FakePrices(pl.DataFrame(schema=PRICE_SCHEMA))
+    result = run_event_study(_events(), prices, symbol_for=_mapper({}))
+    assert prices.calls == []
+    assert result.summary["label"] == "exploratory"
+    assert result.summary["n_events"] == 0
+    assert result.summary["n_used"] == 0
+    assert set(result.summary["windows"]) == {"[-1,1]", "[0,1]", "[0,5]", "[-5,5]"}
+    assert all(stats["n"] == 0 for stats in result.summary["windows"].values())
+    assert all(stats["mean_car"] is None for stats in result.summary["windows"].values())
+    assert result.per_event.height == 0
+    assert result.per_event.columns == list(
+        [
+            "fund_ticker",
+            "security_id",
+            "security_name",
+            "security_ticker",
+            "exchange",
+            "event_type",
+            "portfolio_date",
+            "known_date",
+            "event_day",
+            "symbol",
+            "estimation_days",
+            "alpha",
+            "beta",
+            "car_m1_1",
+            "car_0_1",
+            "car_0_5",
+            "car_m5_5",
+        ]
+    )
+    assert result.car_by_day.height == 0
+    assert result.car_by_day.columns == ["relative_day", "mean_ar", "mean_car", "n"]
+    assert json.dumps(result.to_public_json()) == json.dumps(result.to_public_json())
+
+
+def test_missing_benchmark_is_an_error_not_a_skip() -> None:
+    days = _days()
+    benchmark_returns, _ = _flat_benchmark(days)
+    frame = _prices({"AAA": (days, _symbol_path(days, benchmark_returns, shocks={150: 0.01}))})
+    with pytest.raises(ValueError, match="benchmark"):
+        run_event_study(
+            _events(_event("FNDA", "ISIN:AAA", days[150])),
+            FakePrices(frame),
+            symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+        )
+
+
+def test_a_benchmark_without_usable_closes_is_an_error() -> None:
+    days = _days()
+    frame = _prices({"SPY": (days, [0.0] * len(days))})
+    with pytest.raises(ValueError, match="usable"):
+        run_event_study(
+            _events(_event("FNDA", "ISIN:AAA", days[150])),
+            FakePrices(frame),
+            symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+        )
+
+
+def test_an_unusable_close_is_missing_price_data_not_a_crash() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    path = _symbol_path(days, benchmark_returns, shocks={index: 0.02})
+    path[index] = 0.0
+    frame = _prices({"SPY": (days, benchmark_closes), "AAA": (days, path)})
+    result = run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", days[index])),
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+    )
+    assert result.summary["n_used"] == 0
+    assert result.summary["skipped"]["no_prices"] == 1
+
+
+def test_missing_event_columns_are_rejected() -> None:
+    frame = pl.DataFrame({"fund_ticker": ["FNDA"]})
+    with pytest.raises(ValueError, match="missing columns"):
+        run_event_study(
+            frame, FakePrices(pl.DataFrame(schema=PRICE_SCHEMA)), symbol_for=_mapper({})
+        )
+
+
+def test_estimate_must_precede_the_event_window() -> None:
+    with pytest.raises(ValueError, match="estimation"):
+        run_event_study(
+            _events(),
+            FakePrices(pl.DataFrame(schema=PRICE_SCHEMA)),
+            symbol_for=_mapper({}),
+            window=(-5, 5),
+            estimation=(-120, -5),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Output files and the public/internal split
+# --------------------------------------------------------------------------- #
+
+
+def test_write_outputs_names_the_files_and_keeps_identifiers_internal(
+    tmp_path: Path,
+) -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "ZZZ": (days, _symbol_path(days, benchmark_returns, shocks={index: 0.02})),
+        }
+    )
+    events = _events(
+        _event(
+            "FNDZZ",
+            "ISIN:CA0000000001",
+            days[index],
+            name="Zeta Fictional Mining",
+            ticker="ZZZ",
+        )
+    )
+    result = run_event_study(
+        events, FakePrices(frame), symbol_for=_mapper({"ISIN:CA0000000001": "ZZZ"})
+    )
+    written = write_outputs(result, tmp_path / "study")
+
+    assert [path.name for path in written] == [
+        "car_by_day.csv",
+        "per_event.internal.csv",
+        "summary.json",
+    ]
+    assert all(path.exists() for path in written)
+
+    public_text = (tmp_path / "study" / "summary.json").read_text(encoding="utf-8")
+    car_text = (tmp_path / "study" / "car_by_day.csv").read_text(encoding="utf-8")
+    internal_text = (tmp_path / "study" / "per_event.internal.csv").read_text(encoding="utf-8")
+    for identifier in ("FNDZZ", "CA0000000001", "Zeta Fictional Mining", "ZZZ"):
+        assert identifier not in public_text
+        assert identifier not in car_text
+        assert identifier in internal_text
+
+    document = json.loads(public_text)
+    assert document["label"] == "exploratory"
+    assert document["benchmark"] == "SPY"
+    assert document["n_used"] == 1
+    assert document == result.to_public_json()
+    assert list(document["skipped"]) == sorted(SKIP_REASONS)
+
+
+def test_to_public_json_contains_no_identifiers() -> None:
+    result = _varied_result()
+    text = json.dumps(result.to_public_json(), sort_keys=True)
+    assert "ISIN:" not in text
+    assert "FNDA" not in text
+    assert "event_day" not in text
+    for identifier in result.per_event["security_name"].to_list():
+        assert identifier not in text
+
+
+def test_events_contract_columns_are_the_documented_ones() -> None:
+    assert EVENT_COLUMNS == (
+        "fund_ticker",
+        "security_id",
+        "security_name",
+        "security_ticker",
+        "exchange",
+        "event_type",
+        "portfolio_date",
+        "known_date",
+    )
+
+
+def test_fetch_range_covers_estimation_and_the_forward_window() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    known = days[index]
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "AAA": (days, _symbol_path(days, benchmark_returns, shocks={index: 0.02})),
+        }
+    )
+    prices = FakePrices(frame)
+    run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", known)),
+        prices,
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+    )
+    symbols, start, end = prices.calls[0]
+    assert symbols == ("AAA", "SPY")
+    assert start <= known - timedelta(days=190)
+    assert end >= known + timedelta(days=10)
+    assert _day_index(days, known) == index
