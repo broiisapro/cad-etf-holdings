@@ -1,0 +1,174 @@
+{
+  "demo": false,
+  "funds": [
+    {
+      "changes": [
+        {
+          "change_type": "weight_change",
+          "delta": -0.0375,
+          "security_id": "ISIN:CA600014AA27",
+          "security_name": "Oakhurst Insurance Group",
+          "weight_after": 0.021,
+          "weight_before": 0.0585
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.007,
+          "security_id": "ISIN:CA600000AA15",
+          "security_name": "Northwind Materials Inc.",
+          "weight_after": 0.046,
+          "weight_before": 0.053
+        }
+      ],
+      "counts": {
+        "adds": 0,
+        "drops": 0,
+        "weight_changes": 2
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "Δshares × NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Aurora Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": "2026-10-29",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNA",
+      "top10_weight_end": 0.6086,
+      "top10_weight_start": 0.6269,
+      "turnover": 0.02225
+    },
+    {
+      "changes": [
+        {
+          "change_type": "weight_change",
+          "delta": -0.0205,
+          "security_id": "ISIN:CA600000AA15",
+          "security_name": "Northwind Materials Inc.",
+          "weight_after": 0.043,
+          "weight_before": 0.0635
+        }
+      ],
+      "counts": {
+        "adds": 0,
+        "drops": 0,
+        "weight_changes": 1
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "Δshares × NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Borealis Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": "2026-10-29",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNB",
+      "top10_weight_end": 0.6796,
+      "top10_weight_start": 0.7001,
+      "turnover": 0.01025
+    },
+    {
+      "changes": [
+        {
+          "change_type": "weight_change",
+          "delta": 0.0198,
+          "security_id": "ISIN:CA600000AA15",
+          "security_name": "Northwind Materials Inc.",
+          "weight_after": 0.052,
+          "weight_before": 0.0322
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0012,
+          "security_id": "ISIN:CA600002AA70",
+          "security_name": "Cedarline Energy Corp.",
+          "weight_after": 0.038,
+          "weight_before": 0.0392
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0006,
+          "security_id": "ISIN:CA600025AA81",
+          "security_name": "Brighton Paper Corp.",
+          "weight_after": 0.0751,
+          "weight_before": 0.0757
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0006,
+          "security_id": "ISIN:US200032BA70",
+          "security_name": "Ironwood Devices Inc.",
+          "weight_after": 0.0842,
+          "weight_before": 0.0848
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0006,
+          "security_id": "ISIN:US200033BA53",
+          "security_name": "Juniper Ridge Pharma",
+          "weight_after": 0.0774,
+          "weight_before": 0.078
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0005,
+          "security_id": "ISIN:CA600005AA02",
+          "security_name": "Fairhaven Financial Group",
+          "weight_after": 0.0651,
+          "weight_before": 0.0646
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0005,
+          "security_id": "ISIN:CA600026AA64",
+          "security_name": "Cardinal Freight Ltd.",
+          "weight_after": 0.072,
+          "weight_before": 0.0725
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0005,
+          "security_id": "ISIN:US200037BA67",
+          "security_name": "Norwood Apparel Inc.",
+          "weight_after": 0.0694,
+          "weight_before": 0.0699
+        }
+      ],
+      "counts": {
+        "adds": 0,
+        "drops": 0,
+        "weight_changes": 8
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "Δshares × NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Ember Equity Fund",
+      "portfolio_date_end": "2026-10-30",
+      "portfolio_date_start": "2026-10-29",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNE",
+      "top10_weight_end": 0.6465,
+      "top10_weight_start": 0.6442,
+      "turnover": 0.01405
+    }
+  ],
+  "known_by": "2026-10-31T04:00:00+00:00",
+  "overlap_shifts": [],
+  "public": true,
+  "quality": {
+    "files_excluded": 2,
+    "files_included": 13,
+    "funds_without_data": [
+      "SYNC",
+      "SYND",
+      "SYNF"
+    ]
+  },
+  "schema_version": 1,
+  "week_end": "2026-10-30",
+  "week_start": "2026-10-23"
+}

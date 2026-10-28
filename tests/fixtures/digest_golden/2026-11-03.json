@@ -1,0 +1,326 @@
+{
+  "demo": false,
+  "funds": [
+    {
+      "changes": [
+        {
+          "change_type": "weight_change",
+          "delta": -0.0681,
+          "security_id": "ISIN:CA600005AA02",
+          "security_name": "Fairhaven Financial Group",
+          "weight_after": 0.0001,
+          "weight_before": 0.0682
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0647,
+          "security_id": "TKR:XNYS:FXN",
+          "security_name": "Foxglove Networks Inc.",
+          "weight_after": 0.0001,
+          "weight_before": 0.0648
+        },
+        {
+          "change_type": "add",
+          "delta": 0.0646,
+          "security_id": "TKR:XNYS:LKM",
+          "security_name": "Larkfield Media Inc.",
+          "weight_after": 0.0646,
+          "weight_before": 0.0
+        },
+        {
+          "change_type": "drop",
+          "delta": -0.0612,
+          "security_id": "ISIN:CA600019AA14",
+          "security_name": "Thornbury Retail Group",
+          "weight_after": 0.0,
+          "weight_before": 0.0612
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0528,
+          "security_id": "ISIN:CA600000AA15",
+          "security_name": "Northwind Materials Inc.",
+          "weight_after": 0.0002,
+          "weight_before": 0.053
+        },
+        {
+          "change_type": "drop",
+          "delta": -0.0504,
+          "security_id": "ISIN:CA600017AA57",
+          "security_name": "Riverton Rail Corp.",
+          "weight_after": 0.0,
+          "weight_before": 0.0504
+        },
+        {
+          "change_type": "add",
+          "delta": 0.0479,
+          "security_id": "TKR:XNYS:KSD",
+          "security_name": "Keystone Drilling Corp.",
+          "weight_after": 0.0479,
+          "weight_before": 0.0
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0471,
+          "security_id": "TKR:XNYS:ELM",
+          "security_name": "Elmsworth Capital Corp.",
+          "weight_after": 0.0001,
+          "weight_before": 0.0472
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.043,
+          "security_id": "ISIN:CA600013AA44",
+          "security_name": "Northgate Telecom Corp.",
+          "weight_after": 0.0193,
+          "weight_before": 0.0623
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0392,
+          "security_id": "ISIN:CA600016AA74",
+          "security_name": "Quarrystone Cement Inc.",
+          "weight_after": 0.0385,
+          "weight_before": 0.0777
+        }
+      ],
+      "counts": {
+        "adds": 3,
+        "drops": 4,
+        "weight_changes": 20
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "Δshares × NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Aurora Equity Fund",
+      "portfolio_date_end": "2026-11-03",
+      "portfolio_date_start": "2026-10-29",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNA",
+      "top10_weight_end": 0.5136,
+      "top10_weight_start": 0.6269,
+      "turnover": 0.4116
+    },
+    {
+      "changes": [
+        {
+          "change_type": "weight_change",
+          "delta": -0.0937,
+          "security_id": "TKR:XNYS:ELM",
+          "security_name": "Elmsworth Capital Corp.",
+          "weight_after": 0.0001,
+          "weight_before": 0.0938
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0772,
+          "security_id": "ISIN:CA600005AA02",
+          "security_name": "Fairhaven Financial Group",
+          "weight_after": 0.0001,
+          "weight_before": 0.0773
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0633,
+          "security_id": "ISIN:CA600000AA15",
+          "security_name": "Northwind Materials Inc.",
+          "weight_after": 0.0002,
+          "weight_before": 0.0635
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0598,
+          "security_id": "ISIN:US200030BA15",
+          "security_name": "Granite Peak Resources",
+          "weight_after": 0.0713,
+          "weight_before": 0.0115
+        },
+        {
+          "change_type": "drop",
+          "delta": -0.053,
+          "security_id": "TKR:XNYS:JRX",
+          "security_name": "Juniper Ridge Pharma",
+          "weight_after": 0.0,
+          "weight_before": 0.053
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0472,
+          "security_id": "TKR:XTSE:DVR",
+          "security_name": "Doverdale Textiles Ltd.",
+          "weight_after": 0.0724,
+          "weight_before": 0.0252
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0452,
+          "security_id": "TKR:XTSE:CFR",
+          "security_name": "Cardinal Freight Ltd.",
+          "weight_after": 0.0309,
+          "weight_before": 0.0761
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0413,
+          "security_id": "ISIN:CA600002AA70",
+          "security_name": "Cedarline Energy Corp.",
+          "weight_after": 0.0001,
+          "weight_before": 0.0414
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0409,
+          "security_id": "ISIN:CA600006AA84",
+          "security_name": "Glenora Utilities Inc.",
+          "weight_after": 0.0001,
+          "weight_before": 0.041
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0346,
+          "security_id": "TKR:XNYS:HWX",
+          "security_name": "Highwater Marine Corp.",
+          "weight_after": 0.0526,
+          "weight_before": 0.0872
+        }
+      ],
+      "counts": {
+        "adds": 0,
+        "drops": 1,
+        "weight_changes": 19
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "Δshares × NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Borealis Equity Fund",
+      "portfolio_date_end": "2026-11-02",
+      "portfolio_date_start": "2026-10-29",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNB",
+      "top10_weight_end": 0.5336,
+      "top10_weight_start": 0.7001,
+      "turnover": 0.3633
+    },
+    {
+      "changes": [
+        {
+          "change_type": "weight_change",
+          "delta": 0.0523,
+          "security_id": "ISIN:US200030BA15",
+          "security_name": "Granite Peak Resources",
+          "weight_after": 0.0666,
+          "weight_before": 0.0143
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0523,
+          "security_id": "ISIN:US200033BA53",
+          "security_name": "Juniper Ridge Pharma",
+          "weight_after": 0.0257,
+          "weight_before": 0.078
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0379,
+          "security_id": "ISIN:CA600025AA81",
+          "security_name": "Brighton Paper Corp.",
+          "weight_after": 0.0378,
+          "weight_before": 0.0757
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0365,
+          "security_id": "ISIN:CA600022AA50",
+          "security_name": "Westmount Power Corp.",
+          "weight_after": 0.0643,
+          "weight_before": 0.0278
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0363,
+          "security_id": "ISIN:US200036BA84",
+          "security_name": "Meridian Optics Corp.",
+          "weight_after": 0.0099,
+          "weight_before": 0.0462
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0358,
+          "security_id": "ISIN:US200031BA97",
+          "security_name": "Highwater Marine Corp.",
+          "weight_after": 0.0699,
+          "weight_before": 0.0341
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0343,
+          "security_id": "ISIN:CA600023AA34",
+          "security_name": "Yarrow Biotech Inc.",
+          "weight_after": 0.0689,
+          "weight_before": 0.0346
+        },
+        {
+          "change_type": "weight_change",
+          "delta": 0.0341,
+          "security_id": "ISIN:CA600021AA77",
+          "security_name": "Vermilion Distillers Corp.",
+          "weight_after": 0.0536,
+          "weight_before": 0.0195
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.032,
+          "security_id": "ISIN:US200038BA41",
+          "security_name": "Overland Robotics Corp.",
+          "weight_after": 0.0261,
+          "weight_before": 0.0581
+        },
+        {
+          "change_type": "weight_change",
+          "delta": -0.0295,
+          "security_id": "ISIN:CA600026AA64",
+          "security_name": "Cardinal Freight Ltd.",
+          "weight_after": 0.043,
+          "weight_before": 0.0725
+        }
+      ],
+      "counts": {
+        "adds": 0,
+        "drops": 0,
+        "weight_changes": 21
+      },
+      "flow_days": 0,
+      "flow_estimate_sum": null,
+      "flow_method": "Δshares × NAV (estimate; ignores distributions and in-kind effects)",
+      "issuer": "synthetic",
+      "name": "Synthetic Ember Equity Fund",
+      "portfolio_date_end": "2026-11-02",
+      "portfolio_date_start": "2026-10-29",
+      "securities_disclosed": true,
+      "status": "new_in_window",
+      "ticker": "SYNE",
+      "top10_weight_end": 0.6203,
+      "top10_weight_start": 0.6442,
+      "turnover": 0.27335
+    }
+  ],
+  "known_by": "2026-11-04T05:00:00+00:00",
+  "overlap_shifts": [],
+  "public": true,
+  "quality": {
+    "files_excluded": 2,
+    "files_included": 13,
+    "funds_without_data": [
+      "SYNC",
+      "SYND",
+      "SYNF"
+    ]
+  },
+  "schema_version": 1,
+  "week_end": "2026-11-03",
+  "week_start": "2026-10-27"
+}
