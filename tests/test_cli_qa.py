@@ -10,6 +10,7 @@ name, id, weight value or file path.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -130,13 +131,10 @@ def test_json_asof_carries_the_date_and_point_in_time_numbers(
 
 
 def test_unknown_format_is_a_usage_error(synthetic_build: BuildResult) -> None:
-    result = runner.invoke(
-        app,
-        ["qa", "--db", str(synthetic_build.db_path), "--format", "xml"],
-        env={"COLUMNS": "200"},
-    )
+    result = runner.invoke(app, ["qa", "--db", str(synthetic_build.db_path), "--format", "xml"])
     assert result.exit_code == 2, result.output
-    assert "--format must be one of text, markdown, json" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "Invalid value for" in plain
 
 
 def _threshold_database(tmp_path: Path) -> Path:
