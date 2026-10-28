@@ -18,7 +18,7 @@ def test_schema_and_sort_order() -> None:
     assert frame.columns == ["symbol", "date", "close"]
     assert frame.schema == CLOSE_SCHEMA
     assert frame.sort(["symbol", "date"]).equals(frame)
-    assert frame["symbol"].unique().to_list() == ["AAPL", "SPY"]
+    assert set(frame["symbol"].unique().to_list()) == {"AAPL", "SPY"}
 
 
 def test_only_weekdays_inside_the_range() -> None:
