@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import altair as alt
@@ -22,7 +22,7 @@ from streamlit.delta_generator import DeltaGenerator
 
 from etfh import analytics
 from etfh.build import connect
-from etfh.dashboard import demo, quality
+from etfh.dashboard import demo, quality, weekly
 from etfh.dashboard.format import format_amount, format_number, percent
 
 DEFAULT_DB_PATH = "./build/etfh.duckdb"
@@ -257,6 +257,92 @@ def render_fund(con: duckdb.DuckDBPyConnection, fund: str, asof: date) -> None:
         st.dataframe(changes, width="stretch", hide_index=True)
 
 
+@st.cache_data(show_spinner="Reading the weekly digest…")
+def _cached_digest(
+    db_file: str,
+    db_modified_ns: int,
+    end: date,
+    public: bool,
+    config_dir: str,
+    is_demo: bool,
+) -> dict[str, Any]:
+    """One digest per database revision, week, policy and config directory.
+
+    ``db_modified_ns`` only participates in the cache key, so a rebuilt
+    database is read again while repeated interactions on the same file reuse
+    the document (a real store takes a few seconds to compare every fund pair).
+    """
+    del db_modified_ns
+    return weekly.digest_for_week(
+        Path(db_file),
+        end,
+        public=public,
+        config_dir=Path(config_dir),
+        demo=is_demo,
+    )
+
+
+def render_week(db_file: Path, asof: date, *, demo_mode: bool) -> None:
+    """The weekly digest for the week that contains ``asof`` (FR-3.1, D79).
+
+    Publication policy follows the deployment: the public demo builds a public
+    document, so security-level lines appear only for synthetic funds or for
+    sources that allow redistribution; the local dashboard is internal and
+    shows every fund's lines.
+    """
+    end = weekly.week_end(asof)
+    st.subheader(f"Week ending {end.isoformat()}")
+    public = demo_mode
+    config = demo.DEMO_CONFIG_DIR if demo_mode else weekly.config_dir()
+    try:
+        modified_ns = db_file.stat().st_mtime_ns
+    except OSError:
+        modified_ns = 0
+    try:
+        document = _cached_digest(str(db_file), modified_ns, end, public, str(config), demo_mode)
+    except duckdb.Error as exc:
+        st.caption(
+            f"No weekly digest is available in this database yet: {exc}. "
+            "Build it with `etfh build` and check back."
+        )
+        return
+    except OSError as exc:
+        st.error(f"Could not read the digest configuration ({exc}).")
+        return
+
+    st.caption(
+        f"Week {document['week_start']} to {document['week_end']}; "
+        f"portfolios known by {document['known_by']}."
+    )
+    funds = weekly.fund_table(document)
+    if funds.is_empty():
+        st.caption("No fund has a comparable portfolio for this week yet.")
+        return
+    st.dataframe(funds, width="stretch", hide_index=True)
+
+    st.subheader("Security changes")
+    changes = weekly.changes_table(document)
+    if changes.is_empty():
+        st.caption("No security-level changes are available for this week.")
+    else:
+        st.dataframe(changes, width="stretch", hide_index=True)
+    hidden = weekly.undisclosed_funds(document)
+    if hidden:
+        st.caption(
+            "Security lines are hidden for funds whose sources do not allow "
+            f"redistribution (D79): {', '.join(hidden)}."
+        )
+
+    st.subheader("Overlap shifts")
+    shifts = weekly.overlap_table(document)
+    if shifts.is_empty():
+        st.caption("No fund pair moved its overlap by the reporting threshold this week.")
+    else:
+        st.dataframe(shifts, width="stretch", hide_index=True)
+
+    st.caption(weekly.quality_label(document))
+
+
 def render_overlap(con: duckdb.DuckDBPyConnection, funds: list[str], asof: date) -> None:
     """Pairwise overlap between two chosen funds and their common holdings."""
     left, right = st.columns(2)
@@ -303,7 +389,7 @@ def render_heatmap(con: duckdb.DuckDBPyConnection, funds: list[str], asof: date)
     st.altair_chart(heatmap_chart(matrix), width="stretch")
 
 
-def render(con: duckdb.DuckDBPyConnection, *, demo_mode: bool = False) -> None:
+def render(con: duckdb.DuckDBPyConnection, *, db_file: Path, demo_mode: bool = False) -> None:
     """Render the whole dashboard against an open read-only connection."""
     try:
         funds = analytics.funds_available(con)
@@ -329,9 +415,13 @@ def render(con: duckdb.DuckDBPyConnection, *, demo_mode: bool = False) -> None:
         else:
             st.caption(f"Database: {db_path()}")
 
-    fund_tab, overlap_tab, heatmap_tab = st.tabs(["Fund", "Overlap", "Heatmap"])
+    fund_tab, week_tab, overlap_tab, heatmap_tab = st.tabs(
+        ["Fund", "This week", "Overlap", "Heatmap"]
+    )
     with fund_tab:
         render_fund(con, fund, asof)
+    with week_tab:
+        render_week(db_file, asof, demo_mode=demo_mode)
     with overlap_tab:
         render_overlap(con, funds, asof)
     with heatmap_tab:
@@ -376,7 +466,7 @@ def main(*, force_demo: bool = False) -> None:
         st.stop()
 
     try:
-        render(con, demo_mode=demo_mode)
+        render(con, demo_mode=demo_mode, db_file=path)
     finally:
         con.close()
 

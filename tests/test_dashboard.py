@@ -258,7 +258,7 @@ def test_apptest_against_real_synthetic_build(monkeypatch, synthetic_db) -> None
     metrics = {metric.label: metric.value for metric in app.metric}
     assert metrics["Overlap"] == f"{float(expected['overlap']):.2%}"
 
-    common = list(app.dataframe)[2].value
+    common = next(frame.value for frame in app.dataframe if "weight_a" in frame.value.columns)
     rows = sorted(common.to_dict("records"), key=lambda row: row["security_id"])
     wanted = sorted(expected["common"], key=lambda row: row["security_id"])
     assert len(rows) == int(expected["common_count"])
