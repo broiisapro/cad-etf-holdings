@@ -211,6 +211,41 @@ def test_a_database_ending_on_a_friday_uses_that_friday(friday_build: Path, tmp_
     ]
 
 
+def test_weeks_two_from_the_database_default(synthetic_build: Path, tmp_path: Path) -> None:
+    """``--weeks 2`` counts back from the default week end, skipping empty weeks."""
+    out = tmp_path / "two-weeks-default"
+    result = _run("--db", str(synthetic_build), "--out", str(out), "--weeks", "2")
+    assert result.exit_code == 0, result.output
+    assert (
+        f"newest portfolio date {NEWEST_PORTFOLIO_DATE.isoformat()} "
+        f"→ week ending {DEFAULT_WEEK_END.isoformat()}" in result.output
+    )
+    assert (
+        f"skipped week ending {DEFAULT_PREVIOUS_WEEK_END.isoformat()}: "
+        "no comparable portfolio" in result.output
+    )
+    pages = sorted(path.name for path in (out / "weeks").glob("*.html"))
+    assert pages == [f"{DEFAULT_WEEK_END.isoformat()}.html"]
+    assert (out / "data" / f"{DEFAULT_WEEK_END.isoformat()}.json").is_file()
+    assert not (out / "data" / f"{DEFAULT_PREVIOUS_WEEK_END.isoformat()}.json").exists()
+
+
+def test_explicit_week_end_is_used_unchanged(synthetic_build: Path, tmp_path: Path) -> None:
+    """An explicit ``--week-end`` still wins and does not consult the database."""
+    out = tmp_path / "explicit"
+    result = _run(
+        "--db",
+        str(synthetic_build),
+        "--out",
+        str(out),
+        "--week-end",
+        NEWEST_PORTFOLIO_DATE.isoformat(),
+    )
+    assert result.exit_code == 0, result.output
+    assert "newest portfolio date" not in result.output
+    assert (out / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").is_file()
+
+
 def test_the_published_json_is_the_validated_document(tmp_path: Path) -> None:
     out = tmp_path / "site"
     result = _run(
