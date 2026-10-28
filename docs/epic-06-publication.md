@@ -110,9 +110,9 @@ disclosures have settled, and on demand. It is skipped entirely unless
    `environment: github-pages`): `actions/deploy-pages` publishes the artifact
    and reports the page URL.
 
-Repository variables and secrets (all unset today) are listed under Interfaces.
-The workflow is the only writer of the published site; the dashboard and the
-CLI never publish.
+The repository variables and secrets are listed under Interfaces (all unset
+today). Only this workflow deploys the site; the dashboard and the CLI never
+publish.
 
 ### Large-addition events
 
@@ -182,9 +182,10 @@ model="market_adjusted", bootstrap=2000, seed=7)`.
   event.
 - **Returns.** Simple daily returns of adjusted closes. `market_adjusted` uses
   `AR = r − r_benchmark`; `market_model` estimates OLS α/β over `[-120, -11]`
-  (at least 60 usable days, and a zero-variance benchmark is refused) and uses
-  `AR = r − (α + β r_benchmark)`. The estimation window must end before the
-  event window starts, so the two never overlap.
+  (at least 60 usable days) and uses `AR = r − (α + β r_benchmark)`; a
+  zero-variance benchmark over that window is a counted `short_estimation`. The
+  estimation window must end before the event window starts, so the two never
+  overlap.
 - **CARs.** `[-1,1]`, `[0,1]`, `[0,5]` and `[-5,5]`, reported only when each
   fits inside the requested window (never clipped), with the cross-sectional
   mean, a t-statistic from the cross-sectional standard error and a percentile
@@ -365,9 +366,9 @@ All names below match the merged code.
   long history for many symbols needs days or a paid plan; the budget refuses
   before a limit is crossed rather than silently truncating.
 - **There is no historical daily holdings panel.** Events exist only for
-  portfolio dates the collection has seen (dense since late September 2026 plus
-  the quarterly disclosures). Daily backfill is not implemented, so an event
-  study over years is not possible yet.
+  portfolio dates the collection has seen: a few weeks of daily files
+  (September–October 2026) plus the quarterly disclosures. Daily backfill is not
+  implemented, so an event study over years is not possible yet.
 - **Real publication is not enabled.** `ETFH_PAGES` is unset, so no Pages build
   runs; `ETFH_PAGES_REAL` is unset and would additionally need the private data
   checkout, the deploy-key secret and the maintainer's go-ahead. The first

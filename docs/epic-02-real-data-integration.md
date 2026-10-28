@@ -203,7 +203,7 @@ to composite FIGI ids and leaves 764 unmatched rows and 61 name proposals.
 warnings; 70 metrics inputs, 70 included, 33 funds, no findings. The 51
 warnings are weight-sum findings (37) and quarterly stated-total deltas (14);
 the parser notes are separate `info` rows. The daily file that previously
-failed the sum-to-1 check (a partial list summing to 1.0051) is now admitted as
+failed the sum-to-1 check (a partial list summing to 1.0064) is now admitted as
 `partial` under D80a with its published weights unchanged.
 
 **Unmatched weight share per issuer** (sum of unmatched over sum of security
