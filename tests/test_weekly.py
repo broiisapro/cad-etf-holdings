@@ -164,6 +164,53 @@ def test_index_has_one_changes_row_per_synthetic_fund_with_data(
         assert (out / relative).is_file(), relative
 
 
+def test_prd_command_without_week_end_follows_the_database(
+    synthetic_build: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal PRD command: no ``--week-end``, run outside the checkout.
+
+    ``etfh weekly --db ./build/etfh.duckdb --out site/`` is the acceptance
+    command from the PRD's Phase 3. It is run here from a scratch directory, as
+    a user would, with "today" frozen far away: the week end must still come
+    from the newest daily portfolio in the database.
+    """
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+
+    result = _run("--db", str(synthetic_build), "--out", "site")
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"newest portfolio date {NEWEST_PORTFOLIO_DATE.isoformat()} "
+        f"→ week ending {DEFAULT_WEEK_END.isoformat()}" in result.output
+    )
+    index = scratch / "site" / "index.html"
+    assert index.is_file()
+    assert _changes_funds(index.read_text(encoding="utf-8")) == ["SYNA", "SYNB", "SYNE"]
+    # The newest week is the Friday, not the newest as-of date (a Tuesday).
+    assert (scratch / "site" / "data" / f"{DEFAULT_WEEK_END.isoformat()}.json").is_file()
+    assert not (scratch / "site" / "data" / f"{NEWEST_PORTFOLIO_DATE.isoformat()}.json").exists()
+
+
+def test_a_database_ending_on_a_friday_uses_that_friday(friday_build: Path, tmp_path: Path) -> None:
+    """When the newest portfolio date is a Friday it is the week end itself."""
+    out = tmp_path / "friday-site"
+    result = _run("--db", str(friday_build), "--out", str(out))
+    assert result.exit_code == 0, result.output
+    assert (
+        f"newest portfolio date {DEFAULT_WEEK_END.isoformat()} "
+        f"→ week ending {DEFAULT_WEEK_END.isoformat()}" in result.output
+    )
+    assert (out / "data" / f"{DEFAULT_WEEK_END.isoformat()}.json").is_file()
+    assert (out / "weeks" / f"{DEFAULT_WEEK_END.isoformat()}.html").is_file()
+    assert _changes_funds((out / "index.html").read_text(encoding="utf-8")) == [
+        "SYNA",
+        "SYNB",
+        "SYNE",
+    ]
+
+
 def test_the_published_json_is_the_validated_document(tmp_path: Path) -> None:
     out = tmp_path / "site"
     result = _run(
