@@ -635,7 +635,16 @@ def weekly(
         bool,
         typer.Option("--demo", help="build the committed synthetic store and ignore --db"),
     ] = False,
-    config: Annotated[Path, typer.Option("--config", help="config directory")] = Path("config"),
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help=(
+                "config directory (default: ./config, or the repository's config "
+                "when the command runs outside the checkout)"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Build the weekly digest documents and render the static site (FR-3.1).
 
@@ -664,15 +673,16 @@ def weekly(
     if weeks < 1:
         typer.echo("error: --weeks must be at least 1", err=True)
         raise typer.Exit(code=2)
-    sources = load_sources(config / "sources.yaml")
-    funds = load_funds(config / "funds.csv", sources)
+    config_dir = _weekly_config_dir(config)
+    sources = load_sources(config_dir / "sources.yaml")
+    funds = load_funds(config_dir / "funds.csv", sources)
 
     demo_database = None
     if demo:
         from etfh.dashboard.demo import build_demo_database
 
         try:
-            demo_database = build_demo_database(config_dir=config)
+            demo_database = build_demo_database(config_dir=config_dir)
         except Exception as error:
             typer.echo(f"error: {error}", err=True)
             raise typer.Exit(code=2) from None
@@ -1209,6 +1219,27 @@ def _synthetic_latest_asof(con: duckdb.DuckDBPyConnection) -> date | None:
         return None
     latest: date = row[0]
     return latest
+
+
+def _weekly_config_dir(config: Path | None) -> Path:
+    """The config directory ``weekly`` reads.
+
+    An explicit ``--config`` is used as given. Without it, ``./config`` wins
+    when it holds the registry; otherwise the repository checkout that contains
+    this package is used. That second case keeps the PRD acceptance command
+    (D91) working when it is run from a scratch build directory
+    (``etfh weekly --db ./build/etfh.duckdb --out site/``), which must not
+    depend on the caller standing in the checkout.
+    """
+    if config is not None:
+        return config
+    local = Path("config")
+    if (local / "sources.yaml").is_file():
+        return local
+    repository = Path(__file__).resolve().parent.parent / "config"
+    if (repository / "sources.yaml").is_file():
+        return repository
+    return local
 
 
 def _newest_daily_portfolio_date(con: duckdb.DuckDBPyConnection) -> date | None:
