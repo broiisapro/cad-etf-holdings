@@ -862,7 +862,8 @@ def _percentile(sorted_values: list[float], quantile: float) -> float:
 def _round(value: float | None) -> float | None:
     if value is None:
         return None
-    return round(value, 6)
+    rounded = round(value, 6)
+    return 0.0 if rounded == 0 else rounded
 
 
 def _summary(
