@@ -699,3 +699,77 @@ def test_reports_and_result_counts_match_the_tables(
     assert result.n_included_files + result.n_excluded_files == result.n_file_versions
     assert result.db_path == out_dir / "etfh.duckdb"
     assert result.db_path.is_file()
+
+
+def test_a_price_response_is_not_a_dataset_input(tmp_path: Path) -> None:
+    """A ``tiingo_prices`` file is diverted before the fund lookup (D78/D84).
+
+    Prices share the raw store with holdings, and a price file is keyed by its
+    ticker symbol rather than a fund, so the undiverted build reported it as an
+    ``unknown_fund`` **error**. It must leave no trace in the tables at all: no
+    ``file_versions`` row, no ``qa_events`` row, no holdings and no metrics.
+    """
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        b'[{"date":"2026-10-23T00:00:00.000Z","close":100.0,"adjClose":99.5}]',
+        source_id="tiingo_prices",
+        issuer="tiingo",
+        fund_ticker="AAPL",
+        url=(
+            "https://api.tiingo.com/tiingo/daily/AAPL/prices"
+            "?startDate=2026-10-19&endDate=2026-10-23&format=json"
+        ),
+        fetched_at=datetime(2026, 10, 24, 12, tzinfo=UTC),
+        ext="json",
+        content_type="application/json",
+        http_status=200,
+        as_of_hint=date(2026, 10, 23),
+    )
+    # A holdings file beside it proves the diversion does not skip the rest of
+    # the store.
+    RawStore(raw_root).write(
+        _SYNA_2026_10_29.read_bytes(),
+        source_id="syn_csv",
+        issuer="synthetic",
+        fund_ticker="SYNA",
+        url="synthetic://fixtures/SYNA.csv",
+        fetched_at=datetime(2026, 10, 29, 22, tzinfo=UTC),
+        ext="csv",
+        as_of_hint=date(2026, 10, 29),
+    )
+    out_dir = tmp_path / "out"
+    result = build(raw_root, out_dir, config_dir=CONFIG_DIR)
+    assert result.n_file_versions == 1
+    assert result.n_included_files == 1
+    assert result.n_excluded_files == 0
+    assert result.n_qa_events == 0
+    assert result.n_holdings > 0
+    assert result.n_fund_metrics == 0
+    assert _query(out_dir, "SELECT source_id FROM file_versions").to_series().to_list() == [
+        "syn_csv"
+    ]
+    assert _query(out_dir, "SELECT count(*) AS n FROM qa_events")["n"][0] == 0
+
+
+def test_a_store_of_only_price_files_builds_an_empty_dataset(tmp_path: Path) -> None:
+    """No price file ever becomes an excluded file with an error event."""
+    raw_root = tmp_path / "raw"
+    RawStore(raw_root).write(
+        b'[{"date":"2026-10-23T00:00:00.000Z","close":100.0,"adjClose":99.5}]',
+        source_id="tiingo_prices",
+        issuer="tiingo",
+        fund_ticker="SPY",
+        url=(
+            "https://api.tiingo.com/tiingo/daily/SPY/prices"
+            "?startDate=2026-10-19&endDate=2026-10-23&format=json"
+        ),
+        fetched_at=datetime(2026, 10, 24, 12, tzinfo=UTC),
+        ext="json",
+        content_type="application/json",
+        http_status=200,
+        as_of_hint=date(2026, 10, 23),
+    )
+    out_dir = tmp_path / "only-prices"
+    result = build(raw_root, out_dir, config_dir=CONFIG_DIR)
+    assert (result.n_file_versions, result.n_qa_events, result.n_holdings) == (0, 0, 0)
+    assert result.n_included_files == result.n_excluded_files == 0
