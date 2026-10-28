@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -151,8 +151,14 @@ class PoliteClient:
         source: Source,
         etag: str | None = None,
         last_modified: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        """GET ``url`` for ``source``, applying the gate and politeness rules."""
+        """GET ``url`` for ``source``, applying the gate and politeness rules.
+
+        ``headers`` adds request headers for APIs that authenticate by header
+        (e.g. ``Authorization``). The ``User-Agent`` is owned by this client
+        and cannot be overridden, so the polite identity is never spoofed.
+        """
         require_collectable(source)
         parts = urlsplit(url)
         if not parts.scheme or not parts.netloc:
@@ -167,15 +173,19 @@ class PoliteClient:
             policy.crawl_delay(self._user_agent) or 0.0,
             source.terms.min_interval_seconds or 0.0,
         )
-        headers = {"User-Agent": self._user_agent}
+        request_headers = {"User-Agent": self._user_agent}
+        for name, value in (headers or {}).items():
+            if name.lower() == "user-agent":
+                raise ValueError("extra request headers may not override the User-Agent")
+            request_headers[name] = value
         if etag is not None:
-            headers["If-None-Match"] = etag
+            request_headers["If-None-Match"] = etag
         if last_modified is not None:
-            headers["If-Modified-Since"] = last_modified
+            request_headers["If-Modified-Since"] = last_modified
 
         def attempt() -> httpx.Response:
             self._throttle(host, interval)
-            response = self._client.get(url, headers=headers)
+            response = self._client.get(url, headers=request_headers)
             if response.status_code == 429 or response.status_code >= 500:
                 retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                 if retry_after is not None and retry_after > _MAX_RETRY_AFTER_SECONDS:

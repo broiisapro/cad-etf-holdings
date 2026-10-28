@@ -483,3 +483,38 @@ def test_gate_rechecked_inside_get(
     with pytest.raises(TermsNotAllowedError):
         client.get("https://a.example.com/holdings.csv", source=source)
     assert requests == []
+
+
+def test_extra_request_headers_are_sent_alongside_the_user_agent(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["user-agent"] = request.headers.get("User-Agent")
+        return httpx.Response(200, text="data")
+
+    source = source_factory()
+    client = _client(handler, fake_clock)
+    client.get(
+        "https://api.example.com/prices",
+        source=source,
+        headers={"Authorization": "Token sentinel"},
+    )
+    assert seen["authorization"] == "Token sentinel"
+    assert seen["user-agent"] == USER_AGENT
+
+
+def test_extra_request_headers_cannot_spoof_the_user_agent(
+    fake_clock: FakeClock, source_factory: Callable[..., Source]
+) -> None:
+    client = _client(_handler({"/prices": httpx.Response(200, text="data")}), fake_clock)
+    with pytest.raises(ValueError, match="User-Agent"):
+        client.get(
+            "https://a.example.com/prices",
+            source=source_factory(),
+            headers={"user-agent": "someone else"},
+        )
