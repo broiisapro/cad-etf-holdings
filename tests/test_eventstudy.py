@@ -245,3 +245,59 @@ def test_market_model_requires_benchmark_variation() -> None:
     )
     assert result.summary["n_used"] == 0
     assert result.summary["skipped"]["short_estimation"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Event dating and duplicate handling
+# --------------------------------------------------------------------------- #
+
+
+def test_day_zero_is_the_first_trading_day_on_or_after_known_date() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    price_index = 150
+    saturday = date(2026, 8, 8)
+    assert saturday.weekday() == 5
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "AAA": (days, _symbol_path(days, benchmark_returns, shocks={price_index: 0.02})),
+        }
+    )
+    result = run_event_study(
+        _events(_event("FNDA", "ISIN:AAA", saturday)),
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:AAA": "AAA"}),
+    )
+    assert result.summary["n_used"] == 1
+    assert result.per_event.row(0, named=True)["event_day"] == date(2026, 8, 10)
+
+
+def test_duplicate_symbol_and_day_count_once_and_keep_the_first_fund() -> None:
+    days = _days()
+    benchmark_returns, benchmark_closes = _flat_benchmark(days)
+    index = 150
+    known = days[index]
+    path = _symbol_path(days, benchmark_returns, shocks={index: 0.02})
+    frame = _prices(
+        {
+            "SPY": (days, benchmark_closes),
+            "AAA": (days, path),
+            "BBB": (days, _symbol_path(days, benchmark_returns, shocks={index: 0.01})),
+        }
+    )
+    events = _events(
+        _event("FNDB", "ISIN:SAME", known),
+        _event("FNDA", "ISIN:SAME", known),
+        _event("FNDC", "ISIN:OTHER", known),
+    )
+    result = run_event_study(
+        events,
+        FakePrices(frame),
+        symbol_for=_mapper({"ISIN:SAME": "AAA", "ISIN:OTHER": "BBB"}),
+    )
+    assert result.summary["n_events"] == 3
+    assert result.summary["n_used"] == 2
+    assert result.summary["skipped"]["duplicate"] == 1
+    assert result.per_event["fund_ticker"].to_list() == ["FNDA", "FNDC"]
+    assert "duplicate" in result.summary["notes"][0]
