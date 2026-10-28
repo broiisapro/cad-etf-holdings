@@ -15,16 +15,23 @@ outside the collector which wrote it:
     already holds different bytes is reported as a conflict and never
     overwritten. Files are staged next to their destination and renamed into
     place, so an interrupted copy cannot leave a partial file.
+
+Both functions take the store root explicitly; neither touches the repository's
+``raw/`` directory on its own. ``python -m etfh.rawcheck`` is the command line
+for the collector workflow until ``etfh verify-raw`` / ``etfh sync-raw`` wire
+these functions into the CLI.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 import re
 import shutil
+import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -37,6 +44,7 @@ __all__ = [
     "RawCheckReport",
     "RawProblem",
     "SyncReport",
+    "main",
     "sync_raw_store",
     "verify_raw_store",
 ]
@@ -429,3 +437,58 @@ def sync_raw_store(src: Path, dst: Path, *, dry_run: bool = False) -> SyncReport
         copied.append(relative)
 
     return SyncReport(copied=tuple(copied), identical=identical, conflicts=tuple(conflicts))
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m etfh.rawcheck",
+        description="Verify a raw store against its sidecars and sync one store into another.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    verify = subparsers.add_parser("verify", help="check every file against its sidecar")
+    verify.add_argument("root", type=Path, help="raw store root")
+
+    sync = subparsers.add_parser("sync", help="copy missing pairs into another store")
+    sync.add_argument("src", type=Path, help="source raw store root")
+    sync.add_argument("dst", type=Path, help="destination raw store root")
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be copied without writing anything",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the module command line and return its exit status (0 ok, else 1)."""
+    args = _build_parser().parse_args(argv)
+    if args.command == "verify":
+        try:
+            report = verify_raw_store(args.root)
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        problems = len(report.problems)
+        print(f"verify {args.root}: {report.files_checked} file(s) checked, {problems} problem(s)")
+        for problem in report.problems:
+            print(f"{problem.kind}: {problem.path}: {problem.detail}")
+        return 0 if report.ok else 1
+
+    try:
+        sync_report = sync_raw_store(args.src, args.dst, dry_run=args.dry_run)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    suffix = " (dry run)" if args.dry_run else ""
+    print(
+        f"sync {args.src} -> {args.dst}{suffix}: {len(sync_report.copied)} copied, "
+        f"{sync_report.identical} identical, {len(sync_report.conflicts)} conflict(s)"
+    )
+    for path in sync_report.conflicts:
+        print(f"conflict: {path}: destination holds different bytes; left untouched")
+    return 0 if sync_report.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
