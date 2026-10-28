@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import random
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
+import duckdb
 import polars as pl
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
+from etfh.build import build
 from etfh.events import EVENT_COLUMNS, large_additions
 
 from ._events_helpers import (
@@ -24,6 +30,9 @@ from ._events_helpers import (
     portfolio,
 )
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+RAW_SYNTHETIC = FIXTURES / "raw_synthetic"
+
 _EXPECTED_SCHEMA = {
     "fund_ticker": pl.String,
     "security_id": pl.String,
@@ -38,6 +47,7 @@ _EXPECTED_SCHEMA = {
     "delta": pl.Float64,
     "source_kind": pl.String,
 }
+
 
 # --------------------------------------------------------------------------- #
 # Add, increase and thresholds
@@ -533,3 +543,94 @@ def test_result_is_sorted_and_typed() -> None:
     ticker_row = events.filter(pl.col("security_id") == "ISIN:B").row(0, named=True)
     assert ticker_row["security_ticker"] == "B"
     assert ticker_row["exchange"] == "XTSE"
+
+
+# --------------------------------------------------------------------------- #
+# Hypothesis: the event set does not depend on input row order
+# --------------------------------------------------------------------------- #
+
+
+def _order_fixture() -> list[dict[str, object]]:
+    return [
+        portfolio("XFUND", D0, K0, [holding("ISIN:A", 0.6), holding("ISIN:B", 0.4)]),
+        portfolio(
+            "XFUND",
+            D1,
+            K1,
+            [
+                holding("ISIN:A", 0.5),
+                holding("ISIN:C", 0.2),
+                holding("ISIN:B", 0.2),
+                holding("ISIN:D", 0.05),
+                holding("CASH:CAD", 0.05, asset_class="cash"),
+            ],
+        ),
+        portfolio(
+            "XFUND",
+            D1,
+            K3,
+            [holding("ISIN:A", 0.55), holding("ISIN:C", 0.2), holding("ISIN:D", 0.1)],
+            file_version=2,
+        ),
+        portfolio("YFUND", D0, K0, [holding("ISIN:A", 1.0)]),
+        portfolio(
+            "YFUND",
+            D2,
+            K2,
+            [holding("ISIN:A", 0.7), holding("ISIN:E", 0.3)],
+        ),
+        portfolio(
+            "YFUND",
+            Q2,
+            datetime(2026, 10, 1, 15, 0, tzinfo=UTC),
+            [holding("ISIN:E", 0.2)],
+            source_id="quarterly",
+        ),
+    ]
+
+
+@given(seed=st.integers(min_value=0, max_value=10_000))
+@settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_events_are_invariant_to_input_row_order(seed: int) -> None:
+    baseline = _order_fixture()
+    con = make_con(baseline)
+    try:
+        expected = large_additions(con, include_quarterly=True)
+    finally:
+        con.close()
+
+    rng = random.Random(seed)
+    shuffled = _order_fixture()
+    rng.shuffle(shuffled)
+    for item in shuffled:
+        rng.shuffle(item["rows"])
+    con = make_con(shuffled)
+    try:
+        actual = large_additions(con, include_quarterly=True)
+    finally:
+        con.close()
+
+    assert actual.equals(expected)
+
+
+# --------------------------------------------------------------------------- #
+# Committed synthetic build
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def synthetic_events(tmp_path_factory: pytest.TempPathFactory) -> pl.DataFrame:
+    out_dir = tmp_path_factory.mktemp("events-synthetic")
+    result = build(RAW_SYNTHETIC, out_dir)
+    con = duckdb.connect(str(result.db_path), read_only=True)
+    try:
+        return large_additions(con)
+    finally:
+        con.close()
+
+
+def test_synthetic_build_event_count(synthetic_events: pl.DataFrame) -> None:
+    """Recorded count from the committed synthetic build (update deliberately)."""
+    assert synthetic_events.height == 39
+    assert synthetic_events.schema == _EXPECTED_SCHEMA
+    assert set(synthetic_events["event_type"].to_list()) <= {"add", "increase"}
