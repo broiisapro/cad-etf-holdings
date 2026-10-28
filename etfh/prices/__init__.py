@@ -11,11 +11,15 @@ protocol; this package implements it without importing that module.
 
 from __future__ import annotations
 
+from etfh.prices.budget import BudgetExceededError, PriceBudget, PriceBudgetUsage
 from etfh.prices.frames import CLOSE_SCHEMA, closes_frame
 from etfh.prices.symbols import symbol_for
 
 __all__ = [
     "CLOSE_SCHEMA",
+    "BudgetExceededError",
+    "PriceBudget",
+    "PriceBudgetUsage",
     "closes_frame",
     "symbol_for",
 ]
