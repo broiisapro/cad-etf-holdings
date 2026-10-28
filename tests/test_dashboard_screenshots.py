@@ -12,7 +12,7 @@ from pathlib import Path
 from tests._dashboard_helpers import REPO_ROOT
 
 IMAGE_DIR = REPO_ROOT / "docs" / "img"
-IMAGES = ("fund.png", "heatmap.png", "overlap.png")
+IMAGES = ("fund.png", "heatmap.png", "overlap.png", "week.png")
 MAX_BYTES = 400 * 1024
 SCRIPT = REPO_ROOT / "scripts" / "make_screenshots.py"
 
@@ -37,3 +37,11 @@ def test_screenshot_script_runs_the_synthetic_demo() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert 'environment["ETFH_DEMO"] = "1"' in source
     assert 'environment.pop("ETFH_DB", None)' in source
+    assert 'out_dir / "week.png"' in source
+    assert '"This week"' in source
+
+
+def test_readme_references_the_week_tab_screenshot() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "docs/img/week.png" in readme
+    assert "four tabs" in readme
