@@ -1,9 +1,11 @@
 # Epic 02 — Real-data integration
 
-**Status: draft — pending the 5-day scheduled-collection check (D50).** Epic 1
-closed with a live `collect → build → qa` that exits 0, but most real holdings
-could not be identified, so cross-issuer overlap was close to zero. This epic
-makes real data usable before the scheduled run proves itself.
+**Status: complete (2026-10-28).** Epic 1 closed with a live `collect → build
+→ qa` that exits 0, but most real holdings could not be identified, so
+cross-issuer overlap was close to zero. This epic made real data usable. It
+closes on the five-day scheduled-collection criterion (D50): the daily issuers
+collected on five calendar days and the fresh-clone DoD passes (D83). Tag
+`epic-02-complete` at `6fcb898`.
 
 ## Goal
 
@@ -170,27 +172,87 @@ The tables above are a 2026-10-21 dry run against a temporary config copy. The
 357 exact-name overrides were approved on 2026-10-22 and are now committed;
 the next live build applies them for real.
 
-## Final numbers
+## Final numbers (2026-10-28)
 
-_Filled at Epic 2 close._ Regenerate this section from the live build with the
-committed overrides after the five-day scheduled-collection check (D50)
-completes: file counts per source, included/excluded files, holdings rows, FIGI
-ids (with `--openfigi`), unmatched rows and weight share per issuer, and the
-representative overlap pairs.
+Fresh build of the live raw store from the main checkout (read-only; output
+under `/tmp`, nothing committed), with the committed overrides and the cache
+described below. These are counts and shares only.
+
+**Collection.** Five local collection days: 2026-10-21, 10-23, 10-24, 10-26 and
+10-27 (America/Toronto). `bmo_daily` and `purpose_daily` have files from all
+five; `evolve_daily` from three (10-21, 10-23, 10-27). `purpose_daily` also
+served a 2026-09-30 file, and the quarterly disclosures in the store are all
+2026-03-31 (Purpose one earlier quarter-end).
+
+**Raw store and versions.** 202 data files with 202 sidecars:
+`bmo` 93, `purpose` 61, `evolve` 30, `vanguard_ca` 10, `globalx_ca` 8.
+`etfh verify-raw` checks all 202 pairs with no problem. The build turns them into
+1,672 `file_versions` rows — 202 distinct paths, because each of the 49 Purpose
+NAV files yields ~30 fund/date series for `purpose_metrics` — split as
+`bmo_daily` 78, `purpose_daily` 49, `evolve_daily` 18, `purpose_qpd` 12,
+`vanguard_ca_qpd` 10, `globalx_ca_qpd` 8, `evolve_qpd` 6, `bmo_metrics` 15,
+`evolve_metrics` 6 and `purpose_metrics` 1,470.
+
+**Build.** 1,672 versions, **all 1,672 included, 0 excluded**; 32,120 holdings
+rows; 1,491 `fund_metrics` rows (33 funds with metrics); 2,351 change rows;
+179 QA events; 3,113 unmatched rows and 584 name proposals in the default build.
+The same store built with `--openfigi` (cached lookups only) resolves 17,309 rows
+to composite FIGI ids and leaves 764 unmatched rows and 61 name proposals.
+
+**QA.** `etfh qa` exits 0: 181 holdings files, 181 included, 0 excluded, 51
+warnings; 70 metrics inputs, 70 included, 33 funds, no findings. The 51
+warnings are weight-sum findings (37) and quarterly stated-total deltas (14);
+the parser notes are separate `info` rows. The daily file that previously
+failed the sum-to-1 check (a partial list summing to 1.0064) is now admitted as
+`partial` under D80a with its published weights unchanged.
+
+**Unmatched weight share per issuer** (sum of unmatched over sum of security
+weight across each issuer's latest included versions; per-file median in
+brackets):
+
+| issuer | kind | default build | `--openfigi` |
+|---|---|---|---|
+| bmo | daily | 0.01% (0.00%) | 0.01% (0.00%) |
+| evolve | daily | 85.86% (99.47%) | 0.08% (0.00%) |
+| purpose | daily | 22.88% (9.26%) | 22.88% (9.26%) |
+| evolve | quarterly | 34.67% (38.47%) | 34.67% (38.47%) |
+| globalx_ca | quarterly | 55.25% (6.80%) | 55.25% (6.80%) |
+| purpose | quarterly | 52.97% (55.47%) | 52.97% (55.47%) |
+| vanguard_ca | quarterly | 36.77% (8.54%) | 36.77% (8.54%) |
+
+The Evolve daily difference is the documented mode difference: its files carry a
+Bloomberg country-composite code, which is not an exchange MIC, so without
+`--openfigi` those rows resolve only through reviewed names (D57). The remaining
+daily gap is Purpose name-only bond, income and bullion funds; the quarterly
+gap is top-holdings lists whose names carry coupons, maturities and currencies
+that no approved name override covers.
+
+**Representative cross-issuer overlaps**, as of 2026-10-27 with `--openfigi`:
+
+| pair | issuers | overlap | common holdings |
+|---|---|---|---|
+| PHR / ZRE | Purpose daily / BMO daily | 0.1922 | 7 |
+| ESPX / ZSP | Evolve daily / BMO daily | 0.9309 | 496 |
+| VFV / ZSP | Vanguard QPD / BMO daily | 0.4468 | 24 |
+
+Both quarterly pairs are flagged "top holdings only" by the CLI. These are
+derived aggregates; no security-level line is recorded here.
 
 ## Known limitations
 
-- **The 5-day clock is pending.** Epic 2 closes only after five calendar days of
-  successful scheduled collection (D50); this document stays a draft until then.
-- **Fuzzy proposals are not approved.** The 19 names with several candidate ids
+- **Fuzzy proposals are not approved.** The names with several candidate ids
   (share classes, ADRs, similar issuers) need a human decision; the committed
   overrides cover the `exact` class only.
+- **Name-only issuers stay partly unmatched.** Purpose bond, income and bullion
+  funds, and the quarterly top-holdings lists, keep the shares above by design
+  (D8/D41: no learned links, no automatic name matching).
 - **Quarterly disclosures are top holdings only.** Their unmatched shares stay
   higher than the daily issuers' even after review, and analytics flag them
   `partial`.
-- **BMO quarterly disclosures cannot be verified from this machine** (network),
-  and the OpenFIGI client needs network on a cold cache (optional API key raises
-  the rate limit).
+- **OpenFIGI is optional and off by default.** Evolve's daily rows resolve to
+  FIGI ids only with `--openfigi`; a cold cache needs network access.
+- **BMO quarterly disclosures could not be exercised from this machine**
+  (network), so the quarterly issuer list has no BMO rows.
 - **Only exact name overrides are committed.** The 357 reviewed names carry a
   reviewer and date in `config/security_overrides.csv`. A reviewed name is
   evidence for every fund and every later build; there is no expiry.
