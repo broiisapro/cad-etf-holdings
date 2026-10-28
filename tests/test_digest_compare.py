@@ -417,3 +417,17 @@ def test_an_empty_universe_is_a_valid_document() -> None:
     assert doc["funds"] == []
     assert doc["overlap_shifts"] == []
     assert doc["quality"]["funds_without_data"] == []
+
+
+def test_a_daily_file_flagged_as_a_partial_list_still_compares() -> None:
+    # D52/D80a: a daily source that publishes only part of its book keeps its
+    # published weights; only quarterly top-holdings lists are kept out.
+    rows = two_snapshot_store()
+    shas = sorted({row["raw_file_sha256"] for row in rows})
+    entry = _entry(
+        build_digest(
+            make_con(rows, partial_shas=shas), DAY, public=False, sources=REGISTRY, funds=TESTA
+        )
+    )
+    assert entry["portfolio_date_end"] == "2026-10-30"
+    assert entry["counts"] == {"adds": 1, "drops": 1, "weight_changes": 2}
