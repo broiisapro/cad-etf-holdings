@@ -144,28 +144,28 @@ def validate_digest(doc: Mapping[str, Any]) -> None:
 
 
 def _fund_entry(entry: object, path: str, *, public: bool) -> str:
-    funds = _mapping(entry, path)
-    _exact_keys(funds, _FUND_KEYS, path)
-    ticker = _text(funds["ticker"], f"{path}.ticker")
-    _text(funds["issuer"], f"{path}.issuer")
-    _text(funds["name"], f"{path}.name")
-    disclosed = _boolean(funds["securities_disclosed"], f"{path}.securities_disclosed")
-    status = _enum(funds["status"], f"{path}.status", FUND_STATUSES)
-    _optional_date(funds["portfolio_date_start"], f"{path}.portfolio_date_start")
-    _optional_date(funds["portfolio_date_end"], f"{path}.portfolio_date_end")
+    fields = _mapping(entry, path)
+    _exact_keys(fields, _FUND_KEYS, path)
+    ticker = _text(fields["ticker"], f"{path}.ticker")
+    _text(fields["issuer"], f"{path}.issuer")
+    _text(fields["name"], f"{path}.name")
+    disclosed = _boolean(fields["securities_disclosed"], f"{path}.securities_disclosed")
+    status = _enum(fields["status"], f"{path}.status", FUND_STATUSES)
+    _optional_date(fields["portfolio_date_start"], f"{path}.portfolio_date_start")
+    _optional_date(fields["portfolio_date_end"], f"{path}.portfolio_date_end")
 
-    counts = _mapping(funds["counts"], f"{path}.counts")
+    counts = _mapping(fields["counts"], f"{path}.counts")
     _exact_keys(counts, _COUNT_KEYS, f"{path}.counts")
     numbers = {key: _integer(counts[key], f"{path}.counts.{key}", minimum=0) for key in _COUNT_KEYS}
 
-    turnover = _number(funds["turnover"], f"{path}.turnover", minimum=0.0)
-    top_start = _number(funds["top10_weight_start"], f"{path}.top10_weight_start")
-    top_end = _number(funds["top10_weight_end"], f"{path}.top10_weight_end")
-    flow_sum = funds["flow_estimate_sum"]
+    turnover = _number(fields["turnover"], f"{path}.turnover", minimum=0.0)
+    top_start = _number(fields["top10_weight_start"], f"{path}.top10_weight_start")
+    top_end = _number(fields["top10_weight_end"], f"{path}.top10_weight_end")
+    flow_sum = fields["flow_estimate_sum"]
     if flow_sum is not None:
         _number(flow_sum, f"{path}.flow_estimate_sum")
-    flow_days = _integer(funds["flow_days"], f"{path}.flow_days", minimum=0)
-    flow_method = _text(funds["flow_method"], f"{path}.flow_method")
+    flow_days = _integer(fields["flow_days"], f"{path}.flow_days", minimum=0)
+    flow_method = _text(fields["flow_method"], f"{path}.flow_method")
     if flow_method != FLOW_METHOD:
         _fail(
             f"{path}.flow_method",
@@ -180,7 +180,7 @@ def _fund_entry(entry: object, path: str, *, public: bool) -> str:
             "must be true in an internal document (public=false; D79)",
         )
 
-    changes = _list(funds["changes"], f"{path}.changes")
+    changes = _list(fields["changes"], f"{path}.changes")
     if not disclosed and changes:
         _fail(
             f"{path}.changes",

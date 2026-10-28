@@ -69,7 +69,7 @@ def build_digest(
     start = week_start(week_end)
     entries: list[dict[str, Any]] = []
     tickers: list[str] = []
-    portable: list[str] = []
+    overlap_funds: list[str] = []
     for fund in universe:
         comparison = compare_week(con, fund.ticker, start, week_end, top_n=top_n)
         if comparison is None:
@@ -101,7 +101,7 @@ def build_digest(
         )
         tickers.append(fund.ticker)
         if comparison.known_at_week_start:
-            portable.append(fund.ticker)
+            overlap_funds.append(fund.ticker)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -111,7 +111,7 @@ def build_digest(
         "public": bool(public),
         "demo": False,
         "funds": entries,
-        "overlap_shifts": _overlap_shifts(con, portable, start, week_end, overlap_threshold),
+        "overlap_shifts": _overlap_shifts(con, overlap_funds, start, week_end, overlap_threshold),
         "quality": _quality(con, universe, set(tickers)),
     }
 
