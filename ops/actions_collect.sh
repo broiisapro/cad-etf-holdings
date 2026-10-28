@@ -77,4 +77,30 @@ BUILD_DIR="$RUNNER_TEMP/build"
 AGGREGATES_DIR="$RUNNER_TEMP/aggregates"
 mkdir -p "$BUILD_DIR" "$AGGREGATES_DIR"
 RAW="$DATA/raw"
-echo "etfh: preflight ok $DATE data=$DATA"
+
+echo "etfh: collect start $DATE data=$DATA $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+uv run etfh collect --date "$DATE" --raw "$RAW"
+uv run etfh collect-aum --date "$DATE" --raw "$RAW"
+uv run python -m etfh.rawcheck verify "$RAW"
+
+# FR-2.3: commit and push before the build and QA. Nothing to commit is fine
+# (a re-run, or a day the issuers have not published yet). The data checkout
+# may be a detached HEAD (actions/checkout of a second repository), so the push
+# names the branch explicitly and falls back to the data repository's default.
+if [ -d "$RAW" ]; then
+    git -C "$DATA" add -- raw
+    if git -C "$DATA" diff --cached --quiet; then
+        echo "etfh: no new raw files for $DATE"
+    else
+        git -C "$DATA" -c user.name="$ETFH_GIT_NAME" -c user.email="$ETFH_GIT_EMAIL" \
+            commit -m "data: collect $DATE"
+        BRANCH="$(git -C "$DATA" rev-parse --abbrev-ref HEAD)"
+        if [ "$BRANCH" = "HEAD" ]; then
+            BRANCH="main"
+        fi
+        git -C "$DATA" push origin "HEAD:$BRANCH"
+        echo "etfh: pushed raw files for $DATE to $BRANCH"
+    fi
+else
+    echo "etfh: no raw directory under $DATA; nothing to commit"
+fi
